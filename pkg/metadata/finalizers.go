@@ -15,6 +15,8 @@
 package metadata
 
 import (
+	"slices"
+
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -56,12 +58,12 @@ func RemoveGraphRevisionFinalizer(obj metav1.Object) {
 
 // HasResourceGraphDefinitionFinalizer checks if the object has the kro finalizer.
 func HasResourceGraphDefinitionFinalizer(obj metav1.Object) bool {
-	return containsString(obj.GetFinalizers(), kroFinalizer)
+	return slices.Contains(obj.GetFinalizers(), kroFinalizer)
 }
 
 // HasGraphRevisionFinalizer checks if the object has the kro finalizer.
 func HasGraphRevisionFinalizer(obj metav1.Object) bool {
-	return containsString(obj.GetFinalizers(), kroFinalizer)
+	return slices.Contains(obj.GetFinalizers(), kroFinalizer)
 }
 
 // SetInstanceFinalizer adds an instance-specific finalizer to an unstructured object.
@@ -83,7 +85,7 @@ func HasInstanceFinalizer(obj client.Object) bool {
 
 // HasGraphFinalizer reports whether obj already carries the Graph finalizer.
 func HasGraphFinalizer(obj metav1.Object) bool {
-	return containsString(obj.GetFinalizers(), GraphFinalizer)
+	return slices.Contains(obj.GetFinalizers(), GraphFinalizer)
 }
 
 // SetGraphFinalizer appends the Graph finalizer if it isn't present.
@@ -100,21 +102,8 @@ func RemoveGraphFinalizer(obj metav1.Object) {
 
 // Helper functions
 
-func containsString(slice []string, s string) bool {
-	for _, item := range slice {
-		if item == s {
-			return true
-		}
-	}
-	return false
-}
-
 func removeString(slice []string, s string) []string {
-	result := make([]string, 0, len(slice))
-	for _, item := range slice {
-		if item != s {
-			result = append(result, item)
-		}
-	}
-	return result
+	return slices.DeleteFunc(slice, func(item string) bool {
+		return item == s
+	})
 }
