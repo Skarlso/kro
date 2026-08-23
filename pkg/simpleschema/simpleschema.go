@@ -15,8 +15,6 @@
 package simpleschema
 
 import (
-	"fmt"
-
 	extv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 )
 
@@ -34,9 +32,4 @@ func ToOpenAPISpec(obj map[string]interface{}, customTypes map[string]interface{
 		return nil, err
 	}
 	return t.buildSchema(obj)
-}
-
-// FromOpenAPISpec converts an OpenAPI schema to a SimpleSchema object.
-func FromOpenAPISpec(schema *extv1.JSONSchemaProps) (map[string]interface{}, error) {
-	return nil, fmt.Errorf("not implemented")
 }

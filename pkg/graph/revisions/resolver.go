@@ -32,16 +32,6 @@ func (r *Registry) ResolverFor(owner OwnerKey) Resolver {
 	return rgdResolver{registry: r, owner: owner}
 }
 
-// ResolverForRGD returns a resolver scoped to a single RGD name.
-//
-// Deprecated: use ResolverFor.
-func (r *Registry) ResolverForRGD(rgdName string) rgdResolver {
-	return rgdResolver{
-		registry: r,
-		owner:    rgdName,
-	}
-}
-
 // GetLatestRevision returns the newest cached revision for this resolver's owner.
 func (r rgdResolver) GetLatestRevision() (Entry, bool) {
 	return r.registry.Latest(r.owner)

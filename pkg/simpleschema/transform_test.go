@@ -1295,16 +1295,6 @@ func TestDefaultPropagation(t *testing.T) {
 	}
 }
 
-func TestFromOpenAPISpec(t *testing.T) {
-	_, err := FromOpenAPISpec(nil)
-	if err == nil {
-		t.Error("FromOpenAPISpec() expected error, got nil")
-	}
-	if err.Error() != "not implemented" {
-		t.Errorf("FromOpenAPISpec() expected 'not implemented' error, got %v", err)
-	}
-}
-
 func TestComplexSchemaE2E(t *testing.T) {
 	types := map[string]interface{}{
 		"RequiredString": "string | required=true",

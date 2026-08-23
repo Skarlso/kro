@@ -197,7 +197,7 @@ func newControllerUnderTest(t *testing.T, raw *dynamicfake.FakeDynamicClient, g 
 			DefaultRequeueDuration: 2 * time.Second,
 		},
 		controllerTestParentGVR,
-		registry.ResolverForRGD(controllerTestParentGVR.Resource),
+		registry.ResolverFor(controllerTestParentGVR.Resource),
 		true,
 		clientSet,
 		metadata.NewKROMetaLabeler(),
