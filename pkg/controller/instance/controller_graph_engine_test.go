@@ -275,7 +275,7 @@ func TestOrphanApplyOrder(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			obj := &unstructured.Unstructured{Object: map[string]interface{}{}}
+			obj := &unstructured.Unstructured{Object: map[string]any{}}
 			if tt.annotations != nil {
 				obj.SetAnnotations(tt.annotations)
 			}
@@ -488,7 +488,7 @@ func TestPersistGraphEngineStatus(t *testing.T) {
 		mark.GraphResolved()
 		mark.ResourcesReady()
 
-		wireStatus := map[string]interface{}{
+		wireStatus := map[string]any{
 			"conditions": conditionsToInterfaceSlice(builtinConditions(inst)),
 			"state":      string(v1alpha1.InstanceStateActive),
 		}
@@ -547,10 +547,10 @@ func TestPersistGraphEngineStatus(t *testing.T) {
 	t.Run("Author conditions incomplete merges with previous", func(t *testing.T) {
 		inst := newInstanceObject("demo", "default")
 		earlier := "2026-01-01T00:00:00Z"
-		wireStatus := map[string]interface{}{
+		wireStatus := map[string]any{
 			"state": string(v1alpha1.InstanceStateInProgress),
-			"conditions": []interface{}{
-				map[string]interface{}{
+			"conditions": []any{
+				map[string]any{
 					"type":               "PriorCond",
 					"status":             "True",
 					"reason":             "Old",
@@ -826,7 +826,7 @@ func TestReconcileViaGraphEngine_StampMetadata(t *testing.T) {
 		watcher := &fakeInstanceWatcher{}
 		err := c.reconcileViaGraphEngine(context.Background(), inst, watcher)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "cannot install finalizer with invalid ApplySet inventory")
+		assert.Contains(t, err.Error(), "cannot install finalizer with invalid applyset inventory")
 	})
 
 	t.Run("Dynamic client error during stampInstanceMetadata is returned", func(t *testing.T) {
@@ -1004,16 +1004,16 @@ func TestReconcileViaGraphEngine_SoftErrors(t *testing.T) {
 
 		// Seed fakeRuntimeClient with a ConfigMap that has DeletionTimestamp set
 		deletingCM := &unstructured.Unstructured{
-			Object: map[string]interface{}{
+			Object: map[string]any{
 				"apiVersion": "v1",
 				"kind":       "ConfigMap",
-				"metadata": map[string]interface{}{
+				"metadata": map[string]any{
 					"name":              "app-config",
 					"namespace":         "default",
 					"deletionTimestamp": time.Now().Format(time.RFC3339),
-					"finalizers":        []interface{}{"kro.run/test"},
+					"finalizers":        []any{"kro.run/test"},
 				},
-				"data": map[string]interface{}{"key": "val"},
+				"data": map[string]any{"key": "val"},
 			},
 		}
 		fakeRuntimeCl := newFakeRuntimeClient(t, deletingCM)

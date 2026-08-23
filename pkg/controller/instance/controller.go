@@ -177,7 +177,7 @@ func (c *Controller) WithGraphEngineCompiler(comp rgdadapter.Compiler) {
 	c.graphEngineCompiler = comp
 }
 
-// Reconcile implements the controller-runtime Reconcile interface.
+// Reconcile implements dynamiccontroller.Handler.
 func (c *Controller) Reconcile(ctx context.Context, req ctrl.Request) (err error) {
 	log := c.log.WithValues("namespace", req.Namespace, "name", req.Name)
 
@@ -214,8 +214,7 @@ func (c *Controller) Reconcile(ctx context.Context, req ctrl.Request) (err error
 		return nil
 	}
 	if err != nil {
-		log.Error(err, "failed loading instance")
-		return err
+		return fmt.Errorf("failed loading instance: %w", err)
 	}
 
 	// Snapshot initial conditions and emit telemetry on every return path.
@@ -279,9 +278,11 @@ func (c *Controller) Reconcile(ctx context.Context, req ctrl.Request) (err error
 // condition-transition events/metrics.
 func (c *Controller) reconcileSuspended(ctx context.Context, inst *unstructured.Unstructured) error {
 	// Keep the instance managed even while suspended so deletion still works.
-	if patched, err := c.stampInstanceMetadata(ctx, inst); err != nil {
+	patched, err := c.stampInstanceMetadata(ctx, inst)
+	if err != nil {
 		return err
-	} else if patched != nil {
+	}
+	if patched != nil {
 		inst.Object = patched.Object
 	}
 
@@ -315,7 +316,7 @@ func (c *Controller) stampInstanceMetadata(ctx context.Context, inst *unstructur
 	if needFinalizer && hasInventoryMetadata {
 		if err := applyset.ValidateParentInventory(inst); err != nil {
 			return nil, fmt.Errorf(
-				"cannot install finalizer with invalid ApplySet inventory: %w", err)
+				"cannot install finalizer with invalid applyset inventory: %w", err)
 		}
 	}
 
@@ -366,6 +367,13 @@ func (c *Controller) stampInstanceMetadata(ctx context.Context, inst *unstructur
 	return patched, nil
 }
 
+var applySetAnnotationKeys = [...]string{
+	applyset.ApplySetToolingAnnotation,
+	applyset.ApplySetGKsAnnotation,
+	applyset.ApplySetAdditionalNamespacesAnnotation,
+	applyset.ApplySetInventoryHashAnnotation,
+}
+
 // hasAnyApplySetInventoryMetadata deliberately detects partial inventory. If
 // any field exists, the caller validates the complete inventory instead of
 // replacing it with an empty one, which could hide and orphan managed members.
@@ -374,12 +382,7 @@ func hasAnyApplySetInventoryMetadata(obj metav1.Object) bool {
 		return true
 	}
 	annotations := obj.GetAnnotations()
-	for _, key := range []string{
-		applyset.ApplySetToolingAnnotation,
-		applyset.ApplySetGKsAnnotation,
-		applyset.ApplySetAdditionalNamespacesAnnotation,
-		applyset.ApplySetInventoryHashAnnotation,
-	} {
+	for _, key := range applySetAnnotationKeys {
 		if _, found := annotations[key]; found {
 			return true
 		}

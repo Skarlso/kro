@@ -20,6 +20,7 @@ import (
 	"github.com/go-logr/logr"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/dynamic"
 
@@ -42,7 +43,7 @@ type DeletionContext struct {
 	Instance *unstructured.Unstructured
 	Config   ReconcileConfig
 
-	WireStatus map[string]interface{}
+	WireStatus map[string]any
 
 	Mark  *ConditionsMarker
 	State v1alpha1.InstanceState
@@ -85,9 +86,12 @@ func (dcx *DeletionContext) rebindInstance(instance *unstructured.Unstructured) 
 }
 
 // captureWireStatus deep-copies the instance's .status subtree.
-func captureWireStatus(instance *unstructured.Unstructured) map[string]interface{} {
-	status, _, _ := unstructured.NestedMap(instance.Object, "status")
-	return status
+func captureWireStatus(instance *unstructured.Unstructured) map[string]any {
+	status, found, _ := unstructured.NestedMap(instance.Object, "status")
+	if !found || status == nil {
+		return nil
+	}
+	return runtime.DeepCopyJSON(status)
 }
 
 func (dcx *DeletionContext) delayedRequeue(err error) error {

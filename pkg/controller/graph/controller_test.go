@@ -310,7 +310,7 @@ func TestReconcile(t *testing.T) {
 			wrapClient: func(c client.Client) client.Client {
 				return &patchErrClient{Client: c, getErr: errors.New("get boom")}
 			},
-			wantErr: "get Graph",
+			wantErr: "get graph",
 		},
 		{
 			name:    "setManaged Patch failure surfaces a wrapped error",

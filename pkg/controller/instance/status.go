@@ -66,27 +66,29 @@ func (u *unstructuredWrapper) GetConditions() []v1alpha1.Condition {
 }
 
 func (u *unstructuredWrapper) SetConditions(conditions []v1alpha1.Condition) {
-	conditionsInterface := make([]interface{}, 0, len(conditions))
+	conditionsInterface := make([]any, 0, len(conditions))
 	for _, c := range conditions {
 		raw, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&c)
 		if err != nil {
-			return // Fail silently - could log this in the future
+			continue
 		}
 		conditionsInterface = append(conditionsInterface, raw)
 	}
-	if err := unstructured.SetNestedSlice(u.Object, conditionsInterface, "status", "conditions"); err != nil {
-		return // Fail silently - could log this in the future
-	}
+	_ = unstructured.SetNestedSlice(u.Object, conditionsInterface, "status", "conditions")
 }
 
 // decodeConditions converts a slice of condition maps into typed conditions,
 // skipping malformed entries.
-func decodeConditions(raw []interface{}) []v1alpha1.Condition {
+func decodeConditions(raw []any) []v1alpha1.Condition {
 	result := make([]v1alpha1.Condition, 0, len(raw))
 	for _, item := range raw {
-		m, ok := item.(map[string]interface{})
+		m, ok := item.(map[string]any)
 		if !ok {
-			continue
+			if mi, okI := item.(map[string]any); okI {
+				m = mi
+			} else {
+				continue
+			}
 		}
 		var c v1alpha1.Condition
 		if err := runtime.DefaultUnstructuredConverter.FromUnstructured(m, &c); err != nil {
@@ -205,7 +207,7 @@ func (c *Controller) persistNodeFreeStatus(
 	ctx context.Context,
 	instanceClient dynamic.ResourceInterface,
 	inst *unstructured.Unstructured,
-	wireStatus map[string]interface{},
+	wireStatus map[string]any,
 	state v1alpha1.InstanceState,
 ) error {
 	previousState, _ := wireStatus["state"].(string)
@@ -227,8 +229,8 @@ func (c *Controller) persistNodeFreeStatus(
 // the normal condition surface.
 func deletionConditions(
 	instance *unstructured.Unstructured,
-	wireStatus map[string]interface{},
-) []interface{} {
+	wireStatus map[string]any,
+) []any {
 	current := make([]v1alpha1.Condition, 0, 1)
 	for _, condition := range builtinConditions(instance) {
 		if condition.Type == v1alpha1.ConditionType(ResourcesReady) {
@@ -237,7 +239,7 @@ func deletionConditions(
 		}
 	}
 
-	previousRaw, _ := wireStatus["conditions"].([]interface{})
+	previousRaw, _ := wireStatus["conditions"].([]any)
 	return conditionsToInterfaceSlice(mergeWithPrevious(current, decodeConditions(previousRaw)))
 }
 
@@ -245,8 +247,8 @@ func (c *Controller) persistStatus(
 	ctx context.Context,
 	client dynamic.ResourceInterface,
 	instance *unstructured.Unstructured,
-	wireStatus map[string]interface{},
-	status map[string]interface{},
+	wireStatus map[string]any,
+	status map[string]any,
 	previousState string,
 ) error {
 
@@ -305,22 +307,22 @@ func (c *Controller) persistStatus(
 func (c *Controller) persistConditionsAndState(
 	ctx context.Context,
 	inst *unstructured.Unstructured,
-	wireStatus map[string]interface{},
-	status map[string]interface{},
+	wireStatus map[string]any,
+	status map[string]any,
 	previousState string,
 ) error {
 	// Mirror conditions/state onto the instance for the deferred emitters,
 	// leaving any author status fields already present untouched.
 	if inst.Object["status"] == nil {
-		inst.Object["status"] = map[string]interface{}{}
+		inst.Object["status"] = map[string]any{}
 	}
-	if s, ok := inst.Object["status"].(map[string]interface{}); ok {
+	if s, ok := inst.Object["status"].(map[string]any); ok {
 		s["conditions"] = status["conditions"]
 		s["state"] = status["state"]
 	}
 
 	// Skip the API write when the wire already carries identical conditions+state.
-	wireCS := map[string]interface{}{
+	wireCS := map[string]any{
 		"conditions": wireStatus["conditions"],
 		"state":      wireStatus["state"],
 	}
@@ -366,7 +368,7 @@ func (c *Controller) persistConditionsAndState(
 // while CEL evaluation yields float64 (a whole 3.0 included), so a
 // DeepEqual would keep reporting a difference that serializes identically.
 // Marshal errors fall through to a write, which the API server no-ops.
-func statusesMatch(wire, computed map[string]interface{}) bool {
+func statusesMatch(wire, computed map[string]any) bool {
 	wireJSON, err := json.Marshal(wire)
 	if err != nil {
 		return false
@@ -407,7 +409,7 @@ func mergeWithPrevious(current, previous []v1alpha1.Condition) []v1alpha1.Condit
 	return current
 }
 
-func initialStatus(instance *unstructured.Unstructured, state v1alpha1.InstanceState) map[string]interface{} {
+func initialStatus(instance *unstructured.Unstructured, state v1alpha1.InstanceState) map[string]any {
 	cs := condSet.For(&unstructuredWrapper{instance})
 
 	// Start fresh - user-defined status fields come solely from current
@@ -416,7 +418,7 @@ func initialStatus(instance *unstructured.Unstructured, state v1alpha1.InstanceS
 	// (e.g. author conditions left over after a conditions: block was
 	// removed) is dropped. State is a plain string to compare equal to the
 	// wire value.
-	status := map[string]interface{}{
+	status := map[string]any{
 		"conditions": conditionsToInterfaceSlice(builtinConditions(instance)),
 	}
 	if cs.IsRootReady() {
@@ -465,9 +467,9 @@ func stampAuthorConditions(
 }
 
 // conditionsToInterfaceSlice converts a typed Condition slice into the
-// []interface{} shape expected by unstructured status writes.
-func conditionsToInterfaceSlice(conds []v1alpha1.Condition) []interface{} {
-	out := make([]interface{}, 0, len(conds))
+// []any shape expected by unstructured status writes.
+func conditionsToInterfaceSlice(conds []v1alpha1.Condition) []any {
+	out := make([]any, 0, len(conds))
 	for _, c := range conds {
 		raw, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&c)
 		if err != nil {

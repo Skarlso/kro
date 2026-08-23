@@ -299,6 +299,9 @@ spec:
                       has(self.patch)].exists_one(x, x)'
                 minItems: 1
                 type: array
+                x-kubernetes-list-map-keys:
+                - id
+                x-kubernetes-list-type: map
             required:
             - nodes
             type: object
@@ -346,6 +349,9 @@ spec:
                   - type
                   type: object
                 type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
               managedResources:
                 description: |-
                   ManagedResources is the authoritative list of cluster resources this

@@ -284,10 +284,6 @@ func (c *Controller) delayedRequeue(err error) error {
 	return requeue.NeededAfter(err, c.reconcileConfig.DefaultRequeueDuration)
 }
 
-// requeueUntilRGDSpecPopulated handles a revision entry with no RGDSpec. There
-// is no engine to run yet, so it requeues until the graphrevision controller
-// reprocesses the revision and populates RGDSpec, at which point the instance
-// reconciles on the next cycle.
 // pruneGate decides whether the ApplySet prune step may run this cycle. Pruning
 // is permitted only when apply had no HARD error (soft ErrNotReady/data-pending
 // is fine) AND every node resolved — an unresolved node means some still-wanted
@@ -298,6 +294,10 @@ func pruneGate(hardErr bool, unresolved []string) bool {
 	return !hardErr && len(unresolved) == 0
 }
 
+// requeueUntilRGDSpecPopulated handles a revision entry with no RGDSpec. There
+// is no engine to run yet, so it requeues until the graphrevision controller
+// reprocesses the revision and populates RGDSpec, at which point the instance
+// reconciles on the next cycle.
 func (c *Controller) requeueUntilRGDSpecPopulated(ctx context.Context, inst *unstructured.Unstructured) error {
 	mark := NewConditionsMarkerFor(inst)
 	mark.GraphResolutionFailed("graph-engine: revision entry has no RGDSpec")
@@ -324,8 +324,6 @@ func (c *Controller) requeueUntilRGDSpecPopulated(ctx context.Context, inst *uns
 // still-wanted members that were merely omitted from Applied this cycle.  Only
 // after a conflict-free prune that actually removed orphans do we shrink the
 // inventory to the exact current set.
-// reconcileApplySetInventory prunes resources that left the desired set and shrinks the
-// inventory annotation to the exact batch of applied resources.
 func (c *Controller) reconcileApplySetInventory(
 	ctx context.Context,
 	log logr.Logger,
@@ -697,24 +695,17 @@ func (c *Controller) persistContributions(ctx context.Context, inst *unstructure
 		return nil
 	}
 
-	var patchData []byte
-	if value == "" {
-		patchData, err = json.Marshal(map[string]interface{}{
-			"metadata": map[string]interface{}{
-				"annotations": map[string]interface{}{
-					metadata.PatchContributionsAnnotation: nil,
-				},
-			},
-		})
-	} else {
-		patchData, err = json.Marshal(map[string]interface{}{
-			"metadata": map[string]interface{}{
-				"annotations": map[string]interface{}{
-					metadata.PatchContributionsAnnotation: value,
-				},
-			},
-		})
+	var annVal any
+	if value != "" {
+		annVal = value
 	}
+	patchData, err := json.Marshal(map[string]any{
+		"metadata": map[string]any{
+			"annotations": map[string]any{
+				metadata.PatchContributionsAnnotation: annVal,
+			},
+		},
+	})
 	if err != nil {
 		return fmt.Errorf("marshal patch contributions patch: %w", err)
 	}

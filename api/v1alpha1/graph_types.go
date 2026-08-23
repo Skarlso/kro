@@ -38,6 +38,8 @@ type GraphSpec struct {
 	//
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinItems=1
+	// +listType=map
+	// +listMapKey=id
 	Nodes []Node `json:"nodes"`
 }
 

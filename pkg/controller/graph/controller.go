@@ -91,7 +91,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		if apierrors.IsNotFound(err) {
 			return ctrl.Result{}, nil
 		}
-		return ctrl.Result{}, fmt.Errorf("get Graph: %w", err)
+		return ctrl.Result{}, fmt.Errorf("get graph: %w", err)
 	}
 
 	if !g.DeletionTimestamp.IsZero() {
@@ -173,7 +173,6 @@ func (r *Reconciler) reconcileGraph(ctx context.Context, g *expv1alpha1.Graph) e
 	prog, cached, err := r.Registry.Compile(key, g, r.Compiler.Compile)
 	if err != nil {
 		marker.GraphInvalid(err.Error())
-		log.FromContext(ctx).Error(err, "compile failed")
 		return err
 	}
 	if cached {
@@ -190,7 +189,6 @@ func (r *Reconciler) reconcileGraph(ctx context.Context, g *expv1alpha1.Graph) e
 	previous := g.Status.ManagedResources
 	priorContribs, err := ReadContributions(g)
 	if err != nil {
-		log.FromContext(ctx).Error(err, "malformed patch-contribution inventory")
 		return fmt.Errorf("read patch contributions: %w", err)
 	}
 
@@ -255,7 +253,9 @@ func (r *Reconciler) reconcileGraph(ctx context.Context, g *expv1alpha1.Graph) e
 		if err := r.persistContributions(ctx, g, UnionContributions(priorContribs, result.Contributions)); err != nil {
 			return errors.Join(fmt.Errorf("apply: %w", applyErr), err)
 		}
-		log.FromContext(ctx).Error(applyErr, "executor apply failed")
+		if !errors.Is(applyErr, executor.ErrNotReady) {
+			log.FromContext(ctx).Error(applyErr, "executor apply failed")
+		}
 		return fmt.Errorf("apply: %w", applyErr)
 	}
 
@@ -280,7 +280,11 @@ func (r *Reconciler) reconcileGraph(ctx context.Context, g *expv1alpha1.Graph) e
 // persistContributions writes the patch-contribution inventory onto the
 // Graph as an annotation, patching only when the value changed. An empty
 // inventory drops the annotation.
-func (r *Reconciler) persistContributions(ctx context.Context, g *expv1alpha1.Graph, contribs []executor.Contribution) error {
+func (r *Reconciler) persistContributions(
+	ctx context.Context,
+	g *expv1alpha1.Graph,
+	contribs []executor.Contribution,
+) error {
 	value, err := MarshalContributions(contribs)
 	if err != nil {
 		return fmt.Errorf("marshal contributions: %w", err)
@@ -288,22 +292,38 @@ func (r *Reconciler) persistContributions(ctx context.Context, g *expv1alpha1.Gr
 	if g.GetAnnotations()[metadata.PatchContributionsAnnotation] == value {
 		return nil
 	}
-	dc := g.DeepCopy()
-	anns := dc.GetAnnotations()
-	if anns == nil {
-		anns = map[string]string{}
-	}
-	if value == "" {
-		delete(anns, metadata.PatchContributionsAnnotation)
-	} else {
-		anns[metadata.PatchContributionsAnnotation] = value
-	}
-	dc.SetAnnotations(anns)
-	if err := r.Client.Patch(ctx, dc, client.MergeFrom(g)); err != nil {
-		return fmt.Errorf("persist contributions: %w", err)
-	}
-	g.SetAnnotations(anns)
-	return nil
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		current := &expv1alpha1.Graph{}
+		if err := r.Client.Get(ctx, client.ObjectKeyFromObject(g), current); err != nil {
+			return err
+		}
+		if current.GetAnnotations()[metadata.PatchContributionsAnnotation] == value {
+			return nil
+		}
+		dc := current.DeepCopy()
+		anns := dc.GetAnnotations()
+		if anns == nil {
+			anns = make(map[string]string, 1)
+		}
+		if value == "" {
+			delete(anns, metadata.PatchContributionsAnnotation)
+		} else {
+			anns[metadata.PatchContributionsAnnotation] = value
+		}
+		dc.SetAnnotations(anns)
+		if err := r.Client.Patch(ctx, dc, client.MergeFrom(current)); err != nil {
+			return err
+		}
+		if g.Annotations == nil {
+			g.Annotations = make(map[string]string, 1)
+		}
+		if value == "" {
+			delete(g.Annotations, metadata.PatchContributionsAnnotation)
+		} else {
+			g.Annotations[metadata.PatchContributionsAnnotation] = value
+		}
+		return nil
+	})
 }
 
 // watcherFor returns a per-Graph Watcher when a Router is
@@ -409,20 +429,31 @@ func extractAndTrackGVK(sub schemawatcher.Subscription, nodeID, apiVersion, kind
 }
 
 // setManaged ensures the Graph carries the finalizer. Uses a strategic patch
-// against the freshly-fetched object so concurrent metadata writes don't
-// trigger a 409.
+// against the freshly-fetched object with retry-on-conflict.
 func (r *Reconciler) setManaged(ctx context.Context, g *expv1alpha1.Graph) error {
 	if metadata.HasGraphFinalizer(g) {
 		return nil
 	}
 	log.FromContext(ctx).V(1).Info("setting graph as managed")
-	dc := g.DeepCopy()
-	metadata.SetGraphFinalizer(dc)
-	if err := r.Client.Patch(ctx, dc, client.MergeFrom(g)); err != nil {
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		current := &expv1alpha1.Graph{}
+		if err := r.Client.Get(ctx, client.ObjectKeyFromObject(g), current); err != nil {
+			return err
+		}
+		if metadata.HasGraphFinalizer(current) {
+			return nil
+		}
+		dc := current.DeepCopy()
+		metadata.SetGraphFinalizer(dc)
+		if err := r.Client.Patch(ctx, dc, client.MergeFrom(current)); err != nil {
+			return err
+		}
+		metadata.SetGraphFinalizer(g)
+		return nil
+	})
+	if err != nil {
 		return fmt.Errorf("set managed: %w", err)
 	}
-	// Reflect the change in the in-memory copy so later patches see it.
-	metadata.SetGraphFinalizer(g)
 	return nil
 }
 
@@ -434,9 +465,22 @@ func (r *Reconciler) setUnmanaged(ctx context.Context, g *expv1alpha1.Graph) err
 		return nil
 	}
 	log.FromContext(ctx).V(1).Info("setting graph as unmanaged")
-	dc := g.DeepCopy()
-	metadata.RemoveGraphFinalizer(dc)
-	if err := r.Client.Patch(ctx, dc, client.MergeFrom(g)); err != nil {
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		current := &expv1alpha1.Graph{}
+		if err := r.Client.Get(ctx, client.ObjectKeyFromObject(g), current); err != nil {
+			if apierrors.IsNotFound(err) {
+				return nil
+			}
+			return err
+		}
+		if !metadata.HasGraphFinalizer(current) {
+			return nil
+		}
+		dc := current.DeepCopy()
+		metadata.RemoveGraphFinalizer(dc)
+		return r.Client.Patch(ctx, dc, client.MergeFrom(current))
+	})
+	if err != nil {
 		return fmt.Errorf("set unmanaged: %w", err)
 	}
 	return nil

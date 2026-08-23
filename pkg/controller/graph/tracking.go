@@ -57,7 +57,10 @@ func keyOf(r expv1alpha1.ManagedResource) resourceKey {
 // result.Applied; preserved entries are appended after, in their
 // previous-cycle order. Reverse iteration over newSet still gives a
 // reasonable reverse-apply order for delete.
-func diffManagedResources(previous []expv1alpha1.ManagedResource, result executor.ApplyResult) (newSet, pruneCandidates []expv1alpha1.ManagedResource) {
+func diffManagedResources(
+	previous []expv1alpha1.ManagedResource,
+	result executor.ApplyResult,
+) ([]expv1alpha1.ManagedResource, []expv1alpha1.ManagedResource) {
 	unresolved := make(map[string]struct{}, len(result.Unresolved))
 	for _, nodeID := range result.Unresolved {
 		unresolved[nodeID] = struct{}{}
@@ -68,8 +71,10 @@ func diffManagedResources(previous []expv1alpha1.ManagedResource, result executo
 		applied[keyOf(r)] = r
 	}
 
-	newSet = make([]expv1alpha1.ManagedResource, 0, len(result.Applied)+len(previous))
+	newSet := make([]expv1alpha1.ManagedResource, 0, len(result.Applied)+len(previous))
 	newSet = append(newSet, result.Applied...)
+
+	var pruneCandidates []expv1alpha1.ManagedResource
 
 	for _, prev := range previous {
 		if _, alreadyApplied := applied[keyOf(prev)]; alreadyApplied {
@@ -89,7 +94,10 @@ func diffManagedResources(previous []expv1alpha1.ManagedResource, result executo
 // trust the diff result enough to prune, so we widen status to cover
 // everything we know about. Order preserves previous first, then
 // newly-applied entries that previous didn't already have.
-func unionManagedResources(previous []expv1alpha1.ManagedResource, applied []expv1alpha1.ManagedResource) []expv1alpha1.ManagedResource {
+func unionManagedResources(
+	previous []expv1alpha1.ManagedResource,
+	applied []expv1alpha1.ManagedResource,
+) []expv1alpha1.ManagedResource {
 	seen := make(map[resourceKey]struct{}, len(previous)+len(applied))
 	out := make([]expv1alpha1.ManagedResource, 0, len(previous)+len(applied))
 	for _, r := range previous {
@@ -146,7 +154,11 @@ func ReadContributions(obj metav1.Object) ([]executor.Contribution, error) {
 	}
 	var out []executor.Contribution
 	if err := json.Unmarshal([]byte(raw), &out); err != nil {
-		return nil, fmt.Errorf("unmarshal patch contributions from annotation %q: %w", metadata.PatchContributionsAnnotation, err)
+		return nil, fmt.Errorf(
+			"unmarshal patch contributions from annotation %q: %w",
+			metadata.PatchContributionsAnnotation,
+			err,
+		)
 	}
 	return out, nil
 }
@@ -167,11 +179,12 @@ func MarshalContributions(contribs []executor.Contribution) (string, error) {
 // DiffContributions returns the entries present in prior but absent from
 // current — the contributions to release because their patch node was removed
 // or its target identity changed.
-func DiffContributions(prior, current []executor.Contribution) (released []executor.Contribution) {
+func DiffContributions(prior, current []executor.Contribution) []executor.Contribution {
 	cur := make(map[contribKey]struct{}, len(current))
 	for _, c := range current {
 		cur[contribKeyOf(c)] = struct{}{}
 	}
+	released := make([]executor.Contribution, 0, len(prior))
 	for _, p := range prior {
 		if _, ok := cur[contribKeyOf(p)]; !ok {
 			released = append(released, p)
@@ -186,7 +199,15 @@ func DiffContributions(prior, current []executor.Contribution) (released []execu
 func UnionContributions(prior, current []executor.Contribution) []executor.Contribution {
 	seen := make(map[contribKey]struct{}, len(prior)+len(current))
 	out := make([]executor.Contribution, 0, len(prior)+len(current))
-	for _, c := range append(append([]executor.Contribution(nil), prior...), current...) {
+	for _, c := range prior {
+		k := contribKeyOf(c)
+		if _, dup := seen[k]; dup {
+			continue
+		}
+		seen[k] = struct{}{}
+		out = append(out, c)
+	}
+	for _, c := range current {
 		k := contribKeyOf(c)
 		if _, dup := seen[k]; dup {
 			continue

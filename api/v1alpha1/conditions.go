@@ -126,6 +126,9 @@ func (c *Condition) GetStatus() metav1.ConditionStatus {
 }
 
 // Conditions is a list of conditions.
+//
+// +listType=map
+// +listMapKey=type
 type Conditions []Condition
 
 // Set sets the provided condition into the conditions list, if it exists already the condition is replaced.

@@ -63,7 +63,7 @@ func (c *Controller) reconcileDeletion(dcx *DeletionContext) error {
 	}
 
 	if conflict {
-		err := fmt.Errorf("deletion encountered UID conflicts; retrying")
+		err := fmt.Errorf("deletion encountered UID conflicts, retrying")
 		dcx.Mark.ResourcesUnderDeletion("deletion blocked: %v", err)
 		return dcx.delayedRequeue(err)
 	}
@@ -135,12 +135,10 @@ func (c *Controller) removeFinalizer(dcx *DeletionContext) error {
 		dcx.Mark.ResourcesUnderDeletion("deletion blocked: %v", err)
 		return fmt.Errorf("read patch contributions on delete: %w", err)
 	}
-	if len(contribs) > 0 {
-		if c.graphEngineExecutor != nil {
-			if err := c.graphEngineExecutor.Release(dcx.Ctx, contribs); err != nil {
-				dcx.Mark.ResourcesUnderDeletion("deletion blocked: %v", err)
-				return fmt.Errorf("executor release: %w", err)
-			}
+	if len(contribs) > 0 && c.graphEngineExecutor != nil {
+		if err := c.graphEngineExecutor.Release(dcx.Ctx, contribs); err != nil {
+			dcx.Mark.ResourcesUnderDeletion("deletion blocked: %v", err)
+			return fmt.Errorf("executor release: %w", err)
 		}
 	}
 
