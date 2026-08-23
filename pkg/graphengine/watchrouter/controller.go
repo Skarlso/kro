@@ -133,11 +133,11 @@ func (dc *Router) Source() source.Source {
 // open so concurrent enqueue calls don't panic — only the underlying
 // informers stop.
 func (dc *Router) Start(ctx context.Context) error {
-	dc.log.Info("Starting dynamic controller")
+	dc.log.Info("Starting watch router")
 	<-ctx.Done()
-	dc.log.Info("Shutting down dynamic controller")
-	dc.watches.Shutdown()
 	dc.closed.Store(true)
+	dc.log.Info("Shutting down watch router")
+	dc.watches.Shutdown()
 	return nil
 }
 

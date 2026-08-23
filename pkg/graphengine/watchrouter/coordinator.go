@@ -15,6 +15,7 @@
 package watchrouter
 
 import (
+	"fmt"
 	"sync"
 
 	"github.com/go-logr/logr"
@@ -22,6 +23,12 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+)
+
+var (
+	_ Watcher = (*graphWatcher)(nil)
+	_ Watcher = (*NoopWatcher)(nil)
+	_ Watcher = NoopWatcher{}
 )
 
 // Watcher is the per-Graph handle a reconciler uses to declare which
@@ -176,7 +183,7 @@ func (c *Coordinator) WatchRequestCount() (scalar, collection int) {
 	for _, entries := range c.collectionIndex {
 		collection += len(entries)
 	}
-	return
+	return scalar, collection
 }
 
 // RemoveGraph drops every watch owned by the Graph. Called on Graph
@@ -252,8 +259,17 @@ func (c *Coordinator) addWatch(key client.ObjectKey, req WatchRequest) error {
 	c.stopWatches(orphaned)
 
 	if err := c.watches.EnsureWatch(gvr, ownerCoordinator); err != nil {
-		c.log.Error(err, "EnsureWatch failed", "gvr", gvr, "graph", key)
-		return err
+		c.mu.Lock()
+		if state, ok := c.graphs[key]; ok {
+			if cur, exists := state.current[req.NodeID]; exists && sameWatchTarget(cur, &req) {
+				delete(state.current, req.NodeID)
+				if prev, shared := state.previous[req.NodeID]; !shared || !sameWatchTarget(prev, cur) {
+					c.removeRequestFromIndexesLocked(key, cur)
+				}
+			}
+		}
+		c.mu.Unlock()
+		return fmt.Errorf("ensure watch for %s: %w", gvr, err)
 	}
 	return nil
 }
@@ -307,6 +323,10 @@ func (c *Coordinator) abortGraph(key client.ObjectKey) {
 		affectedGVRs = append(affectedGVRs, req.GVR)
 	}
 	state.current = make(map[string]*WatchRequest)
+
+	if len(state.previous) == 0 {
+		delete(c.graphs, key)
+	}
 
 	orphaned := c.findOrphanedGVRsLocked(affectedGVRs)
 	c.mu.Unlock()
@@ -377,6 +397,7 @@ func (c *Coordinator) removeScalarIndexLocked(key client.ObjectKey, req *WatchRe
 	if len(filtered) == 0 {
 		delete(byName, nn)
 	} else {
+		clear(entries[len(filtered):])
 		byName[nn] = filtered
 	}
 	if len(byName) == 0 {
@@ -397,6 +418,7 @@ func (c *Coordinator) removeCollectionIndexLocked(key client.ObjectKey, req *Wat
 	if len(filtered) == 0 {
 		delete(c.collectionIndex, req.GVR)
 	} else {
+		clear(entries[len(filtered):])
 		c.collectionIndex[req.GVR] = filtered
 	}
 }

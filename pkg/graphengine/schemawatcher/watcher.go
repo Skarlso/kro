@@ -60,7 +60,6 @@ import (
 
 	"github.com/go-logr/logr"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/tools/cache"
@@ -139,10 +138,6 @@ type SchemaWatcher struct {
 	// is a non-schema update (annotation, label, status echo) and is
 	// dropped without enqueueing any Graph.
 	schemaHashes map[schema.GroupKind]string
-
-	// handlerReg is the informer event-handler registration so Start()
-	// can hand it back to the cache on shutdown.
-	handlerReg cache.ResourceEventHandlerRegistration
 }
 
 // graphSub tracks one Graph's in-flight and last-committed schema
@@ -188,7 +183,7 @@ func (w *SchemaWatcher) Source() source.Source {
 // the handler.
 func (w *SchemaWatcher) Start(ctx context.Context) error {
 	if w.cache == nil {
-		return fmt.Errorf("schema watcher: Cache not configured")
+		return fmt.Errorf("schema watcher: cache not configured")
 	}
 	informer, err := w.cache.GetInformer(ctx, &apiextensionsv1.CustomResourceDefinition{})
 	if err != nil {
@@ -202,13 +197,12 @@ func (w *SchemaWatcher) Start(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("attach CRD event handler: %w", err)
 	}
-	w.handlerReg = reg
 	w.log.Info("schema watcher started")
 	<-ctx.Done()
+	w.closed.Store(true)
 	if err := informer.RemoveEventHandler(reg); err != nil {
 		w.log.V(1).Error(err, "remove CRD event handler on shutdown")
 	}
-	w.closed.Store(true)
 	w.log.Info("schema watcher stopped")
 	return nil
 }
@@ -614,7 +608,4 @@ func (w *SchemaWatcher) SchemaHash(gk schema.GroupKind) string {
 	return w.schemaHashes[gk]
 }
 
-// Assert that metav1 import isn't dead in case future versions of the
-// helpers drop the only usage. Kept defensively because subscription
-// states reference the metav1 package indirectly via apiextensions.
-var _ = metav1.Time{}
+var _ Subscription = (*subscription)(nil)

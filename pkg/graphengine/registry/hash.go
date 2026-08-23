@@ -18,6 +18,7 @@ package registry
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -73,26 +74,24 @@ func normalizeSpec(spec expv1alpha1.GraphSpec, marshal marshalFunc) (expv1alpha1
 	}
 
 	slices.SortFunc(normalized.Nodes, func(a, b expv1alpha1.Node) int {
-		switch {
-		case a.ID < b.ID:
-			return -1
-		case a.ID > b.ID:
-			return 1
-		}
-		return 0
+		return cmp.Compare(a.ID, b.ID)
 	})
 
 	for i := range normalized.Nodes {
 		n := &normalized.Nodes[i]
-		for _, slot := range []**runtime.RawExtension{&n.Template, &n.Def} {
-			if *slot == nil {
-				continue
-			}
-			canon, err := normalizeRawExtension(**slot, marshal)
+		if n.Template != nil {
+			canon, err := normalizeRawExtension(*n.Template, marshal)
 			if err != nil {
 				return expv1alpha1.GraphSpec{}, fmt.Errorf("node[%d]: %w", i, err)
 			}
-			*slot = &canon
+			n.Template = &canon
+		}
+		if n.Def != nil {
+			canon, err := normalizeRawExtension(*n.Def, marshal)
+			if err != nil {
+				return expv1alpha1.GraphSpec{}, fmt.Errorf("node[%d]: %w", i, err)
+			}
+			n.Def = &canon
 		}
 		if n.ForEach == nil {
 			n.ForEach = []expv1alpha1.ForEachDimension{}
@@ -110,11 +109,12 @@ func normalizeRawExtension(ext runtime.RawExtension, marshal marshalFunc) (runti
 			return runtime.RawExtension{}, fmt.Errorf("marshal raw extension object: %w", err)
 		}
 	}
-	if len(bytes.TrimSpace(source)) == 0 {
+	trimmed := bytes.TrimSpace(source)
+	if len(trimmed) == 0 {
 		return runtime.RawExtension{}, nil
 	}
 	var canonical any
-	dec := json.NewDecoder(bytes.NewReader(source))
+	dec := json.NewDecoder(bytes.NewReader(trimmed))
 	dec.UseNumber()
 	if err := dec.Decode(&canonical); err != nil {
 		return runtime.RawExtension{}, fmt.Errorf("parse raw extension payload: %w", err)

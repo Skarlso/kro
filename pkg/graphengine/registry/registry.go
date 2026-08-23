@@ -15,6 +15,7 @@
 package registry
 
 import (
+	"fmt"
 	"sync"
 
 	"k8s.io/apimachinery/pkg/types"
@@ -68,6 +69,7 @@ func (r *Registry) Lookup(key types.NamespacedName, hash string) (*compiler.Prog
 func (r *Registry) Store(key types.NamespacedName, hash string, program *compiler.Program) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.epochs[key]++
 	r.entries[key] = entry{hash: hash, program: program}
 }
 
@@ -83,7 +85,14 @@ func (r *Registry) Delete(key types.NamespacedName) {
 // entry under key; otherwise it invokes compile and stores the new pair.
 // The bool reports whether the result came from the cache (true = hit).
 // A compile error is propagated and does not poison the cache.
-func (r *Registry) Compile(key types.NamespacedName, g *expv1alpha1.Graph, compile CompileFunc) (*compiler.Program, bool, error) {
+func (r *Registry) Compile(
+	key types.NamespacedName,
+	g *expv1alpha1.Graph,
+	compile CompileFunc,
+) (*compiler.Program, bool, error) {
+	if g == nil {
+		return nil, false, fmt.Errorf("graph is required")
+	}
 	hash, err := HashSpec(g.Spec)
 	if err != nil {
 		return nil, false, err
