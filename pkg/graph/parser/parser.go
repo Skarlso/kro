@@ -282,16 +282,14 @@ func (p *Parser) parseArray(field []interface{}, schema *spec.Schema, path strin
 }
 
 func parseString(field string, path string, expectedTypes []string) ([]variable.FieldDescriptor, error) {
-	ok, err := isStandaloneExpression(field)
+	matches, err := extractExpressions(field)
 	if err != nil {
 		return nil, err
 	}
 
-	if ok {
-		expr := strings.TrimPrefix(field, "${")
-		expr = strings.TrimSuffix(expr, "}")
+	if len(matches) == 1 && matches[0].start == 0 && matches[0].end == len(field) {
 		return []variable.FieldDescriptor{{
-			Expression: &krocel.Expression{Original: expr},
+			Expression: &krocel.Expression{Original: matches[0].expr},
 			Path:       path,
 		}}, nil
 	}
@@ -300,12 +298,8 @@ func parseString(field string, path string, expectedTypes []string) ([]variable.
 		return nil, fmt.Errorf("expected %s type for path %s, got string", strings.Join(expectedTypes, " or "), path)
 	}
 
-	expressions, err := extractExpressions(field)
-	if err != nil {
-		return nil, err
-	}
-	if len(expressions) > 0 {
-		celExpr := buildStringTemplate(field, expressions)
+	if len(matches) > 0 {
+		celExpr := buildStringTemplate(field, matches)
 		return []variable.FieldDescriptor{{
 			Expression: &krocel.Expression{Original: celExpr, OriginalTemplate: field},
 			Path:       path,

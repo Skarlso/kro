@@ -173,7 +173,7 @@ func TestErrorClassifiers(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			assert.Equal(t, tc.wantDataPend, IsDataPending(tc.err))
-			assert.Equal(t, tc.wantCELPending, isCELDataPending(tc.err))
+			assert.Equal(t, tc.wantCELPending, IsCELDataPending(tc.err))
 		})
 	}
 }

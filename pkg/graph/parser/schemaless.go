@@ -16,7 +16,6 @@ package parser
 
 import (
 	"strconv"
-	"strings"
 
 	krocel "github.com/kubernetes-sigs/kro/pkg/cel"
 	"github.com/kubernetes-sigs/kro/pkg/graph/variable"
@@ -56,31 +55,23 @@ func parseSchemalessResource(resource interface{}, path string) ([]variable.Fiel
 			allPlainFieldPaths = append(allPlainFieldPaths, plainFieldPaths...)
 		}
 	case string:
-		ok, err := isStandaloneExpression(field)
+		matches, err := extractExpressions(field)
 		if err != nil {
 			return nil, nil, err
 		}
-		if ok {
-			expr := strings.TrimPrefix(field, "${")
-			expr = strings.TrimSuffix(expr, "}")
+		if len(matches) == 1 && matches[0].start == 0 && matches[0].end == len(field) {
 			expressionsFields = append(expressionsFields, variable.FieldDescriptor{
-				Expression: &krocel.Expression{Original: expr},
+				Expression: &krocel.Expression{Original: matches[0].expr},
+				Path:       path,
+			})
+		} else if len(matches) > 0 {
+			celExpr := buildStringTemplate(field, matches)
+			expressionsFields = append(expressionsFields, variable.FieldDescriptor{
+				Expression: &krocel.Expression{Original: celExpr, OriginalTemplate: field},
 				Path:       path,
 			})
 		} else {
-			expressions, err := extractExpressions(field)
-			if err != nil {
-				return nil, nil, err
-			}
-			if len(expressions) > 0 {
-				celExpr := buildStringTemplate(field, expressions)
-				expressionsFields = append(expressionsFields, variable.FieldDescriptor{
-					Expression: &krocel.Expression{Original: celExpr, OriginalTemplate: field},
-					Path:       path,
-				})
-			} else {
-				allPlainFieldPaths = append(allPlainFieldPaths, path)
-			}
+			allPlainFieldPaths = append(allPlainFieldPaths, path)
 		}
 
 	default:

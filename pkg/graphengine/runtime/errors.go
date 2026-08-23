@@ -47,9 +47,9 @@ var celDataPendingPatterns = []string{
 	"index out of bounds",
 }
 
-// isCELDataPending classifies a CEL evaluation error as retryable (data
+// IsCELDataPending classifies a CEL evaluation error as retryable (data
 // not yet available) vs a hard user error.
-func isCELDataPending(err error) bool {
+func IsCELDataPending(err error) bool {
 	if err == nil {
 		return false
 	}

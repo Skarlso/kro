@@ -25,6 +25,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/kubernetes-sigs/kro/pkg/cel/library"
+	"github.com/kubernetes-sigs/kro/pkg/graphengine/runtime"
 )
 
 // isDataPendingCEL decides whether a failed status expression means "the
@@ -84,7 +85,7 @@ func TestIsDataPendingCEL(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			assert.Equal(t, tt.want, isDataPendingCEL(tt.err))
+			assert.Equal(t, tt.want, runtime.IsCELDataPending(tt.err))
 		})
 	}
 }
