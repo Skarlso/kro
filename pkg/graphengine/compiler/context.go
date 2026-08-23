@@ -177,7 +177,7 @@ func (ctx *CompilationContext) buildNode(p *parser.Parser, n *expv1alpha1.Node, 
 				return nil, nil, fmt.Errorf("parse def payload: %w", err)
 			}
 		}
-		vars, forEach, includeWhen, readyWhen, err := parseNodeCommon(n, descriptors)
+		common, err := parseNodeCommon(n, descriptors)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -186,10 +186,10 @@ func (ctx *CompilationContext) buildNode(p *parser.Parser, n *expv1alpha1.Node, 
 			Index:       order,
 			Kind:        kind,
 			Object:      &unstructured.Unstructured{Object: payload},
-			Variables:   vars,
-			ForEach:     forEach,
-			IncludeWhen: includeWhen,
-			ReadyWhen:   readyWhen,
+			Variables:   common.Variables,
+			ForEach:     common.ForEach,
+			IncludeWhen: common.IncludeWhen,
+			ReadyWhen:   common.ReadyWhen,
 		}
 		if override, ok := ctx.nodeSchemaOverrides[n.ID]; ok {
 			return node, override, nil
@@ -266,7 +266,7 @@ func (ctx *CompilationContext) buildNode(p *parser.Parser, n *expv1alpha1.Node, 
 		return nil, nil, fmt.Errorf("parse %s payload: %w", kind, err)
 	}
 
-	vars, forEach, includeWhen, readyWhen, err := parseNodeCommon(n, descriptors)
+	common, err := parseNodeCommon(n, descriptors)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -279,10 +279,10 @@ func (ctx *CompilationContext) buildNode(p *parser.Parser, n *expv1alpha1.Node, 
 		Namespaced:  mapping.Scope.Name() == meta.RESTScopeNameNamespace,
 		Subresource: patchSubresource(n),
 		Object:      &unstructured.Unstructured{Object: payload},
-		Variables:   vars,
-		ForEach:     forEach,
-		IncludeWhen: includeWhen,
-		ReadyWhen:   readyWhen,
+		Variables:   common.Variables,
+		ForEach:     common.ForEach,
+		IncludeWhen: common.IncludeWhen,
+		ReadyWhen:   common.ReadyWhen,
 		// A Ref whose payload carries metadata.selector is a read-only
 		// collection of external objects (list-by-selector), so it publishes
 		// a list into scope like a forEach collection.
@@ -290,16 +290,28 @@ func (ctx *CompilationContext) buildNode(p *parser.Parser, n *expv1alpha1.Node, 
 	}, sch, nil
 }
 
-func parseNodeCommon(n *expv1alpha1.Node, descriptors []variable.FieldDescriptor) ([]*variable.ResourceField, []ForEachDimension, []*krocel.Expression, []*krocel.Expression, error) {
+type parsedNodeElements struct {
+	Variables   []*variable.ResourceField
+	ForEach     []ForEachDimension
+	IncludeWhen []*krocel.Expression
+	ReadyWhen   []*krocel.Expression
+}
+
+func parseNodeCommon(n *expv1alpha1.Node, descriptors []variable.FieldDescriptor) (parsedNodeElements, error) {
 	forEach, err := parseForEachDimensions(n.ForEach)
 	if err != nil {
-		return nil, nil, nil, nil, err
+		return parsedNodeElements{}, err
 	}
 	includeWhen, readyWhen, err := parseConditions(n)
 	if err != nil {
-		return nil, nil, nil, nil, err
+		return parsedNodeElements{}, err
 	}
-	return fieldDescriptorsToVariables(descriptors), forEach, includeWhen, readyWhen, nil
+	return parsedNodeElements{
+		Variables:   fieldDescriptorsToVariables(descriptors),
+		ForEach:     forEach,
+		IncludeWhen: includeWhen,
+		ReadyWhen:   readyWhen,
+	}, nil
 }
 
 // patchSubresource returns the target subresource for a patch node and ""
@@ -332,7 +344,7 @@ func (ctx *CompilationContext) buildDynamicNode(
 	if err != nil {
 		return nil, nil, fmt.Errorf("parse dynamic %s payload: %w", kind, err)
 	}
-	vars, forEach, includeWhen, readyWhen, err := parseNodeCommon(n, descriptors)
+	common, err := parseNodeCommon(n, descriptors)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -343,10 +355,10 @@ func (ctx *CompilationContext) buildDynamicNode(
 		DynamicGVK:  true,
 		Subresource: patchSubresource(n),
 		Object:      &unstructured.Unstructured{Object: payload},
-		Variables:   vars,
-		ForEach:     forEach,
-		IncludeWhen: includeWhen,
-		ReadyWhen:   readyWhen,
+		Variables:   common.Variables,
+		ForEach:     common.ForEach,
+		IncludeWhen: common.IncludeWhen,
+		ReadyWhen:   common.ReadyWhen,
 	}, nil, nil
 }
 

@@ -568,24 +568,24 @@ func (ctx *CompilationContext) analyzeVariables(n *Node, nodes map[string]*Node,
 	identityIterators := make(map[string]struct{}, len(iteratorNames))
 	var captured []string
 	for _, v := range n.Variables {
-		inspection, deps, iterRefs, capt, err := ctx.extractDependencies(inspector, v.Expression, iteratorNames, nodes)
+		analysis, err := ctx.extractDependencies(inspector, v.Expression, iteratorNames, nodes)
 		if err != nil {
 			return nil, fmt.Errorf("variable at %q: %w", v.Path, err)
 		}
-		captured = append(captured, capt...)
-		if len(iterRefs) > 0 {
+		captured = append(captured, analysis.captured...)
+		if len(analysis.iteratorRefs) > 0 {
 			v.Kind = variable.ResourceVariableKindIteration
-		} else if (len(deps) > 0 || len(capt) > 0) && v.Kind == variable.ResourceVariableKindStatic {
+		} else if (len(analysis.nodeDeps) > 0 || len(analysis.captured) > 0) && v.Kind == variable.ResourceVariableKindStatic {
 			v.Kind = variable.ResourceVariableKindDynamic
 		}
-		for _, d := range deps {
+		for _, d := range analysis.nodeDeps {
 			addDependency(n, d)
 		}
 		if isIdentityFieldPath(v.Path, n.Namespaced) {
-			if inspection != nil && inspection.UsesOmit() {
+			if analysis.inspection != nil && analysis.inspection.UsesOmit() {
 				return nil, fmt.Errorf("variable at %q: omit() cannot be used in resource identity fields", v.Path)
 			}
-			for _, it := range iterRefs {
+			for _, it := range analysis.iteratorRefs {
 				identityIterators[it] = struct{}{}
 			}
 		}
@@ -616,18 +616,18 @@ func (ctx *CompilationContext) analyzeForEach(n *Node, nodes map[string]*Node, i
 	iteratorNames := nodeIteratorNames(n)
 	var captured []string
 	for _, dim := range n.ForEach {
-		inspection, deps, iterRefs, capt, err := ctx.extractDependencies(inspector, dim.Expression, iteratorNames, nodes)
+		analysis, err := ctx.extractDependencies(inspector, dim.Expression, iteratorNames, nodes)
 		if err != nil {
 			return nil, fmt.Errorf("forEach %q: %w", dim.Name, err)
 		}
-		if inspection != nil && inspection.UsesOmit() {
+		if analysis.inspection != nil && analysis.inspection.UsesOmit() {
 			return nil, fmt.Errorf("forEach %q: omit() can only be used in resource template expressions", dim.Name)
 		}
-		if len(iterRefs) > 0 {
-			return nil, fmt.Errorf("forEach %q cannot reference other iterators %v", dim.Name, iterRefs)
+		if len(analysis.iteratorRefs) > 0 {
+			return nil, fmt.Errorf("forEach %q cannot reference other iterators %v", dim.Name, analysis.iteratorRefs)
 		}
-		captured = append(captured, capt...)
-		for _, d := range deps {
+		captured = append(captured, analysis.captured...)
+		for _, d := range analysis.nodeDeps {
 			addDependency(n, d)
 		}
 	}
@@ -639,15 +639,15 @@ func (ctx *CompilationContext) analyzeForEach(n *Node, nodes map[string]*Node, i
 func (ctx *CompilationContext) analyzeIncludeWhen(n *Node, nodes map[string]*Node, inspector *ast.Inspector) ([]string, error) {
 	var captured []string
 	for i, expr := range n.IncludeWhen {
-		inspection, deps, _, capt, err := ctx.extractDependencies(inspector, expr, nil, nodes)
+		analysis, err := ctx.extractDependencies(inspector, expr, nil, nodes)
 		if err != nil {
 			return nil, fmt.Errorf("includeWhen[%d]: %w", i, err)
 		}
-		if inspection != nil && inspection.UsesOmit() {
+		if analysis.inspection != nil && analysis.inspection.UsesOmit() {
 			return nil, fmt.Errorf("includeWhen[%d]: omit() can only be used in resource template expressions", i)
 		}
-		captured = append(captured, capt...)
-		for _, d := range deps {
+		captured = append(captured, analysis.captured...)
+		for _, d := range analysis.nodeDeps {
 			if d == n.ID {
 				continue
 			}
@@ -662,23 +662,30 @@ func (ctx *CompilationContext) analyzeIncludeWhen(n *Node, nodes map[string]*Nod
 // implicit ordering ambiguity.
 func (ctx *CompilationContext) analyzeReadyWhen(n *Node, nodes map[string]*Node, inspector *ast.Inspector) ([]string, error) {
 	for i, expr := range n.ReadyWhen {
-		inspection, deps, _, capt, err := ctx.extractDependencies(inspector, expr, nil, nodes)
+		analysis, err := ctx.extractDependencies(inspector, expr, nil, nodes)
 		if err != nil {
 			return nil, fmt.Errorf("readyWhen[%d]: %w", i, err)
 		}
-		if inspection != nil && inspection.UsesOmit() {
+		if analysis.inspection != nil && analysis.inspection.UsesOmit() {
 			return nil, fmt.Errorf("readyWhen[%d]: omit() can only be used in resource template expressions", i)
 		}
-		if len(capt) > 0 {
-			return nil, fmt.Errorf("readyWhen[%d] (%q) may only reference the node itself, found capture %q", i, expr.UserExpression(), capt[0])
+		if len(analysis.captured) > 0 {
+			return nil, fmt.Errorf("readyWhen[%d] (%q) may only reference the node itself, found capture %q", i, expr.UserExpression(), analysis.captured[0])
 		}
-		for _, d := range deps {
+		for _, d := range analysis.nodeDeps {
 			if d != n.ID {
 				return nil, fmt.Errorf("readyWhen[%d] (%q) may only reference the node itself, found %q", i, expr.UserExpression(), d)
 			}
 		}
 	}
 	return nil, nil
+}
+
+type dependencyAnalysis struct {
+	inspection   *ast.ExpressionInspection
+	nodeDeps     []string
+	iteratorRefs []string
+	captured     []string
 }
 
 // extractDependencies inspects a single expression and classifies every
@@ -701,15 +708,19 @@ func (ctx *CompilationContext) extractDependencies(
 	expr *krocel.Expression,
 	iteratorNames []string,
 	nodes map[string]*Node,
-) (inspection *ast.ExpressionInspection, nodeDeps []string, iteratorRefs []string, captured []string, err error) {
+) (dependencyAnalysis, error) {
 	result, err := inspector.Inspect(expr.Original)
 	if err != nil {
-		return nil, nil, nil, nil, fmt.Errorf("inspect: %w", err)
+		return dependencyAnalysis{}, fmt.Errorf("inspect: %w", err)
 	}
 
 	if !features.FeatureGate.Enabled(features.CELOmitFunction) && result.UsesOmit() {
-		return nil, nil, nil, nil, fmt.Errorf("omit() requires the CELOmitFunction feature gate to be enabled")
+		return dependencyAnalysis{}, fmt.Errorf("omit() requires the CELOmitFunction feature gate to be enabled")
 	}
+
+	var nodeDeps []string
+	var iteratorRefs []string
+	var captured []string
 
 	frames := make(map[int]struct{})
 	classify := func(id string) error {
@@ -747,24 +758,29 @@ func (ctx *CompilationContext) extractDependencies(
 
 	for _, dep := range result.ResourceDependencies {
 		if err := classify(dep.ID); err != nil {
-			return nil, nil, nil, nil, err
+			return dependencyAnalysis{}, err
 		}
 	}
 	for _, unknown := range result.UnknownResources {
 		if err := classify(unknown.ID); err != nil {
-			return nil, nil, nil, nil, err
+			return dependencyAnalysis{}, err
 		}
 	}
 	if len(result.UnknownFunctions) > 0 {
-		return nil, nil, nil, nil, fmt.Errorf("uses unknown functions: %v", result.UnknownFunctions)
+		return dependencyAnalysis{}, fmt.Errorf("uses unknown functions: %v", result.UnknownFunctions)
 	}
 	if len(frames) > 1 {
-		return nil, nil, nil, nil, fmt.Errorf(
+		return dependencyAnalysis{}, fmt.Errorf(
 			"expression %q mixes node references from different graph scopes (references must belong to a single scope)",
 			expr.UserExpression(),
 		)
 	}
-	return &result, nodeDeps, iteratorRefs, captured, nil
+	return dependencyAnalysis{
+		inspection:   &result,
+		nodeDeps:     nodeDeps,
+		iteratorRefs: iteratorRefs,
+		captured:     captured,
+	}, nil
 }
 
 func nodeIteratorNames(n *Node) []string {
