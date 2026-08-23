@@ -15,6 +15,7 @@
 package compiler
 
 import (
+	"slices"
 	"strings"
 
 	"k8s.io/kube-openapi/pkg/validation/spec"
@@ -49,7 +50,7 @@ func inferSchemaFromValue(v any) *spec.Schema {
 	switch val := v.(type) {
 	case bool:
 		return scalar("boolean")
-	case int, int32, int64, uint, uint32, uint64:
+	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, uintptr:
 		return scalar("integer")
 	case float32, float64:
 		return scalar("number")
@@ -126,11 +127,26 @@ func schemasEqual(a, b *spec.Schema) bool {
 	if a == nil || b == nil {
 		return a == b
 	}
-	if len(a.Type) != len(b.Type) {
+	if !slices.Equal(a.Type, b.Type) {
 		return false
 	}
-	for i := range a.Type {
-		if a.Type[i] != b.Type[i] {
+	if len(a.Properties) != len(b.Properties) {
+		return false
+	}
+	for k, propA := range a.Properties {
+		propB, ok := b.Properties[k]
+		if !ok || !schemasEqual(&propA, &propB) {
+			return false
+		}
+	}
+	if (a.Items == nil) != (b.Items == nil) {
+		return false
+	}
+	if a.Items != nil && b.Items != nil {
+		if (a.Items.Schema == nil) != (b.Items.Schema == nil) {
+			return false
+		}
+		if a.Items.Schema != nil && b.Items.Schema != nil && !schemasEqual(a.Items.Schema, b.Items.Schema) {
 			return false
 		}
 	}

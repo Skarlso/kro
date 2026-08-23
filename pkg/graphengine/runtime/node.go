@@ -17,6 +17,7 @@ package runtime
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"time"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -267,9 +268,7 @@ func (n *Node) checkCollectionReadiness() error {
 	}
 
 	scope := make(map[string]any, len(n.rt.scope)+1)
-	for k, v := range n.rt.scope {
-		scope[k] = v
-	}
+	maps.Copy(scope, n.rt.scope)
 
 	for i, obj := range n.observed {
 		scope[compiler.EachVarName] = wrapValueForScope(obj.Object, itemSc, true)
@@ -345,17 +344,16 @@ func (n *Node) renderOne(bindings map[string]any) (*unstructured.Unstructured, e
 	scope := n.rt.scope
 	if len(bindings) > 0 {
 		scope = make(map[string]any, len(n.rt.scope)+len(bindings))
-		for k, v := range n.rt.scope {
-			scope[k] = v
-		}
-		for k, v := range bindings {
-			scope[k] = v
-		}
+		maps.Copy(scope, n.rt.scope)
+		maps.Copy(scope, bindings)
 	}
 
 	src := n.spec.Object
 	if n.objectOverride != nil {
 		src = n.objectOverride
+	}
+	if src == nil {
+		return nil, fmt.Errorf("node %q has no template object to render", n.spec.ID)
 	}
 	out := src.DeepCopy()
 	if len(n.spec.Variables) == 0 {

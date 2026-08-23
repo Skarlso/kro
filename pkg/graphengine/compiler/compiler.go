@@ -19,7 +19,6 @@ import (
 	"net/http"
 	"slices"
 
-	"golang.org/x/exp/maps"
 	"k8s.io/apimachinery/pkg/api/meta"
 	k8sschema "k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/yaml"
@@ -271,13 +270,19 @@ func (ctx *CompilationContext) compileFrame(apiNodes []expv1alpha1.Node, isRoot 
 	// ID (captures), iterator names, and `each`. Ancestor refs are valid
 	// identifiers here; the dependency pass classifies them as captures.
 	ancestors := ctx.ancestorIDs()
-	identifiers := maps.Keys(nodes)
+	identifiers := make([]string, 0, len(apiNodes)+len(ancestors)+1)
+	for i := range apiNodes {
+		identifiers = append(identifiers, apiNodes[i].ID)
+	}
 	identifiers = append(identifiers, ancestors...)
 	identifiers = append(identifiers, EachVarName)
 	identifiers = append(identifiers, allIteratorNames(nodes)...)
-	dedupe(&identifiers)
+	identifiers = dedupe(identifiers)
 
-	inspectorEnv, err := krocel.DefaultEnvironment(krocel.WithResourceIDs(identifiers), krocel.WithRuntimeLibrary(false))
+	inspectorEnv, err := krocel.DefaultEnvironment(
+		krocel.WithResourceIDs(identifiers),
+		krocel.WithRuntimeLibrary(false),
+	)
 	if err != nil {
 		return nil, nil, fmt.Errorf("build inspector environment: %w", err)
 	}
@@ -315,7 +320,8 @@ func (ctx *CompilationContext) compileFrame(apiNodes []expv1alpha1.Node, isRoot 
 	// GVK templates and subgraph nodes (local, no published schema), plus all
 	// captured ancestor IDs (the cross-frame seam). Within-frame typed
 	// references stay fully checked; the rest type-check permissively.
-	dynIDs := append([]string(nil), ancestors...)
+	dynIDs := make([]string, 0, len(ancestors)+len(nodes))
+	dynIDs = append(dynIDs, ancestors...)
 	for id, n := range nodes {
 		if n.Kind == NodeKindPatch {
 			continue
@@ -324,7 +330,11 @@ func (ctx *CompilationContext) compileFrame(apiNodes []expv1alpha1.Node, isRoot 
 			dynIDs = append(dynIDs, id)
 		}
 	}
-	typedEnv, typeProvider, err := krocel.TypedEnvironmentWithIDsAndProvider(celSchemas, dynIDs, krocel.WithRuntimeLibrary(false))
+	typedEnv, typeProvider, err := krocel.TypedEnvironmentWithIDsAndProvider(
+		celSchemas,
+		dynIDs,
+		krocel.WithRuntimeLibrary(false),
+	)
 	if err != nil {
 		return nil, nil, fmt.Errorf("build typed CEL environment: %w", err)
 	}
@@ -355,7 +365,7 @@ func (ctx *CompilationContext) compileFrame(apiNodes []expv1alpha1.Node, isRoot 
 		NodeSchemas:      celSchemas,
 	}
 	emitSchemaDependencies(prog)
-	dedupe(&captured)
+	captured = dedupe(captured)
 	return prog, captured, nil
 }
 
@@ -477,17 +487,20 @@ func allIteratorNames(nodes map[string]*Node) []string {
 }
 
 // dedupe removes duplicate strings in place, preserving order.
-func dedupe(xs *[]string) {
-	seen := make(map[string]struct{}, len(*xs))
-	out := (*xs)[:0]
-	for _, x := range *xs {
+func dedupe(xs []string) []string {
+	if len(xs) == 0 {
+		return xs
+	}
+	seen := make(map[string]struct{}, len(xs))
+	out := make([]string, 0, len(xs))
+	for _, x := range xs {
 		if _, ok := seen[x]; ok {
 			continue
 		}
 		seen[x] = struct{}{}
 		out = append(out, x)
 	}
-	*xs = out
+	return out
 }
 
 // buildDependencyGraph walks every compiled node in this frame, inspects each
@@ -523,7 +536,7 @@ func (ctx *CompilationContext) buildDependencyGraph(nodes map[string]*Node, insp
 			return nil, nil, fmt.Errorf("node %q: register deps: %w", n.ID, err)
 		}
 	}
-	dedupe(&captured)
+	captured = dedupe(captured)
 	return g, captured, nil
 }
 
@@ -588,7 +601,10 @@ func (ctx *CompilationContext) analyzeVariables(n *Node, nodes map[string]*Node,
 			}
 		}
 		if len(missing) > 0 {
-			return nil, fmt.Errorf("every forEach iterator must appear in metadata.name (or metadata.namespace for namespaced resources) to produce unique identities; missing: %v", missing)
+			return nil, fmt.Errorf(
+				"every forEach iterator must appear in metadata.name (or metadata.namespace for namespaced resources) to produce unique identities, missing: %v",
+				missing,
+			)
 		}
 	}
 	return captured, nil
@@ -743,7 +759,10 @@ func (ctx *CompilationContext) extractDependencies(
 		return nil, nil, nil, nil, fmt.Errorf("uses unknown functions: %v", result.UnknownFunctions)
 	}
 	if len(frames) > 1 {
-		return nil, nil, nil, nil, fmt.Errorf("expression %q mixes node references from different graph scopes; an expression may reference one scope (this graph or an enclosing graph), not both", expr.UserExpression())
+		return nil, nil, nil, nil, fmt.Errorf(
+			"expression %q mixes node references from different graph scopes (references must belong to a single scope)",
+			expr.UserExpression(),
+		)
 	}
 	return &result, nodeDeps, iteratorRefs, captured, nil
 }

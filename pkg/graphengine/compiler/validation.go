@@ -28,7 +28,7 @@ var (
 
 	// celReservedSymbols is the CEL grammar's reserved word list. No
 	// identifier may collide with these — they would parse as keywords.
-	celReservedSymbols = sets.NewString(
+	celReservedSymbols = sets.New(
 		"true", "false", "null", "in",
 		"as", "break", "const", "continue", "else",
 		"for", "function", "if", "import", "let",
@@ -40,7 +40,7 @@ var (
 	// node IDs. Keep this list to names we actually reference (or plan to
 	// reference imminently); over-reservation breaks user graphs without
 	// telling them why.
-	reservedNodeIDs = sets.NewString(
+	reservedNodeIDs = sets.New(
 		// Kubernetes manifest top-level fields and common subsections.
 		"apiVersion", "kind", "metadata", "namespace", "spec", "status",
 		// Project namespace.

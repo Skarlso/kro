@@ -902,7 +902,7 @@ func TestDedupe(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			got := append([]string(nil), tc.in...)
-			dedupe(&got)
+			got = dedupe(got)
 			if len(tc.want) == 0 {
 				assert.Empty(t, got)
 				return

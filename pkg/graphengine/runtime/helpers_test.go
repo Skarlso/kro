@@ -143,9 +143,10 @@ func TestErrorClassifiers(t *testing.T) {
 	}{
 		{name: "nil", err: nil, wantDataPend: false, wantCELPending: false},
 		{
-			name:         "wrapped ErrDataPending is data-pending",
-			err:          fmt.Errorf("ctx: %w", ErrDataPending),
-			wantDataPend: true,
+			name:           "wrapped ErrDataPending is data-pending",
+			err:            fmt.Errorf("ctx: %w", ErrDataPending),
+			wantDataPend:   true,
+			wantCELPending: true,
 		},
 		{
 			name:           "no such key is a CEL data-pending",

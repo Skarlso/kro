@@ -160,7 +160,7 @@ func (bc *buildContext) extendWithTypedVar(parent *cel.Env, varName string, s *s
 
 	declType := bc.schemaDeclType(s)
 	if declType == nil {
-		return nil, fmt.Errorf("failed to build DeclType for schema")
+		return nil, fmt.Errorf("build DeclType for schema: unsupported or empty schema")
 	}
 	typeName := krocel.TypeNamePrefix + varName
 	declType = declType.MaybeAssignTypeName(typeName)
@@ -224,11 +224,15 @@ func expectedTypeForField(bc *buildContext, descriptor *variable.FieldDescriptor
 // resolveSchemaAndTypeName walks segments through rootSchema and produces
 // (leafSchema, qualifiedTypeName). Index segments dereference array Items.
 func resolveSchemaAndTypeName(c *schema.Cache, segments []fieldpath.Segment, rootSchema *spec.Schema, nodeID string) (*spec.Schema, string, error) {
-	typeName := krocel.TypeNamePrefix + nodeID
+	var sb strings.Builder
+	sb.WriteString(krocel.TypeNamePrefix)
+	sb.WriteString(nodeID)
+
 	current := rootSchema
 	for _, seg := range segments {
 		if seg.Name != "" {
-			typeName = typeName + "." + seg.Name
+			sb.WriteByte('.')
+			sb.WriteString(seg.Name)
 			current = lookupSchemaAtField(c, current, seg.Name)
 			if current == nil {
 				return nil, "", fmt.Errorf("field %q not found", seg.Name)
@@ -237,13 +241,13 @@ func resolveSchemaAndTypeName(c *schema.Cache, segments []fieldpath.Segment, roo
 		if seg.Index != -1 {
 			if current.Items != nil && current.Items.Schema != nil {
 				current = current.Items.Schema
-				typeName = typeName + ".@idx"
+				sb.WriteString(".@idx")
 			} else {
 				return nil, "", fmt.Errorf("index on non-array at %q", seg.Name)
 			}
 		}
 	}
-	return current, typeName, nil
+	return current, sb.String(), nil
 }
 
 // lookupSchemaAtField resolves a single field name within a schema using

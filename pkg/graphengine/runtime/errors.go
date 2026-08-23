@@ -53,6 +53,9 @@ func isCELDataPending(err error) bool {
 	if err == nil {
 		return false
 	}
+	if errors.Is(err, ErrDataPending) {
+		return true
+	}
 	msg := err.Error()
 	for _, p := range celDataPendingPatterns {
 		if strings.Contains(msg, p) {

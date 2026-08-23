@@ -123,15 +123,23 @@ func New(prog *compiler.Program, g *expv1alpha1.Graph, opts ...Option) *Runtime 
 		metrics.RuntimeCreationDuration.Observe(time.Since(start).Seconds())
 	}()
 
+	nodeCount := 0
+	if prog != nil {
+		nodeCount = len(prog.Nodes)
+	}
+
 	rt := &Runtime{
 		program:           prog,
 		graph:             g,
-		scope:             make(map[string]any, len(prog.Nodes)),
-		byID:              make(map[string]*Node, len(prog.Nodes)),
+		scope:             make(map[string]any, nodeCount),
+		byID:              make(map[string]*Node, nodeCount),
 		maxCollectionSize: DefaultMaxCollectionSize,
 	}
 	for _, opt := range opts {
 		opt(rt)
+	}
+	if prog == nil {
+		return rt
 	}
 	// Build the node wrappers in topological order so callers
 	// see them in apply order.
@@ -240,10 +248,17 @@ func (r *Runtime) Set(id string, value any) {
 }
 
 func wrapValueForScope(val any, sc *spec.Schema, isTemplateOrRef bool) any {
-	if !isTemplateOrRef || sc == nil {
+	if !isTemplateOrRef || sc == nil || val == nil {
 		return val
 	}
 	switch v := val.(type) {
+	case *unstructured.Unstructured:
+		if v == nil {
+			return nil
+		}
+		return celunstructured.UnstructuredToVal(v.Object, &openapi.Schema{Schema: sc})
+	case unstructured.Unstructured:
+		return celunstructured.UnstructuredToVal(v.Object, &openapi.Schema{Schema: sc})
 	case map[string]any:
 		return celunstructured.UnstructuredToVal(v, &openapi.Schema{Schema: sc})
 	case []any:
@@ -255,6 +270,8 @@ func wrapValueForScope(val any, sc *spec.Schema, isTemplateOrRef bool) any {
 		for i, item := range v {
 			if m, ok := item.(map[string]any); ok {
 				list[i] = celunstructured.UnstructuredToVal(m, &openapi.Schema{Schema: itemSchema})
+			} else if u, ok := item.(*unstructured.Unstructured); ok && u != nil {
+				list[i] = celunstructured.UnstructuredToVal(u.Object, &openapi.Schema{Schema: itemSchema})
 			} else {
 				list[i] = item
 			}

@@ -174,7 +174,7 @@ type Dependency struct {
 // HardDepIDs returns the IDs of the node's hard (gating, DAG-edge) edges in
 // encounter order.
 func (n *Node) HardDepIDs() []string {
-	var ids []string
+	ids := make([]string, 0, len(n.Dependencies))
 	for _, d := range n.Dependencies {
 		if !d.Soft {
 			ids = append(ids, d.ID)
@@ -186,7 +186,7 @@ func (n *Node) HardDepIDs() []string {
 // SoftDepIDs returns the IDs of the node's soft (non-gating, seeded) edges in
 // encounter order.
 func (n *Node) SoftDepIDs() []string {
-	var ids []string
+	ids := make([]string, 0, len(n.Dependencies))
 	for _, d := range n.Dependencies {
 		if d.Soft {
 			ids = append(ids, d.ID)

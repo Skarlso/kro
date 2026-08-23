@@ -35,6 +35,9 @@ const DefaultMaxCollectionDimensions = 10
 // rendered objects and to align observed-to-desired in collections.
 // Caller must guarantee namespace and name are set.
 func identityKey(obj *unstructured.Unstructured) string {
+	if obj == nil {
+		return ""
+	}
 	gvk := obj.GroupVersionKind()
 	return gvk.Group + "/" + gvk.Version + "/" + gvk.Kind + "/" + obj.GetNamespace() + "/" + obj.GetName()
 }
@@ -66,10 +69,15 @@ func orderedIntersection(observed, desired []*unstructured.Unstructured) []*unst
 	}
 	byKey := make(map[string]*unstructured.Unstructured, len(observed))
 	for _, obj := range observed {
-		byKey[identityKey(obj)] = obj
+		if obj != nil {
+			byKey[identityKey(obj)] = obj
+		}
 	}
 	out := make([]*unstructured.Unstructured, 0, len(desired))
 	for _, want := range desired {
+		if want == nil {
+			continue
+		}
 		if got, ok := byKey[identityKey(want)]; ok {
 			out = append(out, got)
 		}

@@ -228,7 +228,7 @@ func (ctx *CompilationContext) buildNode(p *parser.Parser, n *expv1alpha1.Node, 
 	}
 	mapping, err := ctx.restMapper.RESTMapping(gvk.GroupKind(), gvk.Version)
 	if err != nil {
-		return nil, nil, fmt.Errorf("REST mapping for %s: %w", gvk, err)
+		return nil, nil, fmt.Errorf("rest mapping for %s: %w", gvk, err)
 	}
 	if mapping.Scope.Name() != meta.RESTScopeNameNamespace {
 		// Cluster-scoped targets must not carry a namespace; otherwise the
@@ -319,7 +319,12 @@ func patchSubresource(n *expv1alpha1.Node) string {
 // validated — it isn't a literal version yet. The node publishes no schema
 // (nil), so downstream references see it as dyn until the executor pins the
 // GVK.
-func (ctx *CompilationContext) buildDynamicNode(n *expv1alpha1.Node, order int, payload map[string]interface{}, kind NodeKind) (*Node, *spec.Schema, error) {
+func (ctx *CompilationContext) buildDynamicNode(
+	n *expv1alpha1.Node,
+	order int,
+	payload map[string]any,
+	kind NodeKind,
+) (*Node, *spec.Schema, error) {
 	if err := validateDynamicTemplateStructure(payload); err != nil {
 		return nil, nil, err
 	}
@@ -349,7 +354,7 @@ func (ctx *CompilationContext) buildDynamicNode(n *expv1alpha1.Node, order int, 
 // CEL expression, meaning its target GVK can't be known until reconcile
 // time. Detection is a scan for the "${" delimiter — apiVersion and kind
 // are plain GVK strings, so any expression marker is unambiguous.
-func isDynamicGVK(payload map[string]interface{}) bool {
+func isDynamicGVK(payload map[string]any) bool {
 	for _, field := range []string{"apiVersion", "kind"} {
 		if s, ok := payload[field].(string); ok && strings.Contains(s, "${") {
 			return true
@@ -363,7 +368,7 @@ func isDynamicGVK(payload map[string]interface{}) bool {
 // content is a CEL expression, resolved at runtime) and a metadata object.
 // Unlike validateKubernetesObjectStructure it does not parse apiVersion as
 // group/version or enforce the version regex.
-func validateDynamicTemplateStructure(obj map[string]interface{}) error {
+func validateDynamicTemplateStructure(obj map[string]any) error {
 	if obj == nil {
 		return fmt.Errorf("payload is empty")
 	}
@@ -378,10 +383,10 @@ func validateDynamicTemplateStructure(obj map[string]interface{}) error {
 	}
 	md, ok := obj["metadata"]
 	if !ok {
-		return fmt.Errorf("missing required field \"metadata\"")
+		return fmt.Errorf("missing required field %q", "metadata")
 	}
-	if _, ok := md.(map[string]interface{}); !ok {
-		return fmt.Errorf("field \"metadata\" must be an object")
+	if _, ok := md.(map[string]any); !ok {
+		return fmt.Errorf("field %q must be an object", "metadata")
 	}
 	return nil
 }
@@ -389,8 +394,8 @@ func validateDynamicTemplateStructure(obj map[string]interface{}) error {
 // hasMetadataSelector reports whether a projected payload carries a
 // metadata.selector object — the marker distinguishing a selector externalRef
 // (a read-only collection) from a single-object externalRef.
-func hasMetadataSelector(payload map[string]interface{}) bool {
-	md, ok := payload["metadata"].(map[string]interface{})
+func hasMetadataSelector(payload map[string]any) bool {
+	md, ok := payload["metadata"].(map[string]any)
 	if !ok {
 		return false
 	}
@@ -400,7 +405,7 @@ func hasMetadataSelector(payload map[string]interface{}) bool {
 
 // projectPayload converts the discriminated-union API node into a single
 // unstructured map suitable for CEL extraction.
-func projectPayload(n *expv1alpha1.Node) (NodeKind, map[string]interface{}, error) {
+func projectPayload(n *expv1alpha1.Node) (NodeKind, map[string]any, error) {
 	switch {
 	case n.Template != nil:
 		obj, err := unmarshalRaw(n.Template.Raw)
@@ -437,8 +442,8 @@ func projectPayload(n *expv1alpha1.Node) (NodeKind, map[string]interface{}, erro
 // extraction pipeline as a template, so a patch body is type-checked against
 // the target schema and its CEL references become dependencies. Body keys may
 // not override apiVersion/kind/metadata — those identify the target.
-func projectPatchPayload(p *expv1alpha1.PatchSpec) (map[string]interface{}, error) {
-	out := map[string]interface{}{}
+func projectPatchPayload(p *expv1alpha1.PatchSpec) (map[string]any, error) {
+	out := map[string]any{}
 	if p.Body != nil {
 		body, err := unmarshalRaw(p.Body.Raw)
 		if err != nil {
@@ -450,7 +455,7 @@ func projectPatchPayload(p *expv1alpha1.PatchSpec) (map[string]interface{}, erro
 	}
 	out["apiVersion"] = p.APIVersion
 	out["kind"] = p.Kind
-	metadata := map[string]interface{}{"name": p.Metadata.Name}
+	metadata := map[string]any{"name": p.Metadata.Name}
 	if p.Metadata.Namespace != "" {
 		metadata["namespace"] = p.Metadata.Namespace
 	}
@@ -458,11 +463,11 @@ func projectPatchPayload(p *expv1alpha1.PatchSpec) (map[string]interface{}, erro
 	return out, nil
 }
 
-func unmarshalRaw(raw []byte) (map[string]interface{}, error) {
+func unmarshalRaw(raw []byte) (map[string]any, error) {
 	if len(raw) == 0 {
-		return map[string]interface{}{}, nil
+		return map[string]any{}, nil
 	}
-	out := map[string]interface{}{}
+	out := map[string]any{}
 	if err := yaml.UnmarshalStrict(raw, &out); err != nil {
 		return nil, fmt.Errorf("unmarshal: %w", err)
 	}
@@ -475,7 +480,7 @@ func unmarshalRaw(raw []byte) (map[string]interface{}, error) {
 // requireMetadata is true the payload must also carry a metadata object —
 // this is true for user-authored Templates but false for Ref
 // payloads which are synthesized from typed structs.
-func validateKubernetesObjectStructure(obj map[string]interface{}, requireMetadata bool) error {
+func validateKubernetesObjectStructure(obj map[string]any, requireMetadata bool) error {
 	if obj == nil {
 		return fmt.Errorf("payload is empty")
 	}
@@ -499,10 +504,10 @@ func validateKubernetesObjectStructure(obj map[string]interface{}, requireMetada
 	if requireMetadata {
 		md, ok := obj["metadata"]
 		if !ok {
-			return fmt.Errorf("missing required field \"metadata\"")
+			return fmt.Errorf("missing required field %q", "metadata")
 		}
-		if _, ok := md.(map[string]interface{}); !ok {
-			return fmt.Errorf("field \"metadata\" must be an object")
+		if _, ok := md.(map[string]any); !ok {
+			return fmt.Errorf("field %q must be an object", "metadata")
 		}
 	}
 	return nil
@@ -511,10 +516,10 @@ func validateKubernetesObjectStructure(obj map[string]interface{}, requireMetada
 // nestedString looks up a dotted path in obj and returns the string value
 // at that location, or "" if any segment is missing / wrong type. Used to
 // peek at metadata.namespace before kicking off the full resolver pipeline.
-func nestedString(obj map[string]interface{}, path ...string) string {
+func nestedString(obj map[string]any, path ...string) string {
 	cur := any(obj)
 	for _, seg := range path {
-		m, ok := cur.(map[string]interface{})
+		m, ok := cur.(map[string]any)
 		if !ok {
 			return ""
 		}
@@ -528,9 +533,15 @@ func nestedString(obj map[string]interface{}, path ...string) string {
 }
 
 // extractGVKFromUnstructured parses apiVersion/kind into a GVK.
-func extractGVKFromUnstructured(obj map[string]interface{}) (k8sschema.GroupVersionKind, error) {
+func extractGVKFromUnstructured(obj map[string]any) (k8sschema.GroupVersionKind, error) {
 	apiVersion, _ := obj["apiVersion"].(string)
 	kind, _ := obj["kind"].(string)
+	if apiVersion == "" {
+		return k8sschema.GroupVersionKind{}, fmt.Errorf("missing or invalid apiVersion")
+	}
+	if kind == "" {
+		return k8sschema.GroupVersionKind{}, fmt.Errorf("missing or invalid kind")
+	}
 	gv, err := k8sschema.ParseGroupVersion(apiVersion)
 	if err != nil {
 		return k8sschema.GroupVersionKind{}, fmt.Errorf("parse apiVersion %q: %w", apiVersion, err)
