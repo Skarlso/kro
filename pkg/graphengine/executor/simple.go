@@ -83,6 +83,16 @@ func (s *Simple) WithLabelInjector(fn func(*unstructured.Unstructured)) *Simple 
 	return s
 }
 
+func (s *Simple) WithGateReadiness(gate bool) *Simple {
+	s.GateReadiness = gate
+	return s
+}
+
+func (s *Simple) WithApplyConcurrency(concurrency int) *Simple {
+	s.ApplyConcurrency = concurrency
+	return s
+}
+
 // ApplyWithLabeler is like Apply but stamps every child object with
 // the supplied labeler just before SSA, in addition to the struct-level
 // LabelInjector (if any). Uses a per-call override via the context so
@@ -232,9 +242,11 @@ func (s *Simple) Apply(ctx context.Context, rt *runtime.Runtime, w watchrouter.W
 			return result, fmt.Errorf("apply %q: resolve: %w", n.ID(), err)
 		}
 
-		if softErr, err := s.applyNodeByKind(ctx, rt, w, n, desired, &result); err != nil {
+		softErr, err := s.applyNodeByKind(ctx, rt, w, n, desired, &result)
+		if err != nil {
 			return result, err
-		} else if softErr != nil {
+		}
+		if softErr != nil {
 			recordSoft(softErr)
 			continue
 		}
@@ -629,6 +641,12 @@ func (st *collectionApplyState) recordDeleting(de *ResourceDeletingError) {
 	st.mu.Unlock()
 }
 
+func (st *collectionApplyState) deletingError() *ResourceDeletingError {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	return st.deletingErr
+}
+
 func (st *collectionApplyState) recordHardError(i int, err error) {
 	st.mu.Lock()
 	st.hardErrors[i] = err
@@ -736,8 +754,8 @@ func (s *Simple) applyCollectionTemplate(ctx context.Context, w watchrouter.Watc
 	}
 	// A terminating item takes priority: surface the ResourceDeleting signal
 	// so the reconciler marks the ResourcesReady condition accordingly.
-	if st.deletingErr != nil {
-		return st.appliedResources(), st.deletingErr
+	if deletingErr := st.deletingError(); deletingErr != nil {
+		return st.appliedResources(), deletingErr
 	}
 	// Any create failure holds the collection soft not-ready so downstream
 	// gates and the reconcile requeues (never a hard abort).
@@ -829,7 +847,7 @@ func (s *Simple) getLive(ctx context.Context, obj *unstructured.Unstructured) (*
 func stampKROMeta(rt *runtime.Runtime, n *runtime.Node, obj *unstructured.Unstructured, index, size int) {
 	labels := obj.GetLabels()
 	if labels == nil {
-		labels = map[string]string{}
+		labels = make(map[string]string, 3)
 	}
 	labels[metadata.NodeIDLabel] = n.ID()
 	if n.IsCollection() {
@@ -841,7 +859,7 @@ func stampKROMeta(rt *runtime.Runtime, n *runtime.Node, obj *unstructured.Unstru
 	if order, ok := rt.ApplyOrder(n.ID()); ok {
 		annotations := obj.GetAnnotations()
 		if annotations == nil {
-			annotations = map[string]string{}
+			annotations = make(map[string]string, 1)
 		}
 		annotations[metadata.ApplyOrderAnnotation] = strconv.Itoa(order)
 		obj.SetAnnotations(annotations)
@@ -1225,6 +1243,10 @@ func (s *Simple) Release(ctx context.Context, contributions []Contribution) erro
 // 128-character SSA limit. Stability across reconciles is what lets
 // release-on-prune drop exactly the fields a given patch node contributed.
 func patchFieldManager(parentUID types.UID, nodeID string) string {
-	sum := sha256.Sum256([]byte(string(parentUID) + "/" + nodeID))
-	return "kro-graphengine.patch." + hex.EncodeToString(sum[:])[:12]
+	h := sha256.New()
+	h.Write([]byte(parentUID))
+	h.Write([]byte("/"))
+	h.Write([]byte(nodeID))
+	sum := h.Sum(nil)
+	return "kro-graphengine.patch." + hex.EncodeToString(sum[:6])
 }

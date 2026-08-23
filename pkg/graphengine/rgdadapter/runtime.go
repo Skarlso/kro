@@ -86,7 +86,10 @@ func BuildRuntimeForInstance(
 	if err != nil {
 		return nil, nil, fmt.Errorf("rgdadapter: schema node: %w", err)
 	}
-	g.Spec.Nodes = append([]v1alpha1.Node{schemaNode}, g.Spec.Nodes...)
+	nodes := make([]v1alpha1.Node, 0, 1+len(g.Spec.Nodes))
+	nodes = append(nodes, schemaNode)
+	nodes = append(nodes, g.Spec.Nodes...)
+	g.Spec.Nodes = nodes
 
 	// Step 3: stamp the Graph's metadata so the executor can namespace-default
 	// namespaced resources correctly (executor reads rt.Graph().GetNamespace()).
@@ -103,15 +106,13 @@ func BuildRuntimeForInstance(
 	}
 
 	// Step 5: construct the runtime.
+	schemaData, err := instanceSchemaValue(instance)
+	if err != nil {
+		return nil, nil, fmt.Errorf("rgdadapter: schema value: %w", err)
+	}
 	var rtOpts []runtime.Option
-	if rgd.Spec.Schema != nil {
-		if schemaVarSchema, err := graph.InstanceSchemaForCEL(rgd); err == nil && schemaVarSchema != nil {
-			if schemaData, err := instanceSchemaValue(instance); err == nil {
-				rtOpts = append(rtOpts, runtime.WithSeedScope(map[string]any{
-					SchemaNodeID: celunstructured.UnstructuredToVal(schemaData, &openapi.Schema{Schema: schemaVarSchema}),
-				}))
-			}
-		}
+	if seedOpt := instanceSeedScopeOption(rgd, schemaData); seedOpt != nil {
+		rtOpts = append(rtOpts, seedOpt)
 	}
 	rtOpts = append(rtOpts, opts...)
 	rt := runtime.New(prog, g, rtOpts...)
@@ -168,7 +169,10 @@ func BuildRuntimeForInstanceCached(
 	if err != nil {
 		return nil, nil, fmt.Errorf("rgdadapter: translate: %w", err)
 	}
-	g.Spec.Nodes = append([]v1alpha1.Node{emptySchemaNode()}, g.Spec.Nodes...)
+	cachedNodes := make([]v1alpha1.Node, 0, 1+len(g.Spec.Nodes))
+	cachedNodes = append(cachedNodes, emptySchemaNode())
+	cachedNodes = append(cachedNodes, g.Spec.Nodes...)
+	g.Spec.Nodes = cachedNodes
 
 	// ObjectMeta carries the per-instance name/namespace for the executor's
 	// namespace-defaulting. It is NOT part of GraphSpec, so the cache hash
@@ -201,10 +205,8 @@ func BuildRuntimeForInstanceCached(
 
 	// Inject this instance's schema data as the `schema` node's runtime value.
 	var rtOpts []runtime.Option
-	if schemaVarSchema, err := graph.InstanceSchemaForCEL(rgd); err == nil && schemaVarSchema != nil {
-		rtOpts = append(rtOpts, runtime.WithSeedScope(map[string]any{
-			SchemaNodeID: celunstructured.UnstructuredToVal(schemaData, &openapi.Schema{Schema: schemaVarSchema}),
-		}))
+	if seedOpt := instanceSeedScopeOption(rgd, schemaData); seedOpt != nil {
+		rtOpts = append(rtOpts, seedOpt)
 	}
 	rtOpts = append(rtOpts, runtime.WithNodeObjectOverride(SchemaNodeID, &unstructured.Unstructured{Object: schemaData}))
 	rtOpts = append(rtOpts, opts...)
@@ -251,6 +253,19 @@ func schemaFingerprint(s *v1alpha1.Schema) string {
 	}
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
+}
+
+func instanceSeedScopeOption(rgd *v1alpha1.ResourceGraphDefinition, schemaData map[string]any) runtime.Option {
+	if rgd.Spec.Schema == nil {
+		return nil
+	}
+	schemaVarSchema, err := graph.InstanceSchemaForCEL(rgd)
+	if err != nil || schemaVarSchema == nil {
+		return nil
+	}
+	return runtime.WithSeedScope(map[string]any{
+		SchemaNodeID: celunstructured.UnstructuredToVal(schemaData, &openapi.Schema{Schema: schemaVarSchema}),
+	})
 }
 
 // schemaCompileOpts builds the CompileOptions shared by both build paths:

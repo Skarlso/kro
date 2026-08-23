@@ -61,7 +61,8 @@ type ResourceDeletingError struct {
 
 func (e *ResourceDeletingError) Error() string {
 	return fmt.Sprintf(
-		"resource %q for node %q is currently being deleted; waiting for deletion to complete before continuing reconciliation",
+		"resource %q for node %q is currently being deleted; "+
+			"waiting for deletion to complete before continuing reconciliation",
 		e.ref(),
 		e.NodeID,
 	)

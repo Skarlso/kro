@@ -133,10 +133,7 @@ func authorStatusPatchNode(rgd *v1alpha1.ResourceGraphDefinition) (v1alpha1.Node
 	if group == "" {
 		group = "kro.run"
 	}
-	apiVersion := rgd.Spec.Schema.APIVersion
-	if group != "" {
-		apiVersion = group + "/" + apiVersion
-	}
+	apiVersion := group + "/" + rgd.Spec.Schema.APIVersion
 	namespaced := rgd.Spec.Schema.Scope != v1alpha1.ResourceScopeCluster
 
 	bodyRaw, err := json.Marshal(map[string]any{"status": statusMap})
@@ -181,7 +178,11 @@ func resourceToNode(res *v1alpha1.Resource) (v1alpha1.Node, error) {
 			return v1alpha1.Node{}, fmt.Errorf("%w: resource %q: externalRef is missing metadata.name", ErrUnsupported, res.ID)
 		}
 		if len(res.ForEach) > 0 {
-			return v1alpha1.Node{}, fmt.Errorf("%w: resource %q: forEach on externalRef is not supported", ErrUnsupported, res.ID)
+			return v1alpha1.Node{}, fmt.Errorf(
+				"%w: resource %q: forEach on externalRef is not supported",
+				ErrUnsupported,
+				res.ID,
+			)
 		}
 		// The ExternalRef (including a *metav1.LabelSelector under
 		// metadata.selector, with matchLabels + matchExpressions) is carried
@@ -235,7 +236,7 @@ func instanceSchemaValue(instance *unstructured.Unstructured) (map[string]any, e
 	if instance == nil {
 		return nil, fmt.Errorf("rgdadapter: instance is required")
 	}
-	val := map[string]any{}
+	val := make(map[string]any, 5)
 	if av := instance.GetAPIVersion(); av != "" {
 		val["apiVersion"] = av
 	} else if av, ok := instance.Object["apiVersion"]; ok {

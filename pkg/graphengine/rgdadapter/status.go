@@ -199,7 +199,7 @@ func ProjectInstanceConditions(
 	// singleton, and the `schema` node overlaid so its status.conditions holds
 	// this reconcile's kro built-ins for runtime.condition(schema, _) lookups.
 	saScope := schemaAwareScope(rt.Scope(), rt)
-	scope := make(map[string]any, len(saScope)+1)
+	scope := make(map[string]any, len(saScope)+2)
 	for k, v := range saScope {
 		scope[k] = v
 	}
@@ -325,7 +325,7 @@ func schemaAwareScope(rawScope map[string]any, rt *runtime.Runtime) map[string]a
 
 // unmarshalStatusRaw decodes RGD.Spec.Schema.Status.Raw into a map.
 // Returns (nil, nil) when no status block is defined.
-func unmarshalStatusRaw(rgd *v1alpha1.ResourceGraphDefinition) (map[string]interface{}, error) {
+func unmarshalStatusRaw(rgd *v1alpha1.ResourceGraphDefinition) (map[string]any, error) {
 	if rgd.Spec.Schema == nil {
 		return nil, nil
 	}
@@ -333,7 +333,7 @@ func unmarshalStatusRaw(rgd *v1alpha1.ResourceGraphDefinition) (map[string]inter
 	if len(raw) == 0 {
 		return nil, nil
 	}
-	var m map[string]interface{}
+	var m map[string]any
 	if err := json.Unmarshal(raw, &m); err != nil {
 		return nil, fmt.Errorf("status projection: unmarshal status: %w", err)
 	}
@@ -452,7 +452,11 @@ func flattenConditionValue(val ref.Val, exprText string) ([]library.Condition, e
 		}
 		return out, nil
 	}
-	return nil, fmt.Errorf("condition %q must return a Condition or list(Condition), got %v", exprText, val.Type().TypeName())
+	return nil, fmt.Errorf(
+		"condition %q must return a Condition or list(Condition), got %v",
+		exprText,
+		val.Type().TypeName(),
+	)
 }
 
 // dedupConditionTypes removes every occurrence of any condition type that
