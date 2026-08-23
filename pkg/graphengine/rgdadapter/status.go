@@ -39,8 +39,8 @@ import (
 	"github.com/kubernetes-sigs/kro/pkg/cel/library"
 	celunstructured "github.com/kubernetes-sigs/kro/pkg/cel/unstructured"
 	"github.com/kubernetes-sigs/kro/pkg/graph"
+	"github.com/kubernetes-sigs/kro/pkg/graph/resolver"
 	"github.com/kubernetes-sigs/kro/pkg/graphengine/runtime"
-	"github.com/kubernetes-sigs/kro/pkg/runtime/resolver"
 )
 
 // ProjectInstanceStatus evaluates the RGD's spec.schema.status CEL
@@ -110,7 +110,7 @@ func ProjectInstanceStatus(
 	for _, f := range fields {
 		val, err := evalStatusExpr(env, saScope, f.Expression)
 		if err != nil {
-			if isDataPendingCEL(err) {
+			if runtime.IsCELDataPending(err) {
 				// Dependency not observable this cycle: drop the field so a
 				// field whose dependency is unavailable disappears rather
 				// than failing the whole projection.
@@ -212,7 +212,7 @@ func ProjectInstanceConditions(
 		inner := unwrapExpr(rawExpr)
 		raw, evalErr := evalConditionRaw(env, scope, inner)
 		if evalErr != nil {
-			if isDataPendingCEL(evalErr) {
+			if runtime.IsCELDataPending(evalErr) {
 				incomplete = true
 				continue
 			}
@@ -485,28 +485,6 @@ func dedupConditionTypes(conds []library.Condition) ([]library.Condition, []stri
 	}
 	sort.Strings(dups)
 	return kept, dups
-}
-
-// dataPendingPatterns are CEL error substrings meaning "required data not
-// available yet" rather than an expression bug.
-var dataPendingPatterns = []string{
-	"no such key",
-	"no such field",
-	"no such attribute",
-	"index out of bounds",
-}
-
-func isDataPendingCEL(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := err.Error()
-	for _, p := range dataPendingPatterns {
-		if strings.Contains(msg, p) {
-			return true
-		}
-	}
-	return false
 }
 
 // unwrapExpr strips ${...} wrappers from a CEL expression string.

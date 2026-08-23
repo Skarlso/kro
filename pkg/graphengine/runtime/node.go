@@ -27,10 +27,10 @@ import (
 	krocel "github.com/kubernetes-sigs/kro/pkg/cel"
 	"github.com/kubernetes-sigs/kro/pkg/cel/sentinels"
 	"github.com/kubernetes-sigs/kro/pkg/graph/fieldpath"
+	"github.com/kubernetes-sigs/kro/pkg/graph/resolver"
 	"github.com/kubernetes-sigs/kro/pkg/graph/variable"
 	"github.com/kubernetes-sigs/kro/pkg/graphengine/compiler"
 	"github.com/kubernetes-sigs/kro/pkg/metrics"
-	"github.com/kubernetes-sigs/kro/pkg/runtime/resolver"
 )
 
 // Node is the runtime view of a single compiled Node. It carries the
@@ -165,7 +165,7 @@ func (n *Node) computeIgnored() (bool, error) {
 	for _, expr := range n.spec.IncludeWhen {
 		v, err := expr.Eval(n.rt.scope)
 		if err != nil {
-			if isCELDataPending(err) {
+			if IsCELDataPending(err) {
 				return false, fmt.Errorf("node %q: includeWhen %q: %w (%w)", n.spec.ID, expr.UserExpression(), err, ErrDataPending)
 			}
 			return false, fmt.Errorf("node %q: includeWhen %q: %w", n.spec.ID, expr.UserExpression(), err)
@@ -225,7 +225,7 @@ func (n *Node) CheckReadiness() error {
 	for _, expr := range n.spec.ReadyWhen {
 		v, err := expr.Eval(n.rt.scope)
 		if err != nil {
-			if isCELDataPending(err) {
+			if IsCELDataPending(err) {
 				metrics.NodeNotReadyTotal.Inc()
 				return fmt.Errorf("node %q: readyWhen %q: %w (%w)", n.spec.ID, expr.UserExpression(), err, ErrWaitingForReadiness)
 			}
@@ -275,7 +275,7 @@ func (n *Node) checkCollectionReadiness() error {
 		for _, expr := range n.spec.ReadyWhen {
 			v, err := expr.Eval(scope)
 			if err != nil {
-				if isCELDataPending(err) {
+				if IsCELDataPending(err) {
 					return fmt.Errorf("node %q: readyWhen %q (item %d): %w (%w)", n.spec.ID, expr.UserExpression(), i, err, ErrWaitingForReadiness)
 				}
 				return fmt.Errorf("node %q: readyWhen %q (item %d): %w", n.spec.ID, expr.UserExpression(), i, err)
@@ -364,7 +364,7 @@ func (n *Node) renderOne(bindings map[string]any) (*unstructured.Unstructured, e
 	for _, v := range n.spec.Variables {
 		val, err := v.Expression.Eval(scope)
 		if err != nil {
-			if isCELDataPending(err) {
+			if IsCELDataPending(err) {
 				if n.spec.TolerateDataPending && isObjectProperty(v.Path) {
 					// Omit this field and keep rendering the rest: the resolver
 					// strips the sentinel so a data-pending map field disappears
