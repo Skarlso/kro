@@ -428,7 +428,7 @@ func TestSimple_ApplyTemplate_LargeCollectionTolerance(t *testing.T) {
 	// 10..19: absent, fail on create (tolerated, recorded in itemFailures, soft ErrNotReady)
 	// 20..59: absent, succeed on create (applied)
 
-	var seeded []client.Object
+	seeded := make([]client.Object, 0, 10)
 	for i := range 10 {
 		seeded = append(seeded, liveCM(fmt.Sprintf("cm-item-%02d", i)))
 	}

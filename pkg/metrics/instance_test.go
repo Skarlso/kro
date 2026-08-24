@@ -286,11 +286,6 @@ func TestEmitConditionMetrics_DurationStaysAccurateBetweenReconciles(t *testing.
 	assert.Greater(t, val2, val1, "scrape-time duration must advance even without a reconcile")
 }
 
-//go:fix inline
-func strPtr(s string) *string {
-	return new(s)
-}
-
 // testutilCountMetrics returns the number of active metric series a
 // collector emits.
 func testutilCountMetrics(t *testing.T, c prometheus.Collector) int {

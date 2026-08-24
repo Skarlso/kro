@@ -93,17 +93,16 @@ func BenchmarkNewRGD_SimplePodAndConfig(b *testing.B) {
 func BenchmarkNewRGD_ManyPods(b *testing.B) {
 	builder := newBenchBuilder(b)
 
-	opts := []generator.ResourceGraphDefinitionOption{
-		generator.WithSchema(
-			"PodSet", "v1alpha1",
-			map[string]any{
-				"name": "string",
-			},
-			map[string]any{
-				"pod00Phase": "${pod00.status.phase}",
-			},
-		),
-	}
+	opts := make([]generator.ResourceGraphDefinitionOption, 0, 21)
+	opts = append(opts, generator.WithSchema(
+		"PodSet", "v1alpha1",
+		map[string]any{
+			"name": "string",
+		},
+		map[string]any{
+			"pod00Phase": "${pod00.status.phase}",
+		},
+	))
 
 	// 20 pods, each referencing schema.spec.name
 	for i := range 20 {

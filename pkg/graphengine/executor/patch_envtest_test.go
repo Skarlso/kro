@@ -546,8 +546,3 @@ func compileAndBuildEnv(t *testing.T, cfg *rest.Config, g *expv1alpha1.Graph) *k
 	require.NoError(t, err)
 	return krotruntime.New(p, g)
 }
-
-//go:fix inline
-func ptr[T any](v T) *T {
-	return new(v)
-}
