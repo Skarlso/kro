@@ -51,12 +51,20 @@ func Spec(spec v1alpha1.ResourceGraphDefinitionSpec) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	return FNV64a(normalized, jsonMarshal)
+}
 
-	data, err := jsonMarshal(normalized)
+// FNV64a returns the hex-encoded FNV-64a hash of marshal(v). It is the shared
+// tail of every spec hash: marshal the already-normalized value to canonical
+// bytes, then FNV-64a + hex-encode. marshal is a seam so callers can inject
+// failures in tests. This is the single canonical implementation; other
+// hashing sites (e.g. graphengine/registry) delegate here rather than
+// reimplementing the marshal/hash/encode sequence.
+func FNV64a(v any, marshal func(any) ([]byte, error)) (string, error) {
+	data, err := marshal(v)
 	if err != nil {
 		return "", fmt.Errorf("marshal normalized spec: %w", err)
 	}
-
 	h := fnv.New64a()
 	h.Write(data)
 	return hex.EncodeToString(h.Sum(nil)), nil

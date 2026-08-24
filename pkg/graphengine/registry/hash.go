@@ -19,15 +19,14 @@ package registry
 import (
 	"bytes"
 	"cmp"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"hash/fnv"
 	"slices"
 
 	"k8s.io/apimachinery/pkg/runtime"
 
 	expv1alpha1 "github.com/kubernetes-sigs/kro/api/v1alpha1"
+	"github.com/kubernetes-sigs/kro/pkg/graph/hash"
 )
 
 // marshalFunc is the JSON marshaling surface used during hashing. Production
@@ -58,13 +57,7 @@ func hashSpecWith(spec expv1alpha1.GraphSpec, marshal marshalFunc) (string, erro
 	if err != nil {
 		return "", err
 	}
-	data, err := marshal(normalized)
-	if err != nil {
-		return "", fmt.Errorf("marshal normalized spec: %w", err)
-	}
-	h := fnv.New64a()
-	h.Write(data)
-	return hex.EncodeToString(h.Sum(nil)), nil
+	return hash.FNV64a(normalized, marshal)
 }
 
 func normalizeSpec(spec expv1alpha1.GraphSpec, marshal marshalFunc) (expv1alpha1.GraphSpec, error) {
