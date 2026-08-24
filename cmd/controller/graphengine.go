@@ -19,7 +19,9 @@ import (
 
 	"github.com/go-logr/logr"
 	"k8s.io/client-go/metadata"
+	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	ctrlgraph "github.com/kubernetes-sigs/kro/pkg/controller/graph"
 	"github.com/kubernetes-sigs/kro/pkg/graphengine/compiler"
@@ -66,6 +68,20 @@ func setupGraphController(
 	exec := executor.NewSimple(mgr.GetClient())
 	exec.ApplyConcurrency = applyConcurrency
 
+	// A namespaced Graph applies its resources while impersonating a
+	// ServiceAccount in the Graph's namespace (default, or spec.serviceAccountName).
+	// Build impersonated controller-runtime clients from the manager's REST
+	// config; they share the manager's REST mapper so discovery is not repeated
+	// per ServiceAccount. The kro controller SA needs the "impersonate" verb on
+	// serviceaccounts for this to take effect.
+	baseCfg := mgr.GetConfig()
+	mapper := mgr.GetRESTMapper()
+	impersonation := ctrlgraph.NewImpersonation(exec, func(user string) (client.Client, error) {
+		cfg := rest.CopyConfig(baseCfg)
+		cfg.Impersonate = rest.ImpersonationConfig{UserName: user}
+		return client.New(cfg, client.Options{Mapper: mapper})
+	})
+
 	reconciler := &ctrlgraph.Reconciler{
 		Client:                  mgr.GetClient(),
 		Compiler:                cmp,
@@ -75,6 +91,7 @@ func setupGraphController(
 		SchemaWatcher:           sw,
 		MaxConcurrentReconciles: concurrentReconciles,
 		MaxCollectionSize:       maxCollectionSize,
+		Impersonation:           impersonation,
 	}
 	if err := reconciler.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup graph reconciler: %w", err)

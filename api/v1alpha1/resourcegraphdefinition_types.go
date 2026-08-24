@@ -35,24 +35,6 @@ type ResourceGraphDefinitionSpec struct {
 	//
 	// +kubebuilder:validation:Optional
 	Resources []*Resource `json:"resources,omitempty"`
-
-	// ServiceAccountName, when set, causes kro to apply this graph's child
-	// resources while impersonating the named ServiceAccount instead of using
-	// the kro controller's own identity. The ServiceAccount is always resolved
-	// in the namespace of the instance being reconciled
-	// (system:serviceaccount:<instance-namespace>:<name>), so a namespaced
-	// graph can never escalate beyond the RBAC granted to a ServiceAccount in
-	// its own namespace. When empty, kro impersonates the default
-	// ServiceAccount of the instance's namespace, confining child-resource
-	// access to that namespace by default.
-	//
-	// The kro controller ServiceAccount must be granted the "impersonate" verb
-	// on serviceaccounts for this to take effect.
-	//
-	// +kubebuilder:validation:Optional
-	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
-	// +kubebuilder:validation:MaxLength=253
-	ServiceAccountName string `json:"serviceAccountName,omitempty"`
 }
 
 // Schema defines the structure and behavior of instances created from a ResourceGraphDefinition.

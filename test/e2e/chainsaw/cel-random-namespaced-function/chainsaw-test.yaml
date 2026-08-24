@@ -7,8 +7,6 @@ spec:
   - name: Apply RGD
     try:
     - apply:
-        file: cluster-role.yaml
-    - apply:
         file: rgd.yaml
     - assert:
         file: assert-rgd-active.yaml

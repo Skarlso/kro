@@ -187,7 +187,7 @@ func TestReconcileApplySetInventory_FullyResolvedGate(t *testing.T) {
 
 		// applied is empty (orphan is not in applied), but fullyResolved is false
 		applied := []v1alpha1.ManagedResource{}
-		err := controller.reconcileApplySetInventory(context.Background(), controller.log, instance, nil, applied, applyset.Metadata{}, false, controller.client.Dynamic())
+		err := controller.reconcileApplySetInventory(context.Background(), controller.log, instance, nil, applied, applyset.Metadata{}, false)
 		require.NoError(t, err)
 
 		// The orphan must NOT be deleted from the dynamic client
@@ -206,7 +206,7 @@ func TestReconcileApplySetInventory_FullyResolvedGate(t *testing.T) {
 
 		// applied is empty (orphan is not in applied), and fullyResolved is true
 		applied := []v1alpha1.ManagedResource{}
-		err := controller.reconcileApplySetInventory(context.Background(), controller.log, instance, nil, applied, applyset.Metadata{}, true, controller.client.Dynamic())
+		err := controller.reconcileApplySetInventory(context.Background(), controller.log, instance, nil, applied, applyset.Metadata{}, true)
 		require.NoError(t, err)
 
 		// The orphan must be deleted from the dynamic client

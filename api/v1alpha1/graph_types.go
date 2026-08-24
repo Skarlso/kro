@@ -41,6 +41,23 @@ type GraphSpec struct {
 	// +listType=map
 	// +listMapKey=id
 	Nodes []Node `json:"nodes"`
+
+	// ServiceAccountName, when set, causes kro to apply this Graph's resources
+	// while impersonating the named ServiceAccount instead of using the kro
+	// controller's own identity. The ServiceAccount is always resolved in the
+	// Graph's own namespace (system:serviceaccount:<graph-namespace>:<name>), so
+	// a Graph can never escalate beyond the RBAC granted to a ServiceAccount in
+	// its own namespace. When empty, kro impersonates the default ServiceAccount
+	// of the Graph's namespace, confining resource access to that namespace by
+	// default.
+	//
+	// The kro controller ServiceAccount must be granted the "impersonate" verb
+	// on serviceaccounts for this to take effect.
+	//
+	// +kubebuilder:validation:Optional
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	// +kubebuilder:validation:MaxLength=253
+	ServiceAccountName string `json:"serviceAccountName,omitempty"`
 }
 
 // GraphStatus defines the observed state of a Graph.

@@ -75,6 +75,12 @@ type Reconciler struct {
 	SchemaWatcher           *schemawatcher.SchemaWatcher
 	MaxConcurrentReconciles int
 	MaxCollectionSize       int
+
+	// Impersonation, when set, resolves a per-Graph executor that applies the
+	// Graph's resources while impersonating a ServiceAccount in the Graph's
+	// namespace. When nil, the Graph's resources are applied with the kro
+	// controller identity (the base Executor).
+	Impersonation *impersonationCache
 }
 
 // Reconcile is the main reconcile loop for Graph objects.
@@ -96,12 +102,18 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 	if !g.DeletionTimestamp.IsZero() {
 		logger.V(1).Info("graph is deleting")
+		// Resolve the impersonated executor for this Graph so teardown runs
+		// under the same identity that applied the resources.
+		ex, err := r.executorFor(&g)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("resolve impersonated executor: %w", err)
+		}
 		// Delete operates entirely from the persisted tracking record.
 		// No compile, no resolve — a Graph whose spec was edited
 		// (rename, forEach shrunk, node dropped) still gets every
 		// resource it ever applied removed.
 		if len(g.Status.ManagedResources) > 0 {
-			if err := r.Executor.Delete(ctx, g.Status.ManagedResources); err != nil {
+			if err := ex.Delete(ctx, g.Status.ManagedResources); err != nil {
 				return ctrl.Result{}, fmt.Errorf("executor delete: %w", err)
 			}
 		}
@@ -112,7 +124,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			return ctrl.Result{}, fmt.Errorf("read patch contributions on delete: %w", err)
 		}
 		if len(contribs) > 0 {
-			if err := r.Executor.Release(ctx, contribs); err != nil {
+			if err := ex.Release(ctx, contribs); err != nil {
 				return ctrl.Result{}, fmt.Errorf("executor release: %w", err)
 			}
 		}
@@ -192,7 +204,16 @@ func (r *Reconciler) reconcileGraph(ctx context.Context, g *expv1alpha1.Graph) e
 		return fmt.Errorf("read patch contributions: %w", err)
 	}
 
-	result, applyErr := r.Executor.Apply(ctx, rt, watcher)
+	// Resolve the executor bound to this Graph's impersonated identity. All
+	// resource writes (apply, prune, release) for this Graph go through it so
+	// they share one identity confined to the Graph's namespace.
+	ex, err := r.executorFor(g)
+	if err != nil {
+		marker.ResourcesApplyFailed(err.Error())
+		return fmt.Errorf("resolve impersonated executor: %w", err)
+	}
+
+	result, applyErr := ex.Apply(ctx, rt, watcher)
 
 	// Commit on full success or soft ErrNotReady — the executor walks
 	// every reachable node even when some are not ready, so the watch
@@ -230,7 +251,7 @@ func (r *Reconciler) reconcileGraph(ctx context.Context, g *expv1alpha1.Graph) e
 		// previous and applied to protect resources we couldn't observe
 		// this cycle.
 		if len(pruneCandidates) > 0 {
-			if err := r.Executor.Delete(ctx, pruneCandidates); err != nil {
+			if err := ex.Delete(ctx, pruneCandidates); err != nil {
 				// Prune failure isn't catastrophic — next reconcile
 				// retries with the same diff. But we shouldn't shrink
 				// status to newSet if some prune candidates are still
@@ -264,7 +285,7 @@ func (r *Reconciler) reconcileGraph(ctx context.Context, g *expv1alpha1.Graph) e
 	// before persist so a release failure keeps the prior inventory for the
 	// next reconcile.
 	if released := DiffContributions(priorContribs, result.Contributions); len(released) > 0 {
-		if err := r.Executor.Release(ctx, released); err != nil {
+		if err := ex.Release(ctx, released); err != nil {
 			if perr := r.persistContributions(ctx, g, UnionContributions(priorContribs, result.Contributions)); perr != nil {
 				return errors.Join(fmt.Errorf("release contributions: %w", err), perr)
 			}

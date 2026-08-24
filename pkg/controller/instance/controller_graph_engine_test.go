@@ -26,7 +26,6 @@ import (
 	"github.com/stretchr/testify/require"
 	appsv1 "k8s.io/api/apps/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	apimachineryruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -46,7 +45,6 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 
 	"github.com/kubernetes-sigs/kro/api/v1alpha1"
-	kroclient "github.com/kubernetes-sigs/kro/pkg/client"
 	clientfake "github.com/kubernetes-sigs/kro/pkg/client/fake"
 	controllergraph "github.com/kubernetes-sigs/kro/pkg/controller/graph"
 	"github.com/kubernetes-sigs/kro/pkg/controller/instance/applyset"
@@ -185,14 +183,6 @@ func newGraphEngineControllerUnderTest(
 
 	if comp != nil {
 		controller.WithGraphEngineCompiler(comp)
-	}
-
-	// The fake client set has no usable rest.Config, so reuse the base
-	// executor's client for the impersonated identity instead of building a real
-	// controller-runtime client. This still exercises the impersonation wiring
-	// (username resolution + dynamic-client swap) against the fake backend.
-	controller.impersonation.newCRClient = func(kroclient.SetInterface, meta.RESTMapper) (client.Client, error) {
-		return controller.graphEngineExecutor.Client, nil
 	}
 
 	return controller, clientSet
@@ -1329,7 +1319,7 @@ func TestReconcileApplySetInventory_Direct(t *testing.T) {
 			},
 		}
 
-		err := c.reconcileApplySetInventory(context.Background(), c.log, inst, nil, applied, applyset.Metadata{}, true, c.client.Dynamic())
+		err := c.reconcileApplySetInventory(context.Background(), c.log, inst, nil, applied, applyset.Metadata{}, true)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "applyset union:")
 	})
@@ -1366,7 +1356,7 @@ func TestReconcileApplySetInventory_Direct(t *testing.T) {
 		rt, _, rterr := rgdadapter.BuildRuntimeForInstance(rgd, inst, comp)
 		require.NoError(t, rterr)
 
-		_, _, err := c.preApplyApplySetInventory(context.Background(), c.log, inst, rt, c.client.Dynamic())
+		_, _, err := c.preApplyApplySetInventory(context.Background(), c.log, inst, rt)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "patch pre-apply superset inventory: superset patch failed")
 	})
@@ -1386,7 +1376,7 @@ func TestReconcileApplySetInventory_Direct(t *testing.T) {
 		})
 
 		c, _ := newGraphEngineControllerUnderTest(t, raw, testEmptyRGDSpec(), revisions.RevisionStateActive, comp, nil)
-		err := c.reconcileApplySetInventory(context.Background(), c.log, inst, nil, nil, applyset.Metadata{}, true, c.client.Dynamic())
+		err := c.reconcileApplySetInventory(context.Background(), c.log, inst, nil, nil, applyset.Metadata{}, true)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "align inventory after apply/prune: shrink patch failed")
 	})
@@ -1414,7 +1404,7 @@ func TestReconcileApplySetInventory_Direct(t *testing.T) {
 			},
 		}
 
-		err := c.reconcileApplySetInventory(context.Background(), c.log, inst, nil, applied, applyset.Metadata{}, true, c.client.Dynamic())
+		err := c.reconcileApplySetInventory(context.Background(), c.log, inst, nil, applied, applyset.Metadata{}, true)
 		require.Error(t, err)
 		assert.True(t, errors.Is(err, applyset.ErrDuplicateResource))
 	})
