@@ -6,26 +6,43 @@ metadata:
     rbac.kro.run/aggregate-to-controller: "true"
 rules:
   - apiGroups:
-    - "kro.run"
+      - "kro.run"
     resources:
-    - "validationtestapps"
-    - "validationtestapps/status"
+      - "validationtestapps"
+      - "validationtestapps/status"
     verbs:
-    - "create"
-    - "get"
-    - "list"
-    - "watch"
-    - "update"
-    - "patch"
+      - "create"
+      - "get"
+      - "list"
+      - "watch"
+      - "update"
+      - "patch"
   - apiGroups:
-    - ""
+      - ""
     resources:
-    - "configmaps"
+      - "configmaps"
     verbs:
-    - "create"
-    - "get"
-    - "list"
-    - "watch"
-    - "update"
-    - "patch"
-    - "delete"
+      - "create"
+      - "get"
+      - "list"
+      - "watch"
+      - "update"
+      - "patch"
+      - "delete"
+---
+# kro applies a graph's child resources while impersonating the default
+# ServiceAccount of the instance's namespace, so the child-resource permissions
+# in the ClusterRole above must also be granted to that ServiceAccount. This
+# RoleBinding is namespaced; chainsaw applies it into the ephemeral test
+# namespace, confining the grant to that namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kro-impersonated-default-sa
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kro:controller:check-validation-markers
+subjects:
+  - kind: ServiceAccount
+    name: default

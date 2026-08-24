@@ -118,6 +118,11 @@ type Controller struct {
 	// feature gate flags, captured once at construction time.
 	eventsEnabled  bool
 	metricsEnabled bool
+
+	// impersonation memoizes impersonated client surfaces per ServiceAccount so
+	// child resources are applied under a confined identity without rebuilding a
+	// REST client on every reconcile.
+	impersonation *impersonationCache
 }
 
 // NewController constructs a new controller that resolves the newest issued
@@ -166,6 +171,7 @@ func NewController(
 		programCache:        registry.New(),
 		eventsEnabled:       features.FeatureGate.Enabled(features.InstanceConditionEvents),
 		metricsEnabled:      features.FeatureGate.Enabled(features.InstanceConditionMetrics),
+		impersonation:       newImpersonationCache(),
 	}
 }
 

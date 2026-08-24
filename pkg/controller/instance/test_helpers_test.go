@@ -35,9 +35,11 @@ import (
 	k8stesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/kube-openapi/pkg/validation/spec"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	"github.com/kubernetes-sigs/kro/api/v1alpha1"
+	kroclient "github.com/kubernetes-sigs/kro/pkg/client"
 	clientfake "github.com/kubernetes-sigs/kro/pkg/client/fake"
 	"github.com/kubernetes-sigs/kro/pkg/dynamiccontroller"
 	"github.com/kubernetes-sigs/kro/pkg/graph"
@@ -206,6 +208,14 @@ func newControllerUnderTest(t *testing.T, raw *dynamicfake.FakeDynamicClient, g 
 		record.NewFakeRecorder(100),
 		nil, // graphEngineClient: nil in tests (flag off)
 	)
+
+	// The fake client set has no usable rest.Config, so building a real
+	// controller-runtime client for the impersonated identity would fail. Reuse
+	// the base executor's client instead, exercising the impersonation wiring
+	// (username resolution, dynamic-client swap) against the same fake backend.
+	controller.impersonation.newCRClient = func(kroclient.SetInterface, meta.RESTMapper) (client.Client, error) {
+		return controller.graphEngineExecutor.Client, nil
+	}
 
 	return controller, clientSet
 }

@@ -26,6 +26,9 @@ import (
 	"sync"
 	"time"
 
+	rbacv1 "k8s.io/api/rbac/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -174,6 +177,18 @@ func New(ctx context.Context, controllerConfig ControllerConfig) (_ *Environment
 	// Setup and start controller
 	if err := env.setupController(); err != nil {
 		retErr = fmt.Errorf("setting up controller: %w", err)
+		return nil, retErr
+	}
+
+	// Grant the RBAC that impersonated child-resource applies need. kro applies
+	// a graph's child resources while impersonating
+	// system:serviceaccount:<instance-namespace>:default (or an overridden
+	// ServiceAccount). Against this throwaway envtest control plane we grant
+	// every ServiceAccount broad access so specs that create children in
+	// arbitrary ephemeral namespaces reconcile as they did before impersonation.
+	// Production deployments scope this per-namespace instead.
+	if err := env.grantImpersonatedServiceAccountRBAC(); err != nil {
+		retErr = fmt.Errorf("granting impersonation RBAC: %w", err)
 		return nil, retErr
 	}
 
@@ -394,6 +409,46 @@ func (e *Environment) setupController() error {
 		close(e.managerDone)
 	}()
 
+	return nil
+}
+
+// grantImpersonatedServiceAccountRBAC grants the RBAC that impersonated
+// child-resource applies need. kro applies a graph's child resources while
+// impersonating a ServiceAccount in the instance's namespace (the namespace default SA, or an overridden one). The
+// integration suites create instances in many ephemeral namespaces, so rather
+// than provisioning a per-namespace RoleBinding we bind a broad ClusterRole to
+// the built-in system:serviceaccounts group. This is safe because envtest is a
+// throwaway control plane; production deployments scope this per-namespace.
+func (e *Environment) grantImpersonatedServiceAccountRBAC() error {
+	ctx := e.context
+	cr := &rbacv1.ClusterRole{
+		ObjectMeta: metav1.ObjectMeta{Name: "kro-test-impersonated-sa"},
+		Rules: []rbacv1.PolicyRule{{
+			APIGroups: []string{"*"},
+			Resources: []string{"*"},
+			Verbs:     []string{"*"},
+		}},
+	}
+	if err := e.Client.Create(ctx, cr); err != nil && !apierrors.IsAlreadyExists(err) {
+		return fmt.Errorf("creating impersonation ClusterRole: %w", err)
+	}
+
+	crb := &rbacv1.ClusterRoleBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: "kro-test-impersonated-sa"},
+		RoleRef: rbacv1.RoleRef{
+			APIGroup: rbacv1.GroupName,
+			Kind:     "ClusterRole",
+			Name:     cr.Name,
+		},
+		Subjects: []rbacv1.Subject{{
+			Kind:     rbacv1.GroupKind,
+			APIGroup: rbacv1.GroupName,
+			Name:     "system:serviceaccounts",
+		}},
+	}
+	if err := e.Client.Create(ctx, crb); err != nil && !apierrors.IsAlreadyExists(err) {
+		return fmt.Errorf("creating impersonation ClusterRoleBinding: %w", err)
+	}
 	return nil
 }
 

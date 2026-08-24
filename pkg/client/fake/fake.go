@@ -36,6 +36,11 @@ type FakeSet struct {
 	Config              *rest.Config
 	restMapper          meta.RESTMapper
 	HTTP                *http.Client
+
+	// ImpersonatedUser records the user passed to WithImpersonation on the
+	// instance returned by that call, so tests can assert which identity kro
+	// resolved for a graph's child resources. Empty on a non-impersonated set.
+	ImpersonatedUser string
 }
 
 var _ client.SetInterface = (*FakeSet)(nil)
@@ -78,10 +83,14 @@ func (f *FakeSet) CRD(cfg client.CRDWrapperConfig) client.CRDInterface {
 	return &FakeCRD{}
 }
 
-// WithImpersonation returns a new client that impersonates the given user
-// For testing, this just returns the same fake client
+// WithImpersonation returns a new fake client that records the impersonated
+// user. It mirrors the real Set by returning a distinct instance (sharing the
+// same underlying clients) so the caller can observe the resolved identity via
+// ImpersonatedUser without mutating the base set.
 func (f *FakeSet) WithImpersonation(user string) (client.SetInterface, error) {
-	return f, nil
+	imp := *f
+	imp.ImpersonatedUser = user
+	return &imp, nil
 }
 
 func (f *FakeSet) RESTMapper() meta.RESTMapper {

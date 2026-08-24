@@ -402,6 +402,23 @@ spec:
                 - kind
                 - scope
                 type: object
+              serviceAccountName:
+                description: |-
+                  ServiceAccountName, when set, causes kro to apply this graph's child
+                  resources while impersonating the named ServiceAccount instead of using
+                  the kro controller's own identity. The ServiceAccount is always resolved
+                  in the namespace of the instance being reconciled
+                  (system:serviceaccount:<instance-namespace>:<name>), so a namespaced
+                  graph can never escalate beyond the RBAC granted to a ServiceAccount in
+                  its own namespace. When empty, kro impersonates the default
+                  ServiceAccount of the instance's namespace, confining child-resource
+                  access to that namespace by default.
+
+                  The kro controller ServiceAccount must be granted the "impersonate" verb
+                  on serviceaccounts for this to take effect.
+                maxLength: 253
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                type: string
             required:
             - schema
             type: object

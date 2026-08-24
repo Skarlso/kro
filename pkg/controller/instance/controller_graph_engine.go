@@ -175,11 +175,23 @@ func (c *Controller) reconcileViaGraphEngine(
 	metrics.InstanceGraphResolutionSuccessTotal.WithLabelValues(gvrStr).Inc()
 	mark.GraphResolved()
 
+	// Resolve the identity kro uses to apply this instance's child resources.
+	// By default this is the default ServiceAccount of the instance's namespace,
+	// confining child access to that namespace; the RGD may override it via
+	// spec.serviceAccountName. The impersonated executor writes children and the
+	// impersonated dynamic client drives ApplySet prune/inventory, so apply and
+	// prune always share one identity. Instance bookkeeping (finalizers, status,
+	// labels) stays on kro's own identity elsewhere in this method.
+	childExecutor, childDynamic, impErr := c.resolveChildIdentity(ctx, log, rgd, inst, mark)
+	if impErr != nil {
+		return impErr
+	}
+
 	// 1. Pre-apply ApplySet inventory projection & grow.
 	// Persist the superset inventory to the parent instance BEFORE applying resources
 	// to the cluster. This eliminates the crash window where resources exist in the cluster
 	// but the parent has no inventory tracking them.
-	supersetMeta, applier, preErr := c.preApplyApplySetInventory(ctx, log, inst, rt)
+	supersetMeta, applier, preErr := c.preApplyApplySetInventory(ctx, log, inst, rt, childDynamic)
 	if preErr != nil {
 		return preErr
 	}
@@ -201,7 +213,7 @@ func (c *Controller) reconcileViaGraphEngine(
 		l[applyset.ApplysetPartOfLabel] = applysetPartOf
 		obj.SetLabels(l)
 	}
-	applyResult, applyErr := c.graphEngineExecutor.ApplyWithLabeler(ctx, rt, dcWatcher, extraLabel)
+	applyResult, applyErr := childExecutor.ApplyWithLabeler(ctx, rt, dcWatcher, extraLabel)
 
 	valErr := validateAppliedIdentities(applyResult.Applied)
 
@@ -239,7 +251,7 @@ func (c *Controller) reconcileViaGraphEngine(
 	// Only when the desired set is fully resolved and apply had no hard error do we prune
 	// resources that left the desired set, then shrink the inventory to the exact current set.
 	fullyResolved := pruneGate(hardErr, applyResult.Unresolved)
-	if invErr := c.reconcileApplySetInventory(ctx, log, inst, applier, applyResult.Applied, supersetMeta, fullyResolved); invErr != nil {
+	if invErr := c.reconcileApplySetInventory(ctx, log, inst, applier, applyResult.Applied, supersetMeta, fullyResolved, childDynamic); invErr != nil {
 		log.Error(invErr, "graph-engine: ApplySet inventory/prune failed")
 		if applyErr == nil {
 			applyErr = invErr
@@ -330,6 +342,7 @@ func (c *Controller) reconcileApplySetInventory(
 	applied []v1alpha1.ManagedResource,
 	supersetMeta applyset.Metadata,
 	fullyResolved bool,
+	childDynamic dynamic.Interface,
 ) error {
 	if valErr := validateAppliedIdentities(applied); valErr != nil {
 		return valErr
@@ -337,7 +350,7 @@ func (c *Controller) reconcileApplySetInventory(
 
 	if applier == nil {
 		applier = applyset.New(applyset.Config{
-			Client:          c.client.Dynamic(),
+			Client:          childDynamic,
 			RESTMapper:      c.client.RESTMapper(),
 			Log:             log,
 			ParentNamespace: inst.GetNamespace(),
@@ -405,9 +418,10 @@ func (c *Controller) preApplyApplySetInventory(
 	log logr.Logger,
 	inst *unstructured.Unstructured,
 	rt *geruntime.Runtime,
+	childDynamic dynamic.Interface,
 ) (applyset.Metadata, *applyset.ApplySet, error) {
 	applier := applyset.New(applyset.Config{
-		Client:          c.client.Dynamic(),
+		Client:          childDynamic,
 		RESTMapper:      c.client.RESTMapper(),
 		Log:             log,
 		ParentNamespace: inst.GetNamespace(),
