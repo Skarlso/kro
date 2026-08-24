@@ -1,0 +1,53 @@
+# cel-random-namespaced-function writes its child ConfigMap into spec.namespace
+# (the instance sets this to "default"), i.e. a different namespace than the
+# instance's own. kro applies children while impersonating
+# system:serviceaccount:<instance-namespace>:default, so that ServiceAccount
+# needs ConfigMap access in the target namespace. Because the child namespace
+# differs from the (ephemeral) instance namespace, a namespaced RoleBinding is
+# not sufficient; a ClusterRoleBinding to the system:serviceaccounts group
+# grants the impersonated SA access in every namespace. This is acceptable on
+# the throwaway e2e cluster; production would scope it to the target namespace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kro:controller:cel-random-namespaced-function
+  labels:
+    rbac.kro.run/aggregate-to-controller: "true"
+rules:
+  - apiGroups:
+      - "test.kro.run"
+    resources:
+      - "randomfnapps"
+      - "randomfnapps/status"
+    verbs:
+      - "create"
+      - "get"
+      - "list"
+      - "watch"
+      - "update"
+      - "patch"
+  - apiGroups:
+      - ""
+    resources:
+      - "configmaps"
+    verbs:
+      - "create"
+      - "get"
+      - "list"
+      - "watch"
+      - "update"
+      - "patch"
+      - "delete"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kro-impersonated-sa:cel-random-namespaced-function
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kro:controller:cel-random-namespaced-function
+subjects:
+  - kind: Group
+    apiGroup: rbac.authorization.k8s.io
+    name: system:serviceaccounts

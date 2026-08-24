@@ -30,19 +30,22 @@ rules:
       - "patch"
       - "delete"
 ---
-# kro applies a graph's child resources while impersonating the default
-# ServiceAccount of the instance's namespace, so the child-resource permissions
-# in the ClusterRole above must also be granted to that ServiceAccount. This
-# RoleBinding is namespaced; chainsaw applies it into the ephemeral test
-# namespace, confining the grant to that namespace.
+# kro applies a graph's child resources — and reads external references — while
+# impersonating the default ServiceAccount of the instance's namespace. This
+# graph reads an externalRef ConfigMap in the "default" namespace, i.e. across
+# namespaces, so a namespaced RoleBinding is not enough. A ClusterRoleBinding to
+# the system:serviceaccounts group grants the impersonated SA the needed access
+# in every namespace (acceptable on this throwaway e2e cluster; production would
+# scope this to the specific target namespace).
 apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
+kind: ClusterRoleBinding
 metadata:
-  name: kro-impersonated-default-sa
+  name: kro-impersonated-sa:check-external-references
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: kro:controller:check-external-references
 subjects:
-  - kind: ServiceAccount
-    name: default
+  - kind: Group
+    apiGroup: rbac.authorization.k8s.io
+    name: system:serviceaccounts
