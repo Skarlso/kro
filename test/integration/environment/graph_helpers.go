@@ -249,19 +249,6 @@ func (e *Environment) AwaitDeleted(t TestingT, gvk schema.GroupVersionKind, key 
 	t.Fatalf("object %s %s still present after %s", gvk, key, timeout)
 }
 
-// MustGet wraps client.Get for the common "fetch into a typed value"
-// pattern. Fails the test on error.
-func (e *Environment) MustGet(t TestingT, key types.NamespacedName, into client.Object) {
-	t.Helper()
-	ctx := e.context
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if err := e.Client.Get(ctx, key, into); err != nil {
-		t.Fatalf("get %T %s: %v", into, key, err)
-	}
-}
-
 // UpdateGraphSpec applies `mutate` to a freshly-fetched Graph and
 // retries on conflict. Used by tests that race the controller's
 // status-update churn — without retry, a 409 here flakes the suite
@@ -273,7 +260,7 @@ func (e *Environment) UpdateGraphSpec(t TestingT, key types.NamespacedName, muta
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		g := &expv1alpha1.Graph{}
 		if err := e.Client.Get(ctx, key, g); err != nil {
 			t.Fatalf("UpdateGraphSpec get %s: %v", key, err)
@@ -299,32 +286,6 @@ func isConflictErr(err error) bool {
 		return false
 	}
 	return strings.Contains(err.Error(), "the object has been modified")
-}
-
-// MutateObject re-fetches `obj` by the supplied key, applies `mutate`,
-// and Updates with retry on 409. Used by drift tests that race the
-// controller's SSA reconcile loop on the same child resource.
-func (e *Environment) MutateObject(t TestingT, key types.NamespacedName, obj client.Object, mutate func(client.Object)) {
-	t.Helper()
-	ctx := e.context
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	for i := 0; i < 10; i++ {
-		if err := e.Client.Get(ctx, key, obj); err != nil {
-			t.Fatalf("MutateObject get %s: %v", key, err)
-		}
-		mutate(obj)
-		err := e.Client.Update(ctx, obj)
-		if err == nil {
-			return
-		}
-		if !isConflictErr(err) {
-			t.Fatalf("MutateObject update %s: %v", key, err)
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	t.Fatalf("MutateObject %s: gave up after 10 conflict retries", key)
 }
 
 // Eventually polls fn until it returns nil or the timeout fires. The

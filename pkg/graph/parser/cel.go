@@ -35,20 +35,6 @@ type exprMatch struct {
 	end   int    // Position after closing }
 }
 
-// ExtractExpressions extracts all non-nested CEL expressions from a string.
-// It returns an error if it encounters a nested expression.
-func ExtractExpressions(str string) ([]string, error) {
-	matches, err := extractExpressions(str)
-	if err != nil {
-		return nil, err
-	}
-	exprs := make([]string, len(matches))
-	for i, m := range matches {
-		exprs[i] = m.expr
-	}
-	return exprs, nil
-}
-
 // extractExpressions extracts all non-nested CEL expressions from a string,
 // returning each expression along with its start/end position.
 func extractExpressions(str string) ([]exprMatch, error) {
