@@ -25,7 +25,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
-	"github.com/kubernetes-sigs/kro/pkg/controller/instance/applyset"
+	"github.com/kubernetes-sigs/kro/pkg/applyset"
 	"github.com/kubernetes-sigs/kro/pkg/graphengine/testutil/generator"
 	"github.com/kubernetes-sigs/kro/pkg/graphengine/watchrouter"
 )

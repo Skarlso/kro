@@ -20,6 +20,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"sync"
 
@@ -35,7 +36,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	expv1alpha1 "github.com/kubernetes-sigs/kro/api/v1alpha1"
-	"github.com/kubernetes-sigs/kro/pkg/controller/instance/applyset"
+	"github.com/kubernetes-sigs/kro/pkg/applyset"
 	"github.com/kubernetes-sigs/kro/pkg/graphengine/compiler"
 	"github.com/kubernetes-sigs/kro/pkg/graphengine/runtime"
 	"github.com/kubernetes-sigs/kro/pkg/graphengine/watchrouter"
@@ -427,8 +428,8 @@ func publishScope(rt *runtime.Runtime, n *runtime.Node, objs []*unstructured.Uns
 // prune vector where a user-forged status entry could delete arbitrary resources.
 // NotFound and "already deleted by something else" are tolerated.
 func (s *Simple) Delete(ctx context.Context, resources []expv1alpha1.ManagedResource) error {
-	for i := len(resources) - 1; i >= 0; i-- {
-		r := resources[i]
+	for _, r := range slices.Backward(resources) {
+
 		// Legitimate managed resources always carry a UID captured from SSA.
 		// Refuse to delete any resource without a UID to close the forged/UID-less prune vector.
 		if r.UID == "" {
