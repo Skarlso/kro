@@ -95,6 +95,12 @@ var registeredFamilies = []string{
 	"rgd_graph_revision_wait_total",
 	"rgd_state_transitions_total",
 
+	// Graph-engine watch router
+	"graphengine_route_match_total",
+	"graphengine_route_total",
+	"graphengine_watch_owner_count",
+	"graphengine_watch_request_count",
+
 	// GraphRevision controller
 	"graph_revision_activation_deferred_total",
 	"graph_revision_compile_duration_seconds",
@@ -207,9 +213,9 @@ func fqNameOf(d *prometheus.Desc) string {
 		return ""
 	}
 	s = s[start+len(marker):]
-	end := strings.Index(s, `"`)
-	if end < 0 {
+	before, _, ok := strings.Cut(s, `"`)
+	if !ok {
 		return ""
 	}
-	return s[:end]
+	return before
 }

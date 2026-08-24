@@ -27,7 +27,6 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	apimachineryruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -54,7 +53,6 @@ import (
 	"github.com/kubernetes-sigs/kro/pkg/graphengine/compiler"
 	"github.com/kubernetes-sigs/kro/pkg/graphengine/executor"
 	"github.com/kubernetes-sigs/kro/pkg/graphengine/rgdadapter"
-	"github.com/kubernetes-sigs/kro/pkg/graphengine/watchrouter"
 	"github.com/kubernetes-sigs/kro/pkg/metadata"
 	"github.com/kubernetes-sigs/kro/pkg/requeue"
 	testk8s "github.com/kubernetes-sigs/kro/pkg/testutil/k8s"
@@ -328,55 +326,6 @@ func TestDelayedRequeue(t *testing.T) {
 		var reqAfter *requeue.RequeueNeededAfter
 		require.True(t, errors.As(got, &reqAfter))
 		assert.Equal(t, dur, reqAfter.Duration())
-	})
-}
-
-// -----------------------------------------------------------------------------
-// 3. instanceWatcherBridge Tests
-// -----------------------------------------------------------------------------
-
-func TestInstanceWatcherBridge(t *testing.T) {
-	t.Run("Watch forwards request faithfully", func(t *testing.T) {
-		fw := &fakeInstanceWatcher{}
-		bridge := &instanceWatcherBridge{w: fw}
-
-		gvr := schema.GroupVersionResource{Group: "apps", Version: "v1", Resource: "deployments"}
-		sel := labels.SelectorFromSet(labels.Set{"app": "web"})
-		req := watchrouter.WatchRequest{
-			NodeID:    "node-1",
-			GVR:       gvr,
-			Name:      "my-deploy",
-			Namespace: "default",
-			Selector:  sel,
-		}
-
-		err := bridge.Watch(req)
-		require.NoError(t, err)
-		require.Len(t, fw.watchedRequests, 1)
-		assert.Equal(t, "node-1", fw.watchedRequests[0].NodeID)
-		assert.Equal(t, gvr, fw.watchedRequests[0].GVR)
-		assert.Equal(t, "my-deploy", fw.watchedRequests[0].Name)
-		assert.Equal(t, "default", fw.watchedRequests[0].Namespace)
-		assert.Equal(t, sel, fw.watchedRequests[0].Selector)
-	})
-
-	t.Run("Watch propagates error", func(t *testing.T) {
-		expectedErr := errors.New("watch registry failed")
-		fw := &fakeInstanceWatcher{watchErr: expectedErr}
-		bridge := &instanceWatcherBridge{w: fw}
-
-		err := bridge.Watch(watchrouter.WatchRequest{NodeID: "node-2"})
-		assert.ErrorIs(t, err, expectedErr)
-	})
-
-	t.Run("Done forwards commit boolean", func(t *testing.T) {
-		fw := &fakeInstanceWatcher{}
-		bridge := &instanceWatcherBridge{w: fw}
-
-		bridge.Done(true)
-		bridge.Done(false)
-
-		assert.Equal(t, []bool{true, false}, fw.doneCalls)
 	})
 }
 

@@ -46,7 +46,6 @@ import (
 	"github.com/kubernetes-sigs/kro/pkg/graphengine/executor"
 	"github.com/kubernetes-sigs/kro/pkg/graphengine/rgdadapter"
 	geruntime "github.com/kubernetes-sigs/kro/pkg/graphengine/runtime"
-	"github.com/kubernetes-sigs/kro/pkg/graphengine/watchrouter"
 	"github.com/kubernetes-sigs/kro/pkg/metadata"
 	"github.com/kubernetes-sigs/kro/pkg/metrics"
 	"github.com/kubernetes-sigs/kro/pkg/requeue"
@@ -58,8 +57,9 @@ import (
 // Steps:
 //  1. Resolve the RGD spec from the revision registry.
 //  2. Build a per-reconcile Runtime via rgdadapter.BuildRuntimeForInstance.
-//  3. Apply all Graph nodes via the executor.Simple, wired to the instance's
-//     dynamiccontroller.InstanceWatcher (via instanceWatcherBridge).
+//  3. Apply all Graph nodes via the executor.Simple, wired directly to the
+//     instance's dynamiccontroller.InstanceWatcher (a coordinator.Watcher, the
+//     same type the executor expects).
 //  4. The synthesized status patch node writes the author status FIELDS onto
 //     the instance during executor.Apply; the controller writes conditions +
 //     .status.state via persistGraphEngineStatus.
@@ -201,8 +201,7 @@ func (c *Controller) reconcileViaGraphEngine(
 		l[applyset.ApplysetPartOfLabel] = applysetPartOf
 		obj.SetLabels(l)
 	}
-	bridge := &instanceWatcherBridge{w: dcWatcher}
-	applyResult, applyErr := c.graphEngineExecutor.ApplyWithLabeler(ctx, rt, bridge, extraLabel)
+	applyResult, applyErr := c.graphEngineExecutor.ApplyWithLabeler(ctx, rt, dcWatcher, extraLabel)
 
 	valErr := validateAppliedIdentities(applyResult.Applied)
 
@@ -222,8 +221,7 @@ func (c *Controller) reconcileViaGraphEngine(
 		// not created until deletion completes. Checked before the generic
 		// ErrNotReady branch because ResourceDeletingError satisfies both
 		// sentinels.
-		var delErr *executor.ResourceDeletingError
-		if errors.As(applyErr, &delErr) {
+		if delErr, ok := errors.AsType[*executor.ResourceDeletingError](applyErr); ok {
 			mark.ResourcesDeleting("%v", delErr)
 		} else {
 			mark.ResourcesDeleting("%v", applyErr)
@@ -769,7 +767,7 @@ func inventoryUpToDate(inst *unstructured.Unstructured, wantLabels, wantAnnotati
 func (c *Controller) persistGraphEngineStatus(
 	ctx context.Context,
 	inst *unstructured.Unstructured,
-	wireStatus map[string]interface{},
+	wireStatus map[string]any,
 	rt *geruntime.Runtime,
 	rgd *v1alpha1.ResourceGraphDefinition,
 	degraded bool,
@@ -777,7 +775,7 @@ func (c *Controller) persistGraphEngineStatus(
 	previousState, _ := wireStatus["state"].(string)
 
 	// Only conditions and state: author status fields belong to the patch node.
-	status := map[string]interface{}{}
+	status := map[string]any{}
 
 	builtins := builtinConditions(inst)
 	status["conditions"] = conditionsToInterfaceSlice(builtins)
@@ -794,7 +792,7 @@ func (c *Controller) persistGraphEngineStatus(
 
 	if c.reconcileConfig.HasAuthorConditions {
 		authored, incomplete, condErr := rgdadapter.ProjectInstanceConditions(rt, rgd, builtins)
-		prev, _ := wireStatus["conditions"].([]interface{})
+		prev, _ := wireStatus["conditions"].([]any)
 		previous := decodeConditions(prev)
 		stamped := stampAuthorConditions(authored, previous, inst.GetGeneration())
 		if incomplete {
@@ -808,28 +806,6 @@ func (c *Controller) persistGraphEngineStatus(
 	}
 
 	return c.persistConditionsAndState(ctx, inst, wireStatus, status, previousState)
-}
-
-// instanceWatcherBridge adapts a dynamiccontroller.InstanceWatcher to the
-// watchrouter.Watcher interface expected by executor.Simple.  The two
-// WatchRequest types are structurally equivalent (NodeID, GVR, Name,
-// Namespace) — only the package path differs.
-type instanceWatcherBridge struct {
-	w dynamiccontroller.InstanceWatcher
-}
-
-func (b *instanceWatcherBridge) Watch(req watchrouter.WatchRequest) error {
-	return b.w.Watch(dynamiccontroller.WatchRequest{
-		NodeID:    req.NodeID,
-		GVR:       req.GVR,
-		Name:      req.Name,
-		Namespace: req.Namespace,
-		Selector:  req.Selector,
-	})
-}
-
-func (b *instanceWatcherBridge) Done(commit bool) {
-	b.w.Done(commit)
 }
 
 // isResourceDeleting reports whether err (an executor apply error) signals a
