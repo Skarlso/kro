@@ -16,6 +16,7 @@ package graph
 
 import (
 	"fmt"
+	"maps"
 	"net/http"
 	"slices"
 	"strings"
@@ -330,7 +331,7 @@ func (b *Builder) CompileSource(src Source) (*Graph, *extv1.JSONSchemaProps, err
 		}
 	}
 
-	unstructuredStatus := map[string]interface{}{}
+	unstructuredStatus := map[string]any{}
 	if err := yaml.UnmarshalStrict(src.StatusRaw(), &unstructuredStatus); err != nil {
 		return nil, nil, fmt.Errorf("failed to unmarshal status schema: %w", err)
 	}
@@ -363,9 +364,7 @@ func (b *Builder) CompileSource(src Source) (*Graph, *extv1.JSONSchemaProps, err
 	}
 
 	resourceSchemas := make(map[string]*spec.Schema, len(schemas)+1)
-	for id, sch := range schemas {
-		resourceSchemas[id] = sch
-	}
+	maps.Copy(resourceSchemas, schemas)
 	resourceSchemas[InstanceNodeID] = src.SchemaVarSchema()
 
 	g := &Graph{
@@ -384,7 +383,7 @@ func (b *Builder) CompileSource(src Source) (*Graph, *extv1.JSONSchemaProps, err
 // The selector (if any) is embedded directly in the template so that ParseSchemalessResource
 // can extract CEL expressions from the entire resource in a single pass.
 func (b *Builder) buildExternalRefResource(
-	externalRef *v1alpha1.ExternalRef) (map[string]interface{}, error) {
+	externalRef *v1alpha1.ExternalRef) (map[string]any, error) {
 	result, err := runtime.DefaultUnstructuredConverter.ToUnstructured(externalRef)
 	if err != nil {
 		return nil, fmt.Errorf("failed to convert ExternalRef to unstructured: %w", err)
@@ -400,7 +399,7 @@ func (b *Builder) rgResourceSpec(rgResource *v1alpha1.Resource, order int) (Reso
 		return ResourceSpec{}, fmt.Errorf("invalid combination of resource fields: %w", err)
 	}
 
-	resourceObject := map[string]interface{}{}
+	resourceObject := map[string]any{}
 	if len(rgResource.Template.Raw) > 0 {
 		if err := yaml.UnmarshalStrict(rgResource.Template.Raw, &resourceObject); err != nil {
 			return ResourceSpec{}, fmt.Errorf("failed to unmarshal resource %s: %w", rgResource.ID, err)
@@ -724,7 +723,7 @@ func buildInstanceNode(
 	gvr k8sschema.GroupVersionResource,
 	namespaced bool,
 	statusVariables []variable.FieldDescriptor,
-	statusTemplate map[string]interface{},
+	statusTemplate map[string]any,
 	conditions []*krocel.Expression,
 	inspector *ast.Inspector,
 ) (*Node, error) {
@@ -785,7 +784,7 @@ func buildInstanceNode(
 			Dependencies: instanceDeps,
 		},
 		Template: &unstructured.Unstructured{
-			Object: map[string]interface{}{
+			Object: map[string]any{
 				"status": statusTemplate,
 			},
 		},
@@ -811,7 +810,7 @@ func BuildInstanceSpecSchema(rgSchema *v1alpha1.Schema) (*extv1.JSONSchemaProps,
 func buildInstanceSpecSchema(rgSchema *v1alpha1.Schema) (*extv1.JSONSchemaProps, error) {
 	// We need to unmarshal the instance schema to a map[string]interface{} to
 	// make it easier to work with.
-	instanceSpec := map[string]interface{}{}
+	instanceSpec := map[string]any{}
 	err := yaml.UnmarshalStrict(rgSchema.Spec.Raw, &instanceSpec)
 	if err != nil {
 		return nil, fmt.Errorf("failed to unmarshal spec schema: %w", err)
@@ -819,7 +818,7 @@ func buildInstanceSpecSchema(rgSchema *v1alpha1.Schema) (*extv1.JSONSchemaProps,
 
 	// Also the custom types must be unmarshalled to a map[string]interface{} to
 	// make handling easier.
-	customTypes := map[string]interface{}{}
+	customTypes := map[string]any{}
 	err = yaml.UnmarshalStrict(rgSchema.Types.Raw, &customTypes)
 	if err != nil {
 		return nil, fmt.Errorf("failed to unmarshal predefined types: %w", err)
@@ -848,12 +847,12 @@ func buildStatusSchema(
 ) (
 	*extv1.JSONSchemaProps,
 	[]variable.FieldDescriptor,
-	map[string]interface{},
+	map[string]any,
 	[]string,
 	error,
 ) {
 	// The instance resource has a schema defined using the "SimpleSchema" format.
-	unstructuredStatus := map[string]interface{}{}
+	unstructuredStatus := map[string]any{}
 	err := yaml.UnmarshalStrict(rgSchema.Status.Raw, &unstructuredStatus)
 	if err != nil {
 		return nil, nil, nil, nil, fmt.Errorf("failed to unmarshal status schema: %w", err)
@@ -867,13 +866,13 @@ func buildStatusSchema(
 // Returns: (schema, fieldDescriptors, statusTemplate, conditionExprs, error).
 func inferStatusSchema(
 	bc *buildContext,
-	unstructuredStatus map[string]interface{},
+	unstructuredStatus map[string]any,
 	nodeNames []string,
 	inspector *ast.Inspector,
 ) (
 	*extv1.JSONSchemaProps,
 	[]variable.FieldDescriptor,
-	map[string]interface{},
+	map[string]any,
 	[]string,
 	error,
 ) {
@@ -944,7 +943,7 @@ func inferStatusSchema(
 // strings (each wrapped in `${...}`). Anything else is rejected.
 //
 // If the key is absent, returns (nil, nil).
-func extractConditionExpressions(unstructuredStatus map[string]interface{}) ([]string, error) {
+func extractConditionExpressions(unstructuredStatus map[string]any) ([]string, error) {
 	const conditionsKey = "conditions"
 
 	raw, ok := unstructuredStatus[conditionsKey]
@@ -953,7 +952,7 @@ func extractConditionExpressions(unstructuredStatus map[string]interface{}) ([]s
 	}
 	delete(unstructuredStatus, conditionsKey)
 
-	rawList, ok := raw.([]interface{})
+	rawList, ok := raw.([]any)
 	if !ok {
 		return nil, fmt.Errorf("status.conditions must be a list, got %T", raw)
 	}

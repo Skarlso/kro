@@ -25,6 +25,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"sort"
 	"strings"
 
@@ -200,9 +201,7 @@ func ProjectInstanceConditions(
 	// this reconcile's kro built-ins for runtime.condition(schema, _) lookups.
 	saScope := schemaAwareScope(rt.Scope(), rt)
 	scope := make(map[string]any, len(saScope)+2)
-	for k, v := range saScope {
-		scope[k] = v
-	}
+	maps.Copy(scope, saScope)
 	scope[SchemaNodeID] = schemaWithBuiltinConditions(rt.Scope()[SchemaNodeID], kroBuiltins)
 	scope[library.RuntimeVarName] = library.RuntimeSingleton
 
@@ -267,9 +266,7 @@ func schemaWithBuiltinConditions(schemaVal any, kroBuiltins []v1alpha1.Condition
 		return map[string]any{"status": status}
 	}
 	out := make(map[string]any, len(obj))
-	for k, v := range obj {
-		out[k] = v
-	}
+	maps.Copy(out, obj)
 	out["status"] = status
 	return out
 }

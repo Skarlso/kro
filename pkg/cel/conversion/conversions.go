@@ -36,7 +36,7 @@ import (
 var ErrUnsupportedType = errors.New("unsupported type")
 
 // GoNativeType transforms CEL output into corresponding Go types
-func GoNativeType(v ref.Val) (interface{}, error) {
+func GoNativeType(v ref.Val) (any, error) {
 	if v == nil {
 		return nil, nil
 	}
@@ -94,7 +94,7 @@ func GoNativeType(v ref.Val) (interface{}, error) {
 // returns for CEL uint and bytes. Other consumers of GoNativeType (e.g.
 // json.marshal, which goes through encoding/json) don't have this
 // restriction and should call GoNativeType directly instead.
-func EnsureJSONSafe(v interface{}) (interface{}, error) {
+func EnsureJSONSafe(v any) (any, error) {
 	switch val := v.(type) {
 	case uint64:
 		if val > math.MaxInt64 {
@@ -103,8 +103,8 @@ func EnsureJSONSafe(v interface{}) (interface{}, error) {
 		return int64(val), nil
 	case []byte:
 		return nil, fmt.Errorf("%w: bytes value cannot be used directly in a resource template or status field; encode it explicitly, e.g. base64.encode(...)", ErrUnsupportedType)
-	case map[string]interface{}:
-		result := make(map[string]interface{}, len(val))
+	case map[string]any:
+		result := make(map[string]any, len(val))
 		for k, elem := range val {
 			safe, err := EnsureJSONSafe(elem)
 			if err != nil {
@@ -113,8 +113,8 @@ func EnsureJSONSafe(v interface{}) (interface{}, error) {
 			result[k] = safe
 		}
 		return result, nil
-	case []interface{}:
-		result := make([]interface{}, len(val))
+	case []any:
+		result := make([]any, len(val))
 		for i, elem := range val {
 			safe, err := EnsureJSONSafe(elem)
 			if err != nil {
@@ -128,12 +128,12 @@ func EnsureJSONSafe(v interface{}) (interface{}, error) {
 	}
 }
 
-func convertList(v ref.Val) (interface{}, error) {
+func convertList(v ref.Val) (any, error) {
 	lister, ok := v.(traits.Lister)
 	if !ok {
-		return v.ConvertToNative(reflect.TypeOf([]interface{}{}))
+		return v.ConvertToNative(reflect.TypeFor[[]any]())
 	}
-	result := make([]interface{}, 0)
+	result := make([]any, 0)
 	it := lister.Iterator()
 	for it.HasNext() == types.True {
 		elem := it.Next()
@@ -146,10 +146,10 @@ func convertList(v ref.Val) (interface{}, error) {
 	return result, nil
 }
 
-func convertMap(v ref.Val) (interface{}, error) {
+func convertMap(v ref.Val) (any, error) {
 	mapper, ok := v.(traits.Mapper)
 	if !ok {
-		return v.ConvertToNative(reflect.TypeOf(map[string]any{}))
+		return v.ConvertToNative(reflect.TypeFor[map[string]any]())
 	}
 
 	// Fast path: if the underlying value is already a raw Go map, return it
@@ -157,11 +157,11 @@ func convertMap(v ref.Val) (interface{}, error) {
 	// over already correctly present maps.
 	// Raw map values (from Kubernetes unstructured data) are already in the
 	// correct Go form, so no recursive conversion is needed.
-	if rawMap, ok := v.Value().(map[string]interface{}); ok {
+	if rawMap, ok := v.Value().(map[string]any); ok {
 		return runtime.DeepCopyJSON(rawMap), nil
 	}
 
-	result := make(map[string]interface{})
+	result := make(map[string]any)
 	it := mapper.Iterator()
 	for it.HasNext() == types.True {
 		key := it.Next()

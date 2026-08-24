@@ -420,8 +420,8 @@ func extractAndTrackGVK(sub schemawatcher.Subscription, nodeID, apiVersion, kind
 	}
 
 	// apiVersion is dynamic, but group might be static: e.g. "apps/${version}" or "example.com/${version}".
-	if idx := strings.Index(apiVersion, "/"); idx != -1 {
-		groupPart := apiVersion[:idx]
+	if before, _, ok := strings.Cut(apiVersion, "/"); ok {
+		groupPart := before
 		if !strings.Contains(groupPart, "${") && groupPart != "" {
 			sub.Track(schema.GroupKind{Group: groupPart, Kind: kind})
 		}

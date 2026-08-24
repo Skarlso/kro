@@ -21,6 +21,7 @@
 package runtime
 
 import (
+	"maps"
 	"time"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -104,9 +105,7 @@ func WithNodeObjectOverride(nodeID string, obj *unstructured.Unstructured) Optio
 // into the parent.
 func WithSeedScope(seed map[string]any) Option {
 	return func(r *Runtime) {
-		for k, v := range seed {
-			r.scope[k] = v
-		}
+		maps.Copy(r.scope, seed)
 	}
 }
 

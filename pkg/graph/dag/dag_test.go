@@ -134,7 +134,7 @@ func TestDAGTopologicalSort(t *testing.T) {
 			}
 
 			if g.Edges != "" {
-				for _, edge := range strings.Split(g.Edges, ",") {
+				for edge := range strings.SplitSeq(g.Edges, ",") {
 					tokens := strings.SplitN(edge, "->", 2)
 					if err := d.AddDependencies(tokens[1], []string{tokens[0]}); err != nil {
 						t.Fatalf("adding edge %q: %v", edge, err)
@@ -206,7 +206,7 @@ func TestDAGReverseTopologicalLayers(t *testing.T) {
 			}
 
 			if tt.edges != "" {
-				for _, edge := range strings.Split(tt.edges, ",") {
+				for edge := range strings.SplitSeq(tt.edges, ",") {
 					tokens := strings.SplitN(edge, "->", 2)
 					if err := d.AddDependencies(tokens[1], []string{tokens[0]}); err != nil {
 						t.Fatalf("adding edge %q: %v", edge, err)
@@ -253,7 +253,7 @@ func checkValidTopologicalOrder(t *testing.T, d *DirectedAcyclicGraph[string], o
 
 		// These two nodes are out of order, there should be a dependency on one of the previous nodes
 		hasDep := false
-		for j := 0; j < i; j++ {
+		for j := range i {
 			if _, found := node.DependsOn[order[j]]; found {
 				hasDep = true
 				break

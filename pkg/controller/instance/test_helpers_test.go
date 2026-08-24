@@ -87,7 +87,7 @@ func newControllerTestDynamicClient(t *testing.T, objs ...apimachineryruntime.Ob
 }
 
 func addApplyReactor(client *dynamicfake.FakeDynamicClient) {
-	var rvCounter int64
+	var rvCounter atomic.Int64
 
 	client.PrependReactor("patch", "*", func(action k8stesting.Action) (bool, apimachineryruntime.Object, error) {
 		patchAction, ok := action.(k8stesting.PatchAction)
@@ -111,7 +111,7 @@ func addApplyReactor(client *dynamicfake.FakeDynamicClient) {
 			if !apierrors.IsNotFound(err) {
 				return true, nil, err
 			}
-			current = &unstructured.Unstructured{Object: map[string]interface{}{}}
+			current = &unstructured.Unstructured{Object: map[string]any{}}
 			create = true
 		} else {
 			existing, ok := stored.(*unstructured.Unstructured)
@@ -132,7 +132,7 @@ func addApplyReactor(client *dynamicfake.FakeDynamicClient) {
 		if current.GetUID() == "" {
 			current.SetUID(types.UID("uid-" + current.GetName()))
 		}
-		current.SetResourceVersion(strconv.FormatInt(atomic.AddInt64(&rvCounter, 1), 10))
+		current.SetResourceVersion(strconv.FormatInt(rvCounter.Add(1), 10))
 
 		if create {
 			if err := client.Tracker().Create(gvr, current, namespace); err != nil {
@@ -146,10 +146,10 @@ func addApplyReactor(client *dynamicfake.FakeDynamicClient) {
 	})
 }
 
-func mergeMaps(dst, src map[string]interface{}) {
+func mergeMaps(dst, src map[string]any) {
 	for key, value := range src {
-		srcMap, srcIsMap := value.(map[string]interface{})
-		dstMap, dstIsMap := dst[key].(map[string]interface{})
+		srcMap, srcIsMap := value.(map[string]any)
+		dstMap, dstIsMap := dst[key].(map[string]any)
 		if srcIsMap && dstIsMap {
 			mergeMaps(dstMap, srcMap)
 			continue
@@ -238,14 +238,14 @@ func newControllerAndDeletionContext(
 
 func newInstanceObject(name, namespace string) *unstructured.Unstructured {
 	obj := &unstructured.Unstructured{
-		Object: map[string]interface{}{
+		Object: map[string]any{
 			"apiVersion": controllerTestParentGVK.GroupVersion().String(),
 			"kind":       controllerTestParentGVK.Kind,
-			"metadata": map[string]interface{}{
+			"metadata": map[string]any{
 				"name":      name,
 				"namespace": namespace,
 			},
-			"spec": map[string]interface{}{},
+			"spec": map[string]any{},
 		},
 	}
 	obj.SetGroupVersionKind(controllerTestParentGVK)
@@ -256,10 +256,10 @@ func newInstanceObject(name, namespace string) *unstructured.Unstructured {
 
 func newDeploymentObject(name, namespace string) *unstructured.Unstructured {
 	obj := &unstructured.Unstructured{
-		Object: map[string]interface{}{
+		Object: map[string]any{
 			"apiVersion": controllerTestDeployGVK.GroupVersion().String(),
 			"kind":       controllerTestDeployGVK.Kind,
-			"metadata": map[string]interface{}{
+			"metadata": map[string]any{
 				"name":      name,
 				"namespace": namespace,
 			},
@@ -271,14 +271,14 @@ func newDeploymentObject(name, namespace string) *unstructured.Unstructured {
 
 func newConfigMapObject(name, namespace string) *unstructured.Unstructured {
 	obj := &unstructured.Unstructured{
-		Object: map[string]interface{}{
+		Object: map[string]any{
 			"apiVersion": controllerTestCMGVK.GroupVersion().String(),
 			"kind":       controllerTestCMGVK.Kind,
-			"metadata": map[string]interface{}{
+			"metadata": map[string]any{
 				"name":      name,
 				"namespace": namespace,
 			},
-			"data": map[string]interface{}{
+			"data": map[string]any{
 				"value": "x",
 			},
 		},
@@ -296,8 +296,8 @@ func newTestGraph(nodes ...*graph.Node) *graph.Graph {
 			Namespaced: true,
 		},
 		Template: &unstructured.Unstructured{
-			Object: map[string]interface{}{
-				"status": map[string]interface{}{},
+			Object: map[string]any{
+				"status": map[string]any{},
 			},
 		},
 	}

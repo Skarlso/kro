@@ -53,7 +53,7 @@ var _ = Describe("ExternalRef Watch", func() {
 		rgd := generator.NewResourceGraphDefinition("test-extref-watch",
 			generator.WithSchema(
 				"TestExtRefWatch", "v1alpha1",
-				map[string]interface{}{},
+				map[string]any{},
 				nil,
 			),
 			generator.WithExternalRef("extcm", &krov1alpha1.ExternalRef{
@@ -63,13 +63,13 @@ var _ = Describe("ExternalRef Watch", func() {
 					Name: "ext-config",
 				},
 			}, nil, nil),
-			generator.WithResource("managed", map[string]interface{}{
+			generator.WithResource("managed", map[string]any{
 				"apiVersion": "v1",
 				"kind":       "ConfigMap",
-				"metadata": map[string]interface{}{
+				"metadata": map[string]any{
 					"name": "managed-config",
 				},
-				"data": map[string]interface{}{
+				"data": map[string]any{
 					"replicas": "${extcm.data.replicas}",
 				},
 			}, nil, nil),
@@ -101,10 +101,10 @@ var _ = Describe("ExternalRef Watch", func() {
 
 		By("creating the instance")
 		instance := &unstructured.Unstructured{
-			Object: map[string]interface{}{
+			Object: map[string]any{
 				"apiVersion": "kro.run/v1alpha1",
 				"kind":       "TestExtRefWatch",
-				"metadata": map[string]interface{}{
+				"metadata": map[string]any{
 					"name":      "test-instance",
 					"namespace": namespace,
 				},
@@ -159,10 +159,10 @@ var _ = Describe("ExternalRef Watch", func() {
 		rgd := generator.NewResourceGraphDefinition("test-extcoll-matchexpr",
 			generator.WithSchema(
 				"TestExtCollMatchExpr", "v1alpha1",
-				map[string]interface{}{
+				map[string]any{
 					"teamName": "string",
 				},
-				map[string]interface{}{
+				map[string]any{
 					"configCount": "${string(size(extconfigs))}",
 				},
 			),
@@ -228,14 +228,14 @@ var _ = Describe("ExternalRef Watch", func() {
 
 		By("creating the instance with teamName=bravo")
 		instance := &unstructured.Unstructured{
-			Object: map[string]interface{}{
+			Object: map[string]any{
 				"apiVersion": "kro.run/v1alpha1",
 				"kind":       "TestExtCollMatchExpr",
-				"metadata": map[string]interface{}{
+				"metadata": map[string]any{
 					"name":      "test-matchexpr",
 					"namespace": namespace,
 				},
-				"spec": map[string]interface{}{
+				"spec": map[string]any{
 					"teamName": "bravo",
 				},
 			},
@@ -264,8 +264,8 @@ var _ = Describe("ExternalRef Watch", func() {
 		rgd := generator.NewResourceGraphDefinition("test-extcoll-watch",
 			generator.WithSchema(
 				"TestExtCollWatch", "v1alpha1",
-				map[string]interface{}{},
-				map[string]interface{}{
+				map[string]any{},
+				map[string]any{
 					"configCount": "${string(size(extconfigs))}",
 				},
 			),
@@ -309,10 +309,10 @@ var _ = Describe("ExternalRef Watch", func() {
 
 		By("creating the instance")
 		instance := &unstructured.Unstructured{
-			Object: map[string]interface{}{
+			Object: map[string]any{
 				"apiVersion": "kro.run/v1alpha1",
 				"kind":       "TestExtCollWatch",
-				"metadata": map[string]interface{}{
+				"metadata": map[string]any{
 					"name":      "test-instance",
 					"namespace": namespace,
 				},
@@ -373,8 +373,8 @@ var _ = Describe("ExternalRef Watch", func() {
 		rgd := generator.NewResourceGraphDefinition("test-extcoll-sortby",
 			generator.WithSchema(
 				"TestExtCollSortBy", "v1alpha1",
-				map[string]interface{}{},
-				map[string]interface{}{
+				map[string]any{},
+				map[string]any{
 					"sortedNames": "${extconfigs.sortBy(c, c.data.priority).map(c, c.metadata.name).join(\",\")}",
 					"configCount": "${string(size(extconfigs))}",
 				},
@@ -435,10 +435,10 @@ var _ = Describe("ExternalRef Watch", func() {
 
 		By("creating the instance")
 		instance := &unstructured.Unstructured{
-			Object: map[string]interface{}{
+			Object: map[string]any{
 				"apiVersion": "kro.run/v1alpha1",
 				"kind":       "TestExtCollSortBy",
-				"metadata": map[string]interface{}{
+				"metadata": map[string]any{
 					"name":      "test-sortby",
 					"namespace": namespace,
 				},
@@ -474,18 +474,18 @@ var _ = Describe("ExternalRef Watch", func() {
 			producerRGD := generator.NewResourceGraphDefinition("test-chained-producer",
 				generator.WithSchema(
 					"WatchedDatabase", "v1alpha1",
-					map[string]interface{}{
+					map[string]any{
 						"value": "string",
 					},
 					nil,
 				),
-				generator.WithResource("managed", map[string]interface{}{
+				generator.WithResource("managed", map[string]any{
 					"apiVersion": "v1",
 					"kind":       "ConfigMap",
-					"metadata": map[string]interface{}{
+					"metadata": map[string]any{
 						"name": "watched-database-config",
 					},
-					"data": map[string]interface{}{
+					"data": map[string]any{
 						"value": "${schema.spec.value}",
 					},
 				}, nil, nil),
@@ -504,14 +504,14 @@ var _ = Describe("ExternalRef Watch", func() {
 
 			By("creating a producer instance and waiting for its managed ConfigMap")
 			producerInstance := &unstructured.Unstructured{
-				Object: map[string]interface{}{
+				Object: map[string]any{
 					"apiVersion": "kro.run/v1alpha1",
 					"kind":       "WatchedDatabase",
-					"metadata": map[string]interface{}{
+					"metadata": map[string]any{
 						"name":      "watched-db",
 						"namespace": namespace,
 					},
-					"spec": map[string]interface{}{
+					"spec": map[string]any{
 						"value": "one",
 					},
 				},
@@ -546,7 +546,7 @@ var _ = Describe("ExternalRef Watch", func() {
 			consumerRGD := generator.NewResourceGraphDefinition("test-chained-consumer",
 				generator.WithSchema(
 					"DatabaseObserver", "v1alpha1",
-					map[string]interface{}{},
+					map[string]any{},
 					nil,
 				),
 				generator.WithExternalRef("database", &krov1alpha1.ExternalRef{
@@ -556,13 +556,13 @@ var _ = Describe("ExternalRef Watch", func() {
 						Name: "watched-db",
 					},
 				}, nil, nil),
-				generator.WithResource("managed", map[string]interface{}{
+				generator.WithResource("managed", map[string]any{
 					"apiVersion": "v1",
 					"kind":       "ConfigMap",
-					"metadata": map[string]interface{}{
+					"metadata": map[string]any{
 						"name": "database-observer-config",
 					},
-					"data": map[string]interface{}{
+					"data": map[string]any{
 						"value": "${database.spec.value}",
 					},
 				}, nil, nil),
@@ -581,10 +581,10 @@ var _ = Describe("ExternalRef Watch", func() {
 
 			By("creating the consumer instance so it registers an externalRef watch on the producer kind")
 			consumerInstance := &unstructured.Unstructured{
-				Object: map[string]interface{}{
+				Object: map[string]any{
 					"apiVersion": "kro.run/v1alpha1",
 					"kind":       "DatabaseObserver",
-					"metadata": map[string]interface{}{
+					"metadata": map[string]any{
 						"name":      "db-observer",
 						"namespace": namespace,
 					},

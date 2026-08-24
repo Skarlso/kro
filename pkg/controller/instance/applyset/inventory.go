@@ -91,7 +91,7 @@ func parseGroupKinds(raw string) (sets.Set[schema.GroupKind], error) {
 	if raw == "" {
 		return result, nil
 	}
-	for _, entry := range strings.Split(raw, ",") {
+	for entry := range strings.SplitSeq(raw, ",") {
 		entry = strings.TrimSpace(entry)
 		if entry == "" {
 			return nil, fmt.Errorf("contains an empty group-kind")
@@ -117,7 +117,7 @@ func parseNamespaces(raw string) (sets.Set[string], error) {
 	if raw == "" {
 		return result, nil
 	}
-	for _, entry := range strings.Split(raw, ",") {
+	for entry := range strings.SplitSeq(raw, ",") {
 		entry = strings.TrimSpace(entry)
 		if problems := validation.IsDNS1123Label(entry); len(problems) > 0 {
 			return nil, fmt.Errorf("invalid namespace %q: %s", entry, strings.Join(problems, ", "))

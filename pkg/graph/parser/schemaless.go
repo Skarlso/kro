@@ -23,18 +23,18 @@ import (
 
 // ParseSchemalessResource extracts CEL expressions without a schema, this is useful
 // when the schema is not available. e.g RGI statuses
-func ParseSchemalessResource(resource map[string]interface{}) ([]variable.FieldDescriptor, []string, error) {
+func ParseSchemalessResource(resource map[string]any) ([]variable.FieldDescriptor, []string, error) {
 	return parseSchemalessResource(resource, "")
 }
 
 // parseSchemalessResource is a helper function that recursively
 // extracts expressions from a resource. It uses a depth first search to traverse
 // the resource and extract expressions from string fields
-func parseSchemalessResource(resource interface{}, path string) ([]variable.FieldDescriptor, []string, error) {
+func parseSchemalessResource(resource any, path string) ([]variable.FieldDescriptor, []string, error) {
 	var expressionsFields []variable.FieldDescriptor
 	var allPlainFieldPaths []string
 	switch field := resource.(type) {
-	case map[string]interface{}:
+	case map[string]any:
 		for field, value := range field {
 			fieldPath := joinPathAndFieldName(path, field)
 			fieldExpressions, plainFieldPaths, err := parseSchemalessResource(value, fieldPath)
@@ -44,7 +44,7 @@ func parseSchemalessResource(resource interface{}, path string) ([]variable.Fiel
 			expressionsFields = append(expressionsFields, fieldExpressions...)
 			allPlainFieldPaths = append(allPlainFieldPaths, plainFieldPaths...)
 		}
-	case []interface{}:
+	case []any:
 		for i, item := range field {
 			itemPath := path + "[" + strconv.Itoa(i) + "]"
 			itemExpressions, plainFieldPaths, err := parseSchemalessResource(item, itemPath)

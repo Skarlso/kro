@@ -179,9 +179,9 @@ var _ = Describe("DeploymentService", func() {
 			conditions, found, _ := unstructured.NestedSlice(instance.Object, "status", "conditions")
 			g.Expect(found).To(BeTrue())
 
-			var readyCondition map[string]interface{}
+			var readyCondition map[string]any
 			for _, c := range conditions {
-				cm := c.(map[string]interface{})
+				cm := c.(map[string]any)
 				if cm["type"] == ctrlinstance.Ready {
 					readyCondition = cm
 					break
@@ -306,9 +306,9 @@ func instanceIsReady(g Gomega,
 	g.Expect(statusConditions).ToNot(BeEmpty())
 
 	// Find the Ready condition
-	var readyCondition map[string]interface{}
+	var readyCondition map[string]any
 	for _, condInterface := range statusConditions {
-		if cond, ok := condInterface.(map[string]interface{}); ok {
+		if cond, ok := condInterface.(map[string]any); ok {
 			condType, _ := cond["type"].(string)
 			if condType == ctrlinstance.Ready {
 				readyCondition = cond

@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -292,9 +293,7 @@ func copyForEach(in []v1alpha1.ForEachDimension) []v1alpha1.ForEachDimension {
 	out := make([]v1alpha1.ForEachDimension, len(in))
 	for i, dim := range in {
 		copied := make(v1alpha1.ForEachDimension, len(dim))
-		for k, v := range dim {
-			copied[k] = v
-		}
+		maps.Copy(copied, dim)
 		out[i] = copied
 	}
 	return out

@@ -115,14 +115,14 @@ var _ = ginkgo.Describe("Post-Upgrade", ginkgo.Ordered, func() {
 	ginkgo.It("should be able to create a new instance post-upgrade", func() {
 		// Create a new instance using the simplest RGD (readywhen-nil, just a ConfigMap)
 		newInstance := &unstructured.Unstructured{
-			Object: map[string]interface{}{
+			Object: map[string]any{
 				"apiVersion": "kro.run/v1alpha1",
 				"kind":       "UpgradeReadyNil",
-				"metadata": map[string]interface{}{
+				"metadata": map[string]any{
 					"name":      "test-post-upgrade-new",
 					"namespace": "upgrade-test",
 				},
-				"spec": map[string]interface{}{
+				"spec": map[string]any{
 					"name": "test-post-upgrade-new",
 				},
 			},

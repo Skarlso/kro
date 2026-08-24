@@ -58,6 +58,12 @@ func Register(registry prometheus.Registerer) {
 		DynRouteTotal,
 		DynRouteMatchTotal,
 
+		// Graph-engine watch router
+		GraphWatchOwnerCount,
+		GraphWatchRequestCount,
+		GraphRouteTotal,
+		GraphRouteMatchTotal,
+
 		// Instance controller
 		InstanceStateTransitionsTotal,
 		InstanceReconcileDurationSeconds,

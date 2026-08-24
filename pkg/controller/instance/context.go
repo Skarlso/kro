@@ -113,14 +113,14 @@ func (dcx *DeletionContext) InstanceClient() dynamic.ResourceInterface {
 // targeting the instance. For cluster-scoped instances the namespace key is
 // omitted so the API server does not receive an empty string.
 func instanceSSAPatch(obj *unstructured.Unstructured) *unstructured.Unstructured {
-	md := map[string]interface{}{
+	md := map[string]any{
 		"name": obj.GetName(),
 	}
 	if ns := obj.GetNamespace(); ns != "" {
 		md["namespace"] = ns
 	}
 	return &unstructured.Unstructured{
-		Object: map[string]interface{}{
+		Object: map[string]any{
 			"apiVersion": obj.GetAPIVersion(),
 			"kind":       obj.GetKind(),
 			"metadata":   md,

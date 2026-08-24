@@ -35,82 +35,82 @@ import (
 func TestStatusesMatchSurvivesAPIRoundTrip(t *testing.T) {
 	tests := []struct {
 		name  string
-		wire  map[string]interface{}
-		want  map[string]interface{}
+		wire  map[string]any
+		want  map[string]any
 		match bool
 	}{
 		{
 			name:  "whole float from CEL equals int64 from the wire",
-			wire:  map[string]interface{}{"replicas": int64(3)},
-			want:  map[string]interface{}{"replicas": float64(3)},
+			wire:  map[string]any{"replicas": int64(3)},
+			want:  map[string]any{"replicas": float64(3)},
 			match: true,
 		},
 		{
 			name:  "nested whole float equals nested int64",
-			wire:  map[string]interface{}{"scale": map[string]interface{}{"desired": int64(2)}},
-			want:  map[string]interface{}{"scale": map[string]interface{}{"desired": float64(2)}},
+			wire:  map[string]any{"scale": map[string]any{"desired": int64(2)}},
+			want:  map[string]any{"scale": map[string]any{"desired": float64(2)}},
 			match: true,
 		},
 		{
 			name:  "whole float inside a slice equals int64",
-			wire:  map[string]interface{}{"ports": []interface{}{int64(80), int64(443)}},
-			want:  map[string]interface{}{"ports": []interface{}{float64(80), float64(443)}},
+			wire:  map[string]any{"ports": []any{int64(80), int64(443)}},
+			want:  map[string]any{"ports": []any{float64(80), float64(443)}},
 			match: true,
 		},
 		{
 			name:  "fractional value is not equal to its truncation",
-			wire:  map[string]interface{}{"ratio": int64(1)},
-			want:  map[string]interface{}{"ratio": float64(1.5)},
+			wire:  map[string]any{"ratio": int64(1)},
+			want:  map[string]any{"ratio": float64(1.5)},
 			match: false,
 		},
 		{
 			name:  "different numbers do not match",
-			wire:  map[string]interface{}{"replicas": int64(3)},
-			want:  map[string]interface{}{"replicas": float64(4)},
+			wire:  map[string]any{"replicas": int64(3)},
+			want:  map[string]any{"replicas": float64(4)},
 			match: false,
 		},
 		{
 			name:  "state is compared as a plain string",
-			wire:  map[string]interface{}{"state": "ACTIVE"},
-			want:  map[string]interface{}{"state": "ACTIVE"},
+			wire:  map[string]any{"state": "ACTIVE"},
+			want:  map[string]any{"state": "ACTIVE"},
 			match: true,
 		},
 		{
 			name:  "changed state does not match",
-			wire:  map[string]interface{}{"state": "IN_PROGRESS"},
-			want:  map[string]interface{}{"state": "ACTIVE"},
+			wire:  map[string]any{"state": "IN_PROGRESS"},
+			want:  map[string]any{"state": "ACTIVE"},
 			match: false,
 		},
 		{
 			name:  "an added field does not match",
-			wire:  map[string]interface{}{"state": "ACTIVE"},
-			want:  map[string]interface{}{"state": "ACTIVE", "arn": "arn:aws:s3:::bucket"},
+			wire:  map[string]any{"state": "ACTIVE"},
+			want:  map[string]any{"state": "ACTIVE", "arn": "arn:aws:s3:::bucket"},
 			match: false,
 		},
 		{
 			name:  "a removed field does not match",
-			wire:  map[string]interface{}{"state": "ACTIVE", "arn": "arn:aws:s3:::bucket"},
-			want:  map[string]interface{}{"state": "ACTIVE"},
+			wire:  map[string]any{"state": "ACTIVE", "arn": "arn:aws:s3:::bucket"},
+			want:  map[string]any{"state": "ACTIVE"},
 			match: false,
 		},
 		{
 			name:  "two empty statuses match",
-			wire:  map[string]interface{}{},
-			want:  map[string]interface{}{},
+			wire:  map[string]any{},
+			want:  map[string]any{},
 			match: true,
 		},
 		{
 			name:  "a nil wire status does not match an empty computed status",
 			wire:  nil,
-			want:  map[string]interface{}{},
+			want:  map[string]any{},
 			match: false,
 		},
 		{
 			// json.Marshal sorts map keys, so key order on either side is
 			// not observable and must never trigger a write.
 			name:  "key order is not significant",
-			wire:  map[string]interface{}{"a": "1", "b": "2"},
-			want:  map[string]interface{}{"b": "2", "a": "1"},
+			wire:  map[string]any{"a": "1", "b": "2"},
+			want:  map[string]any{"b": "2", "a": "1"},
 			match: true,
 		},
 		{
@@ -120,8 +120,8 @@ func TestStatusesMatchSurvivesAPIRoundTrip(t *testing.T) {
 			// The symmetric assertion below covers an unmarshalable value on
 			// either side of the comparison.
 			name:  "an unmarshalable value falls through to a write",
-			wire:  map[string]interface{}{"state": "ACTIVE"},
-			want:  map[string]interface{}{"state": func() {}},
+			wire:  map[string]any{"state": "ACTIVE"},
+			want:  map[string]any{"state": func() {}},
 			match: false,
 		},
 		{
@@ -129,13 +129,13 @@ func TestStatusesMatchSurvivesAPIRoundTrip(t *testing.T) {
 			// (conditions in particular) has to emit a stable order or the
 			// skip-write guard never fires and the loop returns.
 			name: "slice order is significant",
-			wire: map[string]interface{}{"conditions": []interface{}{
-				map[string]interface{}{"type": "Ready"},
-				map[string]interface{}{"type": "Synced"},
+			wire: map[string]any{"conditions": []any{
+				map[string]any{"type": "Ready"},
+				map[string]any{"type": "Synced"},
 			}},
-			want: map[string]interface{}{"conditions": []interface{}{
-				map[string]interface{}{"type": "Synced"},
-				map[string]interface{}{"type": "Ready"},
+			want: map[string]any{"conditions": []any{
+				map[string]any{"type": "Synced"},
+				map[string]any{"type": "Ready"},
 			}},
 			match: false,
 		},
@@ -168,35 +168,35 @@ func countStatusUpdates(actions []k8stesting.Action) int {
 func TestPersistStatusSkipsWriteWhenUnchanged(t *testing.T) {
 	tests := []struct {
 		name        string
-		wire        map[string]interface{}
-		computed    map[string]interface{}
+		wire        map[string]any
+		computed    map[string]any
 		wantWrites  int
 		description string
 	}{
 		{
 			name:       "identical status is not written",
-			wire:       map[string]interface{}{"state": "ACTIVE", "replicas": int64(3)},
-			computed:   map[string]interface{}{"state": "ACTIVE", "replicas": int64(3)},
+			wire:       map[string]any{"state": "ACTIVE", "replicas": int64(3)},
+			computed:   map[string]any{"state": "ACTIVE", "replicas": int64(3)},
 			wantWrites: 0,
 		},
 		{
 			name:       "int64 wire versus float64 CEL output is not written",
-			wire:       map[string]interface{}{"state": "ACTIVE", "replicas": int64(3)},
-			computed:   map[string]interface{}{"state": "ACTIVE", "replicas": float64(3)},
+			wire:       map[string]any{"state": "ACTIVE", "replicas": int64(3)},
+			computed:   map[string]any{"state": "ACTIVE", "replicas": float64(3)},
 			wantWrites: 0,
 			description: "the round-trip case: the previous reconcile persisted an " +
 				"int64 and this one recomputed the same value as a float64",
 		},
 		{
 			name:       "a changed value is written exactly once",
-			wire:       map[string]interface{}{"state": "IN_PROGRESS"},
-			computed:   map[string]interface{}{"state": "ACTIVE"},
+			wire:       map[string]any{"state": "IN_PROGRESS"},
+			computed:   map[string]any{"state": "ACTIVE"},
 			wantWrites: 1,
 		},
 		{
 			name:       "a first status on an instance with none is written",
-			wire:       map[string]interface{}{},
-			computed:   map[string]interface{}{"state": "ACTIVE"},
+			wire:       map[string]any{},
+			computed:   map[string]any{"state": "ACTIVE"},
 			wantWrites: 1,
 		},
 	}
@@ -227,14 +227,14 @@ func TestPersistStatusSkipsWriteWhenUnchanged(t *testing.T) {
 // Reconcile read conditions back off the object rather than off the marker.
 func TestPersistStatusMirrorsStatusOntoInstanceWhenWriteSkipped(t *testing.T) {
 	instance := newInstanceObject("demo", "default")
-	wire := map[string]interface{}{"state": "ACTIVE"}
+	wire := map[string]any{"state": "ACTIVE"}
 	instance.Object["status"] = wire
 
 	raw := newControllerTestDynamicClient(t, instance)
 	client := raw.Resource(controllerTestParentGVR).Namespace("default")
 	raw.ClearActions()
 
-	computed := map[string]interface{}{"state": "ACTIVE"}
+	computed := map[string]any{"state": "ACTIVE"}
 	c := &Controller{}
 	require.NoError(t, c.persistStatus(
 		context.Background(), client, instance, wire, computed, "ACTIVE",
@@ -272,11 +272,11 @@ func TestPersistStatusRetriesOnConflict(t *testing.T) {
 	c := &Controller{}
 	require.NoError(t, c.persistStatus(
 		context.Background(), client, instance,
-		map[string]interface{}{}, map[string]interface{}{"state": "ACTIVE"}, "",
+		map[string]any{}, map[string]any{"state": "ACTIVE"}, "",
 	))
 
 	assert.Equal(t, 2, attempts, "the conflicting write must be retried")
 	stored, err := client.Get(context.Background(), "demo", metav1.GetOptions{})
 	require.NoError(t, err)
-	assert.Equal(t, "ACTIVE", stored.Object["status"].(map[string]interface{})["state"])
+	assert.Equal(t, "ACTIVE", stored.Object["status"].(map[string]any)["state"])
 }

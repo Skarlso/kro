@@ -119,10 +119,8 @@ func (c ConditionSet) IsTrue(conditionTypes ...string) bool {
 
 // IsDependentCondition returns true if the provided condition is involved in calculating the root condition.
 func (c ConditionSet) IsDependentCondition(t string) bool {
-	for _, cond := range c.dependents {
-		if cond == t {
-			return true
-		}
+	if slices.Contains(c.dependents, t) {
+		return true
 	}
 	return t == c.root
 }

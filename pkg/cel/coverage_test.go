@@ -280,7 +280,7 @@ func TestSchemaDeclTypeWithMetadata(t *testing.T) {
 			name: "string enum",
 			schema: &spec.Schema{SchemaProps: spec.SchemaProps{
 				Type: []string{"string"},
-				Enum: []interface{}{"short", "a-much-longer-value"},
+				Enum: []any{"short", "a-much-longer-value"},
 			}},
 			assert: func(t *testing.T, dt *apiservercel.DeclType) {
 				require.NotNil(t, dt)

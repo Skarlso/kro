@@ -134,8 +134,8 @@ func TestStampAuthorConditionsEmptyReasonAndMessage(t *testing.T) {
 
 func TestBuiltinConditionsFiltersAuthorTypes(t *testing.T) {
 	instance := newInstanceObject("demo", "default")
-	require.NoError(t, unstructured.SetNestedSlice(instance.Object, []interface{}{
-		map[string]interface{}{"type": "AuthorThing", "status": "True"},
+	require.NoError(t, unstructured.SetNestedSlice(instance.Object, []any{
+		map[string]any{"type": "AuthorThing", "status": "True"},
 	}, "status", "conditions"))
 
 	mark := NewConditionsMarkerFor(instance)

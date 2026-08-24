@@ -85,10 +85,10 @@ var _ = ginkgo.Describe("Post-Upgrade Template Shrink", ginkgo.Ordered, func() {
 				continue
 			}
 
-			var template map[string]interface{}
+			var template map[string]any
 			gomega.Expect(json.Unmarshal(res.Template.Raw, &template)).To(gomega.Succeed())
 
-			data, ok := template["data"].(map[string]interface{})
+			data, ok := template["data"].(map[string]any)
 			gomega.Expect(ok).To(gomega.BeTrue(), "template should carry a data block")
 			delete(data, shrinkRemovableKey)
 

@@ -82,7 +82,7 @@ func benchCompileAndBuild(b *testing.B, g *expv1alpha1.Graph) *krotruntime.Runti
 // largeBenchGraph constructs a collection Graph with N items.
 func largeBenchGraph(count int) *expv1alpha1.Graph {
 	items := make([]any, count)
-	for i := 0; i < count; i++ {
+	for i := range count {
 		items[i] = fmt.Sprintf("item-%04d", i)
 	}
 	return generator.NewGraph("bench-graph",

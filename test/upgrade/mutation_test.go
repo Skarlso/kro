@@ -86,18 +86,18 @@ var _ = ginkgo.Describe("Post-Upgrade RGD Mutation", ginkgo.Ordered, func() {
 				continue
 			}
 
-			var template map[string]interface{}
+			var template map[string]any
 			gomega.Expect(json.Unmarshal(res.Template.Raw, &template)).To(gomega.Succeed())
 
 			// Add annotation to the deployment metadata
-			metadata, ok := template["metadata"].(map[string]interface{})
+			metadata, ok := template["metadata"].(map[string]any)
 			if !ok {
-				metadata = map[string]interface{}{}
+				metadata = map[string]any{}
 				template["metadata"] = metadata
 			}
-			annotations, ok := metadata["annotations"].(map[string]interface{})
+			annotations, ok := metadata["annotations"].(map[string]any)
 			if !ok {
-				annotations = map[string]interface{}{}
+				annotations = map[string]any{}
 				metadata["annotations"] = annotations
 			}
 			annotations[mutationAnnotationKey] = mutationAnnotationValue

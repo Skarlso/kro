@@ -29,7 +29,7 @@ import "github.com/kubernetes-sigs/kro/pkg/graph/parser"
 //
 // The caller owns the returned slices. The input map is mutated: the
 // `conditions` key is removed when present.
-func ParseStatusExpressions(statusMap map[string]interface{}) (
+func ParseStatusExpressions(statusMap map[string]any) (
 	fields []StatusFieldExpr,
 	conditionExprs []string,
 	noExprFields []string,

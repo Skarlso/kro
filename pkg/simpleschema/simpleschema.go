@@ -26,7 +26,7 @@ import (
 // The second input customTypes is a map[string]interface{} where the key is
 // the type name and the value its specification. These custom types will be
 // available as predefined types in the transformer.
-func ToOpenAPISpec(obj map[string]interface{}, customTypes map[string]interface{}) (*extv1.JSONSchemaProps, error) {
+func ToOpenAPISpec(obj map[string]any, customTypes map[string]any) (*extv1.JSONSchemaProps, error) {
 	t, err := newTransformer(customTypes)
 	if err != nil {
 		return nil, err

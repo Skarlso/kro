@@ -321,7 +321,7 @@ func TestSimple_ApplyTemplate_CollectionDeterministicAppliedOrder(t *testing.T) 
 	var firstRunOrder []string
 
 	// Run repeatedly to verify deterministic ordering across independent reconciles
-	for run := 0; run < 5; run++ {
+	for run := range 5 {
 		base := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
 		cl := &shuffledPatchClient{Client: base}
 		ex := NewSimple(cl)
@@ -348,7 +348,7 @@ func TestSimple_ApplyTemplate_CollectionDeterministicAppliedOrder(t *testing.T) 
 
 func largeCollectionGraph(count int) *expv1alpha1.Graph {
 	names := make([]any, count)
-	for i := 0; i < count; i++ {
+	for i := range count {
 		names[i] = fmt.Sprintf("item-%02d", i)
 	}
 	return generator.NewGraph("g",
@@ -388,7 +388,7 @@ func TestSimple_ApplyTemplate_LargeCollectionParallel(t *testing.T) {
 			assert.True(t, cmExists(t, base, a.Name), "item %q must exist in cluster", a.Name)
 		}
 
-		for i := 0; i < count; i++ {
+		for i := range count {
 			expected := fmt.Sprintf("cm-item-%02d", i)
 			assert.Contains(t, names, expected)
 		}
@@ -429,7 +429,7 @@ func TestSimple_ApplyTemplate_LargeCollectionTolerance(t *testing.T) {
 	// 20..59: absent, succeed on create (applied)
 
 	var seeded []client.Object
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		seeded = append(seeded, liveCM(fmt.Sprintf("cm-item-%02d", i)))
 	}
 
@@ -465,7 +465,7 @@ func TestSimple_ApplyTemplate_LargeCollectionTolerance(t *testing.T) {
 		appliedNames[a.Name] = true
 	}
 
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		name := fmt.Sprintf("cm-item-%02d", i)
 		assert.True(t, appliedNames[name], "pre-existing item with rejected update must be in Applied: %s", name)
 	}

@@ -168,7 +168,7 @@ func (c *Controller) updateConditionsStatus(ctx context.Context, inst *unstructu
 		}
 		status, _, _ := unstructured.NestedMap(cur.Object, "status")
 		if status == nil {
-			status = map[string]interface{}{}
+			status = map[string]any{}
 		}
 		if !c.reconcileConfig.HasAuthorConditions {
 			if conds, found, _ := unstructured.NestedSlice(inst.Object, "status", "conditions"); found {

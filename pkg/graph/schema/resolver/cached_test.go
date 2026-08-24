@@ -30,15 +30,15 @@ import (
 // deterministic empty schema. Counts are atomic-safe for the
 // concurrent test row.
 type pushMockResolver struct {
-	calls int32
+	calls atomic.Int32
 }
 
 func (m *pushMockResolver) ResolveSchema(_ schema.GroupVersionKind) (*spec.Schema, error) {
-	atomic.AddInt32(&m.calls, 1)
+	m.calls.Add(1)
 	return &spec.Schema{SchemaProps: spec.SchemaProps{Type: []string{"object"}}}, nil
 }
 
-func (m *pushMockResolver) count() int { return int(atomic.LoadInt32(&m.calls)) }
+func (m *pushMockResolver) count() int { return int(m.calls.Load()) }
 
 func gvk(group, version, kind string) schema.GroupVersionKind {
 	return schema.GroupVersionKind{Group: group, Version: version, Kind: kind}
@@ -61,7 +61,7 @@ func TestCachedSchemaResolver_Caching(t *testing.T) {
 			size: 100,
 			fetches: func(t *testing.T, c *CachedSchemaResolver, _ *pushMockResolver) {
 				k := gvk("apps", "v1", "Deployment")
-				for i := 0; i < 10; i++ {
+				for range 10 {
 					_, err := c.ResolveSchema(k)
 					require.NoError(t, err)
 				}
@@ -91,13 +91,11 @@ func TestCachedSchemaResolver_Caching(t *testing.T) {
 			fetches: func(t *testing.T, c *CachedSchemaResolver, _ *pushMockResolver) {
 				k := gvk("apps", "v1", "Deployment")
 				var wg sync.WaitGroup
-				for i := 0; i < 50; i++ {
-					wg.Add(1)
-					go func() {
-						defer wg.Done()
+				for range 50 {
+					wg.Go(func() {
 						_, err := c.ResolveSchema(k)
 						assert.NoError(t, err)
-					}()
+					})
 				}
 				wg.Wait()
 			},
@@ -255,11 +253,9 @@ func TestCachedSchemaResolver_InFlightSingleflightRace(t *testing.T) {
 	)
 
 	// Caller 1 starts in epoch 0 and blocks in the delegate.
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		sch1, err1 = cached.ResolveSchema(targetGVK)
-	}()
+	})
 
 	// Wait until caller 1 is actively resolving in the delegate.
 	<-mock.firstCallStarted

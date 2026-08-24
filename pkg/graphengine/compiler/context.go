@@ -16,6 +16,7 @@ package compiler
 
 import (
 	"fmt"
+	"maps"
 	"strings"
 
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -461,9 +462,7 @@ func projectPatchPayload(p *expv1alpha1.PatchSpec) (map[string]any, error) {
 		if err != nil {
 			return nil, fmt.Errorf("body: %w", err)
 		}
-		for k, v := range body {
-			out[k] = v
-		}
+		maps.Copy(out, body)
 	}
 	out["apiVersion"] = p.APIVersion
 	out["kind"] = p.Kind

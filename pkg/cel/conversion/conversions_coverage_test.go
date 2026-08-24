@@ -37,7 +37,7 @@ func evalExpr(t *testing.T, expr string) ref.Val {
 	require.NoError(t, issues.Err())
 	prog, err := env.Program(ast)
 	require.NoError(t, err)
-	val, _, err := prog.Eval(map[string]interface{}{})
+	val, _, err := prog.Eval(map[string]any{})
 	require.NoError(t, err)
 	return val
 }
@@ -46,7 +46,7 @@ func TestGoNativeType_Scalars(t *testing.T) {
 	cases := []struct {
 		name string
 		val  ref.Val
-		want interface{}
+		want any
 	}{
 		{name: "nil ref.Val", val: nil, want: nil},
 		{name: "bool", val: evalExpr(t, `true`), want: true},
@@ -130,7 +130,7 @@ func TestGoNativeType_MapKeyAndValue(t *testing.T) {
 				return
 			}
 			require.NoError(t, err)
-			_, ok := got.(map[string]interface{})
+			_, ok := got.(map[string]any)
 			assert.True(t, ok, "expected map[string]interface{}, got %T", got)
 		})
 	}
@@ -152,14 +152,14 @@ func TestConvertList_RawSlice(t *testing.T) {
 	// A raw Go slice wrapped via the registry is a Lister and should round-trip
 	// through convertList.
 	reg := types.NewEmptyRegistry()
-	val := reg.NativeToValue([]interface{}{int64(1), "two", true})
+	val := reg.NativeToValue([]any{int64(1), "two", true})
 	require.Equal(t, types.ListType, val.Type())
 
 	got, err := GoNativeType(val)
 	require.NoError(t, err)
-	list, ok := got.([]interface{})
+	list, ok := got.([]any)
 	require.True(t, ok, "expected []interface{}, got %T", got)
-	assert.Equal(t, []interface{}{int64(1), "two", true}, list)
+	assert.Equal(t, []any{int64(1), "two", true}, list)
 }
 
 func TestIsBoolType(t *testing.T) {

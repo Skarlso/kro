@@ -371,11 +371,11 @@ func TestPatch_StatusSubresourceLegacyUpdateConflictResolution(t *testing.T) {
 						Properties: map[string]apiextensionsv1.JSONSchemaProps{
 							"spec": {
 								Type:                   "object",
-								XPreserveUnknownFields: ptr(true),
+								XPreserveUnknownFields: new(true),
 							},
 							"status": {
 								Type:                   "object",
-								XPreserveUnknownFields: ptr(true),
+								XPreserveUnknownFields: new(true),
 							},
 						},
 					},
@@ -547,6 +547,7 @@ func compileAndBuildEnv(t *testing.T, cfg *rest.Config, g *expv1alpha1.Graph) *k
 	return krotruntime.New(p, g)
 }
 
+//go:fix inline
 func ptr[T any](v T) *T {
-	return &v
+	return new(v)
 }

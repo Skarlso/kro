@@ -222,7 +222,7 @@ func ensureTestInstanceCRD(t environment.TestingT, env *environment.Environment,
 //   - cm1: ConfigMap with data.app = ${schema.spec.name}
 //   - cm2: ConfigMap with data.ref = ${cm1.metadata.name}
 func newWebAppRGD(name, kind, namespace string) *krov1alpha1.ResourceGraphDefinition {
-	specRaw, _ := json.Marshal(map[string]interface{}{"name": "string"})
+	specRaw, _ := json.Marshal(map[string]any{"name": "string"})
 	cm1Raw, _ := json.Marshal(map[string]any{
 		"apiVersion": "v1",
 		"kind":       "ConfigMap",

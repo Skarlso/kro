@@ -187,8 +187,8 @@ func (c *Controller) setUnmanaged(dcx *DeletionContext, obj *unstructured.Unstru
 		clone := current.DeepCopy()
 		metadata.RemoveInstanceFinalizer(clone)
 
-		patchData, err := json.Marshal(map[string]interface{}{
-			"metadata": map[string]interface{}{
+		patchData, err := json.Marshal(map[string]any{
+			"metadata": map[string]any{
 				"resourceVersion": current.GetResourceVersion(),
 				"finalizers":      clone.GetFinalizers(),
 			},

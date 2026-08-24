@@ -29,14 +29,14 @@ import (
 func TestGetValueFromPath(t *testing.T) {
 	tests := []struct {
 		name     string
-		resource map[string]interface{}
+		resource map[string]any
 		path     string
-		want     interface{}
+		want     any
 		wantErr  bool
 	}{
 		{
 			name: "simple field",
-			resource: map[string]interface{}{
+			resource: map[string]any{
 				"field": "prefix${value1}suffix${value2}",
 			},
 			path:    "field",
@@ -45,11 +45,11 @@ func TestGetValueFromPath(t *testing.T) {
 		},
 		{
 			name: "nested field",
-			resource: map[string]interface{}{
-				"spec": map[string]interface{}{
-					"template": map[string]interface{}{
-						"containers": []interface{}{
-							map[string]interface{}{
+			resource: map[string]any{
+				"spec": map[string]any{
+					"template": map[string]any{
+						"containers": []any{
+							map[string]any{
 								"image": "${image.name}:${image.tag}",
 							},
 						},
@@ -62,8 +62,8 @@ func TestGetValueFromPath(t *testing.T) {
 		},
 		{
 			name: "array access",
-			resource: map[string]interface{}{
-				"items": []interface{}{
+			resource: map[string]any{
+				"items": []any{
 					"${value1}",
 					"${value2}",
 					"${value3}",
@@ -75,8 +75,8 @@ func TestGetValueFromPath(t *testing.T) {
 		},
 		{
 			name: "mixed quotes and dots",
-			resource: map[string]interface{}{
-				"spec": map[string]interface{}{
+			resource: map[string]any{
+				"spec": map[string]any{
 					"my.field.name": "${complex.value}",
 				},
 			},
@@ -86,11 +86,11 @@ func TestGetValueFromPath(t *testing.T) {
 		},
 		{
 			name: "deep nested arrays",
-			resource: map[string]interface{}{
-				"metadata": map[string]interface{}{
-					"annotations": []interface{}{
-						map[string]interface{}{
-							"values": []interface{}{
+			resource: map[string]any{
+				"metadata": map[string]any{
+					"annotations": []any{
+						map[string]any{
+							"values": []any{
 								"${annotation1}",
 								"${annotation2}",
 							},
@@ -104,7 +104,7 @@ func TestGetValueFromPath(t *testing.T) {
 		},
 		{
 			name: "nonexistent key",
-			resource: map[string]interface{}{
+			resource: map[string]any{
 				"field": "${value}",
 			},
 			path:    "nonexistent",
@@ -113,8 +113,8 @@ func TestGetValueFromPath(t *testing.T) {
 		},
 		{
 			name: "invalid array index",
-			resource: map[string]interface{}{
-				"items": []interface{}{"${value}"},
+			resource: map[string]any{
+				"items": []any{"${value}"},
 			},
 			path:    "items[10]",
 			want:    nil,
@@ -122,7 +122,7 @@ func TestGetValueFromPath(t *testing.T) {
 		},
 		{
 			name: "invalid type conversion",
-			resource: map[string]interface{}{
+			resource: map[string]any{
 				"field":        "${value}",
 				"field.nested": "invalid",
 			},
@@ -132,7 +132,7 @@ func TestGetValueFromPath(t *testing.T) {
 		},
 		{
 			name: "invalid path parse error",
-			resource: map[string]interface{}{
+			resource: map[string]any{
 				"field": "value",
 			},
 			path:    `[invalid["path"]`,
@@ -141,8 +141,8 @@ func TestGetValueFromPath(t *testing.T) {
 		},
 		{
 			name: "expected array but got map",
-			resource: map[string]interface{}{
-				"field": map[string]interface{}{
+			resource: map[string]any{
+				"field": map[string]any{
 					"nested": "value",
 				},
 			},
@@ -172,43 +172,43 @@ func TestGetValueFromPath(t *testing.T) {
 func TestSetValueAtPath(t *testing.T) {
 	tests := []struct {
 		name     string
-		resource map[string]interface{}
+		resource map[string]any
 		path     string
-		value    interface{}
+		value    any
 		wantErr  bool
-		want     map[string]interface{}
+		want     map[string]any
 	}{
 		{
 			name:     "set top level field",
-			resource: map[string]interface{}{},
+			resource: map[string]any{},
 			path:     "name",
 			value:    "test-value",
-			want: map[string]interface{}{
+			want: map[string]any{
 				"name": "test-value",
 			},
 		},
 		{
 			name: "set nested field",
-			resource: map[string]interface{}{
-				"spec": map[string]interface{}{},
+			resource: map[string]any{
+				"spec": map[string]any{},
 			},
 			path:  `spec.replicas`,
 			value: 3,
-			want: map[string]interface{}{
-				"spec": map[string]interface{}{
+			want: map[string]any{
+				"spec": map[string]any{
 					"replicas": 3,
 				},
 			},
 		},
 		{
 			name:     "create intermediate structures",
-			resource: map[string]interface{}{},
+			resource: map[string]any{},
 			path:     `spec.template.metadata.name`,
 			value:    "my-pod",
-			want: map[string]interface{}{
-				"spec": map[string]interface{}{
-					"template": map[string]interface{}{
-						"metadata": map[string]interface{}{
+			want: map[string]any{
+				"spec": map[string]any{
+					"template": map[string]any{
+						"metadata": map[string]any{
 							"name": "my-pod",
 						},
 					},
@@ -217,14 +217,14 @@ func TestSetValueAtPath(t *testing.T) {
 		},
 		{
 			name:     "create intermediate structures - quoted field names",
-			resource: map[string]interface{}{},
+			resource: map[string]any{},
 			path:     `spec.template.metadata.annotations["custom.annotation.name"]`,
 			value:    "my-pod",
-			want: map[string]interface{}{
-				"spec": map[string]interface{}{
-					"template": map[string]interface{}{
-						"metadata": map[string]interface{}{
-							"annotations": map[string]interface{}{
+			want: map[string]any{
+				"spec": map[string]any{
+					"template": map[string]any{
+						"metadata": map[string]any{
+							"annotations": map[string]any{
 								"custom.annotation.name": "my-pod",
 							},
 						},
@@ -234,31 +234,31 @@ func TestSetValueAtPath(t *testing.T) {
 		},
 		{
 			name: "set array element",
-			resource: map[string]interface{}{
-				"containers": []interface{}{
-					map[string]interface{}{"name": "container1"},
+			resource: map[string]any{
+				"containers": []any{
+					map[string]any{"name": "container1"},
 				},
 			},
 			path:  "containers[1]",
-			value: map[string]interface{}{"name": "container2"},
-			want: map[string]interface{}{
-				"containers": []interface{}{
-					map[string]interface{}{"name": "container1"},
-					map[string]interface{}{"name": "container2"},
+			value: map[string]any{"name": "container2"},
+			want: map[string]any{
+				"containers": []any{
+					map[string]any{"name": "container1"},
+					map[string]any{"name": "container2"},
 				},
 			},
 		},
 		{
 			name:     "create array and set element",
-			resource: map[string]interface{}{},
+			resource: map[string]any{},
 			path:     `spec.containers[0].ports[0].containerPort`,
 			value:    8080,
-			want: map[string]interface{}{
-				"spec": map[string]interface{}{
-					"containers": []interface{}{
-						map[string]interface{}{
-							"ports": []interface{}{
-								map[string]interface{}{
+			want: map[string]any{
+				"spec": map[string]any{
+					"containers": []any{
+						map[string]any{
+							"ports": []any{
+								map[string]any{
 									"containerPort": 8080,
 								},
 							},
@@ -269,13 +269,13 @@ func TestSetValueAtPath(t *testing.T) {
 		},
 		{
 			name: "extend existing array",
-			resource: map[string]interface{}{
-				"args": []interface{}{"arg1"},
+			resource: map[string]any{
+				"args": []any{"arg1"},
 			},
 			path:  "args[2]",
 			value: "arg3",
-			want: map[string]interface{}{
-				"args": []interface{}{
+			want: map[string]any{
+				"args": []any{
 					"arg1",
 					nil,
 					"arg3",
@@ -284,81 +284,81 @@ func TestSetValueAtPath(t *testing.T) {
 		},
 		{
 			name: "overwrite existing value",
-			resource: map[string]interface{}{
-				"metadata": map[string]interface{}{
+			resource: map[string]any{
+				"metadata": map[string]any{
 					"name": "old-name",
 				},
 			},
 			path:  `metadata["name"]`,
 			value: "new-name",
-			want: map[string]interface{}{
-				"metadata": map[string]interface{}{
+			want: map[string]any{
+				"metadata": map[string]any{
 					"name": "new-name",
 				},
 			},
 		},
 		{
 			name:     "invalid path format",
-			resource: map[string]interface{}{},
+			resource: map[string]any{},
 			path:     `[invalid["path"]`,
 			value:    "value",
 			wantErr:  true,
-			want:     map[string]interface{}{},
+			want:     map[string]any{},
 		},
 		{
 			name:     "empty path returns early",
-			resource: map[string]interface{}{"existing": "value"},
+			resource: map[string]any{"existing": "value"},
 			path:     "",
 			value:    "ignored",
 			wantErr:  false,
-			want:     map[string]interface{}{"existing": "value"},
+			want:     map[string]any{"existing": "value"},
 		},
 		{
 			name: "expected map but got string",
-			resource: map[string]interface{}{
+			resource: map[string]any{
 				"field": "string-value",
 			},
 			path:    "field.nested",
 			value:   "test",
 			wantErr: true,
-			want: map[string]interface{}{
+			want: map[string]any{
 				"field": "string-value",
 			},
 		},
 		{
 			name: "expected map but got array for field access",
-			resource: map[string]interface{}{
-				"field": []interface{}{"a", "b"},
+			resource: map[string]any{
+				"field": []any{"a", "b"},
 			},
 			path:    "field.nested",
 			value:   "test",
 			wantErr: true,
-			want: map[string]interface{}{
-				"field": []interface{}{"a", "b"},
+			want: map[string]any{
+				"field": []any{"a", "b"},
 			},
 		},
 		{
 			name: "array segment on non-array non-nil value",
-			resource: map[string]interface{}{
+			resource: map[string]any{
 				"field": "string-not-array",
 			},
 			path:    "field[0]",
 			value:   "test",
 			wantErr: true,
-			want: map[string]interface{}{
+			want: map[string]any{
 				"field": "string-not-array",
 			},
 		},
 		{
 			name:     "nested arrays and field at the end",
-			resource: map[string]interface{}{},
+			resource: map[string]any{},
 			path:     `matrix[0][0][0].value`,
 			value:    "test",
-			want: map[string]interface{}{
-				"matrix": []interface{}{
-					[]interface{}{
-						[]interface{}{
-							map[string]interface{}{
+			want: map[string]any{
+				"matrix": []any{
+					[]any{
+						[]any{
+							map[string]any{
 								"value": "test",
 							},
 						},
@@ -368,20 +368,20 @@ func TestSetValueAtPath(t *testing.T) {
 		},
 		{
 			name: "nested arraaaaays",
-			resource: map[string]interface{}{
-				"matrix": []interface{}{
-					[]interface{}{},
+			resource: map[string]any{
+				"matrix": []any{
+					[]any{},
 				},
 			},
 			// Making this work made me go crazy.
 			value: "catch-me-if-you-can",
 			path:  `matrix[0][0][0][0][3]`,
-			want: map[string]interface{}{
-				"matrix": []interface{}{
-					[]interface{}{
-						[]interface{}{
-							[]interface{}{
-								[]interface{}{
+			want: map[string]any{
+				"matrix": []any{
+					[]any{
+						[]any{
+							[]any{
+								[]any{
 									nil,
 									nil,
 									nil,
@@ -395,32 +395,32 @@ func TestSetValueAtPath(t *testing.T) {
 		},
 		{
 			name: "array segment on nil value creates array",
-			resource: map[string]interface{}{
-				"spec": map[string]interface{}{
+			resource: map[string]any{
+				"spec": map[string]any{
 					"items": nil,
 				},
 			},
 			path:  "spec.items[0]",
 			value: "first",
-			want: map[string]interface{}{
-				"spec": map[string]interface{}{
-					"items": []interface{}{"first"},
+			want: map[string]any{
+				"spec": map[string]any{
+					"items": []any{"first"},
 				},
 			},
 		},
 		{
 			name: "nested nil array creation",
-			resource: map[string]interface{}{
-				"data": map[string]interface{}{
-					"matrix": []interface{}{nil},
+			resource: map[string]any{
+				"data": map[string]any{
+					"matrix": []any{nil},
 				},
 			},
 			path:  "data.matrix[0][2]",
 			value: "deep",
-			want: map[string]interface{}{
-				"data": map[string]interface{}{
-					"matrix": []interface{}{
-						[]interface{}{nil, nil, "deep"},
+			want: map[string]any{
+				"data": map[string]any{
+					"matrix": []any{
+						[]any{nil, nil, "deep"},
 					},
 				},
 			},
@@ -447,15 +447,15 @@ func TestSetValueAtPath(t *testing.T) {
 func TestResolveField(t *testing.T) {
 	tests := []struct {
 		name     string
-		resource map[string]interface{}
-		data     map[string]interface{}
+		resource map[string]any
+		data     map[string]any
 		field    variable.FieldDescriptor
 		want     ResolutionResult
 	}{
 		{
 			name: "non data provided",
-			resource: map[string]interface{}{
-				"spec": map[string]interface{}{
+			resource: map[string]any{
+				"spec": map[string]any{
 					"field": "${notProvided}",
 				},
 			},
@@ -471,12 +471,12 @@ func TestResolveField(t *testing.T) {
 		},
 		{
 			name: "standalone expression simple path",
-			resource: map[string]interface{}{
-				"spec": map[string]interface{}{
+			resource: map[string]any{
+				"spec": map[string]any{
 					"field": "${value}",
 				},
 			},
-			data: map[string]interface{}{
+			data: map[string]any{
 				"value": []float64{1, 2, 3.5},
 			},
 			field: variable.FieldDescriptor{
@@ -491,14 +491,14 @@ func TestResolveField(t *testing.T) {
 		},
 		{
 			name: "array path with standalone expression",
-			resource: map[string]interface{}{
-				"spec": map[string]interface{}{
-					"array": []interface{}{
+			resource: map[string]any{
+				"spec": map[string]any{
+					"array": []any{
 						"${value}",
 					},
 				},
 			},
-			data: map[string]interface{}{
+			data: map[string]any{
 				"value": "resolved",
 			},
 			field: variable.FieldDescriptor{
@@ -513,12 +513,12 @@ func TestResolveField(t *testing.T) {
 		},
 		{
 			name: "error - missing data for expression",
-			resource: map[string]interface{}{
-				"spec": map[string]interface{}{
+			resource: map[string]any{
+				"spec": map[string]any{
 					"field": "${missing}",
 				},
 			},
-			data: map[string]interface{}{},
+			data: map[string]any{},
 			field: variable.FieldDescriptor{
 				Path:       "spec.field",
 				Expression: krocel.NewUncompiled("missing"),
@@ -530,10 +530,10 @@ func TestResolveField(t *testing.T) {
 		},
 		{
 			name: "error - invalid path",
-			resource: map[string]interface{}{
-				"spec": map[string]interface{}{},
+			resource: map[string]any{
+				"spec": map[string]any{},
 			},
-			data: map[string]interface{}{
+			data: map[string]any{
 				"value": "resolved",
 			},
 			field: variable.FieldDescriptor{
@@ -547,18 +547,18 @@ func TestResolveField(t *testing.T) {
 		},
 		{
 			name: "deeply nested array path",
-			resource: map[string]interface{}{
-				"spec": map[string]interface{}{
-					"nested": map[string]interface{}{
-						"array": []interface{}{
-							map[string]interface{}{
+			resource: map[string]any{
+				"spec": map[string]any{
+					"nested": map[string]any{
+						"array": []any{
+							map[string]any{
 								"field": "${value}",
 							},
 						},
 					},
 				},
 			},
-			data: map[string]interface{}{
+			data: map[string]any{
 				"value": "papa-ou-t-es",
 			},
 			field: variable.FieldDescriptor{
@@ -573,10 +573,10 @@ func TestResolveField(t *testing.T) {
 		},
 		{
 			name: "error - leading dot in path fails consistently",
-			resource: map[string]interface{}{
+			resource: map[string]any{
 				"field": "${value}",
 			},
-			data: map[string]interface{}{
+			data: map[string]any{
 				"value": "resolved",
 			},
 			field: variable.FieldDescriptor{
@@ -616,9 +616,9 @@ func TestResolveField(t *testing.T) {
 }
 
 func TestResolveDynamicArrayIndexes(t *testing.T) {
-	resource := map[string]interface{}{
-		"spec": map[string]interface{}{
-			"array": []interface{}{
+	resource := map[string]any{
+		"spec": map[string]any{
+			"array": []any{
 				"value1",
 				"${value}",
 				"value3",
@@ -626,7 +626,7 @@ func TestResolveDynamicArrayIndexes(t *testing.T) {
 		},
 	}
 
-	data := map[string]interface{}{
+	data := map[string]any{
 		"value": "replaced",
 	}
 
@@ -641,7 +641,7 @@ func TestResolveDynamicArrayIndexes(t *testing.T) {
 	assert.True(t, got.Resolved)
 	assert.Equal(t, "replaced", got.Replaced)
 
-	array, ok := r.resource["spec"].(map[string]interface{})["array"].([]interface{})
+	array, ok := r.resource["spec"].(map[string]any)["array"].([]any)
 	assert.True(t, ok)
 
 	// Verify that the array was updated and that other elements were not affected
@@ -653,12 +653,12 @@ func TestResolveDynamicArrayIndexes(t *testing.T) {
 func TestResolver(t *testing.T) {
 	t.Run("successful resolution", func(t *testing.T) {
 		r := NewResolver(
-			map[string]interface{}{
-				"spec": map[string]interface{}{
+			map[string]any{
+				"spec": map[string]any{
 					"field": "${value}-${suffix}",
 				},
 			},
-			map[string]interface{}{
+			map[string]any{
 				"\"resolved-\" + \"done\"": "resolved-done",
 			},
 		)
@@ -676,13 +676,13 @@ func TestResolver(t *testing.T) {
 
 	t.Run("error aggregation", func(t *testing.T) {
 		r := NewResolver(
-			map[string]interface{}{
-				"spec": map[string]interface{}{
+			map[string]any{
+				"spec": map[string]any{
 					"field1": "${value1}",
 					"field2": "${value2}",
 				},
 			},
-			map[string]interface{}{
+			map[string]any{
 				"value1": "resolved",
 				// value2 is missing - will cause error
 			},
@@ -706,16 +706,16 @@ func TestResolver(t *testing.T) {
 
 func TestUpsertValueAtPath(t *testing.T) {
 	t.Run("creates nested structure", func(t *testing.T) {
-		resource := map[string]interface{}{}
+		resource := map[string]any{}
 		r := NewResolver(resource, nil)
 
 		err := r.UpsertValueAtPath("status.conditions[0].type", "Ready")
 
 		assert.NoError(t, err)
-		assert.Equal(t, map[string]interface{}{
-			"status": map[string]interface{}{
-				"conditions": []interface{}{
-					map[string]interface{}{
+		assert.Equal(t, map[string]any{
+			"status": map[string]any{
+				"conditions": []any{
+					map[string]any{
 						"type": "Ready",
 					},
 				},
@@ -724,8 +724,8 @@ func TestUpsertValueAtPath(t *testing.T) {
 	})
 
 	t.Run("updates existing value", func(t *testing.T) {
-		resource := map[string]interface{}{
-			"status": map[string]interface{}{
+		resource := map[string]any{
+			"status": map[string]any{
 				"phase": "Pending",
 			},
 		}
@@ -734,7 +734,7 @@ func TestUpsertValueAtPath(t *testing.T) {
 		err := r.UpsertValueAtPath("status.phase", "Running")
 
 		assert.NoError(t, err)
-		assert.Equal(t, "Running", resource["status"].(map[string]interface{})["phase"])
+		assert.Equal(t, "Running", resource["status"].(map[string]any)["phase"])
 	})
 }
 
@@ -744,20 +744,20 @@ func TestUpsertValueAtPath(t *testing.T) {
 func TestResolveFieldWithEmptyBraces(t *testing.T) {
 	tests := []struct {
 		name     string
-		resource map[string]interface{}
-		data     map[string]interface{}
+		resource map[string]any
+		data     map[string]any
 		field    variable.FieldDescriptor
 		want     ResolutionResult
 	}{
 		{
 			name: "standalone expression ending with empty braces",
-			resource: map[string]interface{}{
-				"metadata": map[string]interface{}{
+			resource: map[string]any{
+				"metadata": map[string]any{
 					"annotations": "${includeAnnotations ? annotations : {}}",
 				},
 			},
-			data: map[string]interface{}{
-				"includeAnnotations ? annotations : {}": map[string]interface{}{},
+			data: map[string]any{
+				"includeAnnotations ? annotations : {}": map[string]any{},
 			},
 			field: variable.FieldDescriptor{
 				Path:       "metadata.annotations",
@@ -766,18 +766,18 @@ func TestResolveFieldWithEmptyBraces(t *testing.T) {
 			want: ResolutionResult{
 				Path:     "metadata.annotations",
 				Resolved: true,
-				Replaced: map[string]interface{}{},
+				Replaced: map[string]any{},
 			},
 		},
 		{
 			name: "complex expression with has() and empty braces",
-			resource: map[string]interface{}{
-				"spec": map[string]interface{}{
+			resource: map[string]any{
+				"spec": map[string]any{
 					"config": "${has(schema.config) && includeConfig ? schema.config : {}}",
 				},
 			},
-			data: map[string]interface{}{
-				"has(schema.config) && includeConfig ? schema.config : {}": map[string]interface{}{
+			data: map[string]any{
+				"has(schema.config) && includeConfig ? schema.config : {}": map[string]any{
 					"key": "value",
 				},
 			},
@@ -788,20 +788,20 @@ func TestResolveFieldWithEmptyBraces(t *testing.T) {
 			want: ResolutionResult{
 				Path:     "spec.config",
 				Resolved: true,
-				Replaced: map[string]interface{}{
+				Replaced: map[string]any{
 					"key": "value",
 				},
 			},
 		},
 		{
 			name: "expression with empty braces on both sides",
-			resource: map[string]interface{}{
-				"data": map[string]interface{}{
+			resource: map[string]any{
+				"data": map[string]any{
 					"field": "${condition ? {} : {}}",
 				},
 			},
-			data: map[string]interface{}{
-				"condition ? {} : {}": map[string]interface{}{},
+			data: map[string]any{
+				"condition ? {} : {}": map[string]any{},
 			},
 			field: variable.FieldDescriptor{
 				Path:       "data.field",
@@ -810,7 +810,7 @@ func TestResolveFieldWithEmptyBraces(t *testing.T) {
 			want: ResolutionResult{
 				Path:     "data.field",
 				Resolved: true,
-				Replaced: map[string]interface{}{},
+				Replaced: map[string]any{},
 			},
 		},
 	}
@@ -842,21 +842,21 @@ func TestResolveFieldWithEmptyBraces(t *testing.T) {
 func TestResolveFieldOmit(t *testing.T) {
 	tests := []struct {
 		name         string
-		resource     map[string]interface{}
-		data         map[string]interface{}
+		resource     map[string]any
+		data         map[string]any
 		field        variable.FieldDescriptor
 		wantResolved bool
 		wantSentinel bool
 	}{
 		{
 			name: "omit sentinel is placed in map field",
-			resource: map[string]interface{}{
-				"spec": map[string]interface{}{
+			resource: map[string]any{
+				"spec": map[string]any{
 					"name":   "test",
 					"policy": "${expr}",
 				},
 			},
-			data: map[string]interface{}{
+			data: map[string]any{
 				"expr": sentinels.Omit{},
 			},
 			field: variable.FieldDescriptor{
@@ -868,12 +868,12 @@ func TestResolveFieldOmit(t *testing.T) {
 		},
 		{
 			name: "omit sentinel is placed in array element",
-			resource: map[string]interface{}{
-				"spec": map[string]interface{}{
-					"args": []interface{}{"${expr}", "keep"},
+			resource: map[string]any{
+				"spec": map[string]any{
+					"args": []any{"${expr}", "keep"},
 				},
 			},
-			data: map[string]interface{}{
+			data: map[string]any{
 				"expr": sentinels.Omit{},
 			},
 			field: variable.FieldDescriptor{
@@ -885,12 +885,12 @@ func TestResolveFieldOmit(t *testing.T) {
 		},
 		{
 			name: "non-sentinel value writes normally",
-			resource: map[string]interface{}{
-				"spec": map[string]interface{}{
+			resource: map[string]any{
+				"spec": map[string]any{
 					"policy": "${expr}",
 				},
 			},
-			data: map[string]interface{}{
+			data: map[string]any{
 				"expr": "my-policy",
 			},
 			field: variable.FieldDescriptor{
@@ -927,71 +927,71 @@ func TestResolveFieldOmit(t *testing.T) {
 func TestCleanOmitSentinels(t *testing.T) {
 	tests := []struct {
 		name string
-		in   map[string]interface{}
-		want map[string]interface{}
+		in   map[string]any
+		want map[string]any
 	}{
 		{
 			name: "removes top-level map key",
-			in: map[string]interface{}{
+			in: map[string]any{
 				"keep": "value",
 				"drop": sentinels.Omit{},
 			},
-			want: map[string]interface{}{
+			want: map[string]any{
 				"keep": "value",
 			},
 		},
 		{
 			name: "removes nested map key",
-			in: map[string]interface{}{
-				"spec": map[string]interface{}{
+			in: map[string]any{
+				"spec": map[string]any{
 					"name":   "test",
 					"policy": sentinels.Omit{},
 				},
 			},
-			want: map[string]interface{}{
-				"spec": map[string]interface{}{
+			want: map[string]any{
+				"spec": map[string]any{
 					"name": "test",
 				},
 			},
 		},
 		{
 			name: "filters array elements",
-			in: map[string]interface{}{
-				"spec": map[string]interface{}{
-					"args": []interface{}{sentinels.Omit{}, "keep1", sentinels.Omit{}, "keep2"},
+			in: map[string]any{
+				"spec": map[string]any{
+					"args": []any{sentinels.Omit{}, "keep1", sentinels.Omit{}, "keep2"},
 				},
 			},
-			want: map[string]interface{}{
-				"spec": map[string]interface{}{
-					"args": []interface{}{"keep1", "keep2"},
+			want: map[string]any{
+				"spec": map[string]any{
+					"args": []any{"keep1", "keep2"},
 				},
 			},
 		},
 		{
 			name: "filters single-element array to empty",
-			in: map[string]interface{}{
-				"items": []interface{}{sentinels.Omit{}},
+			in: map[string]any{
+				"items": []any{sentinels.Omit{}},
 			},
-			want: map[string]interface{}{
-				"items": []interface{}{},
+			want: map[string]any{
+				"items": []any{},
 			},
 		},
 		{
 			name: "cleans deeply nested array inside array",
-			in: map[string]interface{}{
-				"spec": map[string]interface{}{
-					"containers": []interface{}{
-						map[string]interface{}{
-							"args": []interface{}{"keep", sentinels.Omit{}, "also-keep"},
+			in: map[string]any{
+				"spec": map[string]any{
+					"containers": []any{
+						map[string]any{
+							"args": []any{"keep", sentinels.Omit{}, "also-keep"},
 						},
 					},
 				},
 			},
-			want: map[string]interface{}{
-				"spec": map[string]interface{}{
-					"containers": []interface{}{
-						map[string]interface{}{
-							"args": []interface{}{"keep", "also-keep"},
+			want: map[string]any{
+				"spec": map[string]any{
+					"containers": []any{
+						map[string]any{
+							"args": []any{"keep", "also-keep"},
 						},
 					},
 				},
@@ -999,16 +999,16 @@ func TestCleanOmitSentinels(t *testing.T) {
 		},
 		{
 			name: "no sentinels leaves resource unchanged",
-			in: map[string]interface{}{
-				"spec": map[string]interface{}{
+			in: map[string]any{
+				"spec": map[string]any{
 					"name": "test",
-					"args": []interface{}{"a", "b"},
+					"args": []any{"a", "b"},
 				},
 			},
-			want: map[string]interface{}{
-				"spec": map[string]interface{}{
+			want: map[string]any{
+				"spec": map[string]any{
 					"name": "test",
-					"args": []interface{}{"a", "b"},
+					"args": []any{"a", "b"},
 				},
 			},
 		},

@@ -231,26 +231,26 @@ func nestedResourceGraphDefinition(rgName, token string) (
 	rg := generator.NewResourceGraphDefinition(rgName,
 		generator.WithSchema(
 			"NestedRGD"+rgName, "v1alpha1",
-			map[string]interface{}{
+			map[string]any{
 				"type":    "string",
 				"default": "string",
 			},
-			map[string]interface{}{},
+			map[string]any{},
 		),
-		generator.WithResource("nested", map[string]interface{}{
+		generator.WithResource("nested", map[string]any{
 			"apiVersion": "kro.run/v1alpha1",
 			"kind":       "ResourceGraphDefinition",
-			"metadata": map[string]interface{}{
+			"metadata": map[string]any{
 				"name": fmt.Sprintf("rg-nested-${schema.spec.type}-%s", token),
 			},
-			"spec": map[string]interface{}{
-				"schema": map[string]interface{}{
+			"spec": map[string]any{
+				"schema": map[string]any{
 					"apiVersion": "v1alpha1",
 					"group":      nestedGroup,
 					"kind":       "NestedRGD${schema.spec.type}",
-					"spec": map[string]interface{}{
+					"spec": map[string]any{
 						"name": "string",
-						"somefield": map[string]interface{}{
+						"somefield": map[string]any{
 							"nested": "${schema.spec.type} | default=${schema.spec.default}",
 						},
 					},
@@ -261,14 +261,14 @@ func nestedResourceGraphDefinition(rgName, token string) (
 
 	instanceGen := func(namespace, name string, typeVal string, defaultVal string) *unstructured.Unstructured {
 		return &unstructured.Unstructured{
-			Object: map[string]interface{}{
+			Object: map[string]any{
 				"apiVersion": fmt.Sprintf("%s/%s", krov1alpha1.KRODomainName, "v1alpha1"),
 				"kind":       "NestedRGD" + rgName,
-				"metadata": map[string]interface{}{
+				"metadata": map[string]any{
 					"name":      name,
 					"namespace": namespace,
 				},
-				"spec": map[string]interface{}{
+				"spec": map[string]any{
 					"type":    typeVal,
 					"default": defaultVal,
 				},

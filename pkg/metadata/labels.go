@@ -17,6 +17,7 @@ package metadata
 import (
 	"errors"
 	"fmt"
+	"maps"
 
 	"strings"
 
@@ -145,9 +146,7 @@ func (gl GenericLabeler) Merge(other Labeler) (Labeler, error) {
 // Copy returns a copy of the labels.
 func (gl GenericLabeler) Copy() map[string]string {
 	newGenericLabeler := map[string]string{}
-	for k, v := range gl {
-		newGenericLabeler[k] = v
-	}
+	maps.Copy(newGenericLabeler, gl)
 	return newGenericLabeler
 }
 

@@ -26,7 +26,7 @@ import (
 type ResolutionResult struct {
 	Path     string
 	Resolved bool
-	Replaced interface{}
+	Replaced any
 	Error    error
 }
 
@@ -42,15 +42,15 @@ type ResolutionSummary struct {
 type Resolver struct {
 	// The original resource to be resolved. In kro, this will typically
 	// be a Kubernetes resource with some fields containing CEL expressions.
-	resource map[string]interface{}
+	resource map[string]any
 	// The data to be used for resolving the expressions. Other systems are
 	// responsible for providing this only with available data aka CEL Expressions
 	// we've been able to resolve.
-	data map[string]interface{}
+	data map[string]any
 }
 
 // NewResolver creates a new Resolver instance.
-func NewResolver(resource map[string]interface{}, data map[string]interface{}) *Resolver {
+func NewResolver(resource map[string]any, data map[string]any) *Resolver {
 	return &Resolver{
 		resource: resource,
 		data:     data,
@@ -86,12 +86,12 @@ func (r *Resolver) Resolve(expressions []variable.FieldDescriptor) ResolutionSum
 }
 
 // UpsertValueAtPath sets a value in the resource using the fieldpath parser.
-func (r *Resolver) UpsertValueAtPath(path string, value interface{}) error {
+func (r *Resolver) UpsertValueAtPath(path string, value any) error {
 	return r.setValueAtPath(path, value)
 }
 
 // GetValueAtPath retrieves a value from the resource using the fieldpath parser.
-func (r *Resolver) GetValueAtPath(path string) (interface{}, error) {
+func (r *Resolver) GetValueAtPath(path string) (any, error) {
 	return r.getValueFromPath(path)
 }
 
@@ -131,9 +131,9 @@ func (r *Resolver) resolveField(field variable.FieldDescriptor) ResolutionResult
 // map keys or array elements whose value is an omit sentinel.
 // For maps, sentinel keys are deleted in place.
 // For arrays, a new filtered slice is returned to the caller.
-func cleanOmitSentinels(v interface{}) interface{} {
+func cleanOmitSentinels(v any) any {
 	switch val := v.(type) {
-	case map[string]interface{}:
+	case map[string]any:
 		for k, child := range val {
 			if sentinels.IsOmit(child) {
 				delete(val, k)
@@ -142,8 +142,8 @@ func cleanOmitSentinels(v interface{}) interface{} {
 			}
 		}
 		return val
-	case []interface{}:
-		filtered := make([]interface{}, 0, len(val))
+	case []any:
+		filtered := make([]any, 0, len(val))
 		for _, elem := range val {
 			if !sentinels.IsOmit(elem) {
 				filtered = append(filtered, cleanOmitSentinels(elem))
@@ -156,7 +156,7 @@ func cleanOmitSentinels(v interface{}) interface{} {
 }
 
 // getValueFromPath retrieves a value from the resource using a dot-separated path.
-func (r *Resolver) getValueFromPath(path string) (interface{}, error) {
+func (r *Resolver) getValueFromPath(path string) (any, error) {
 	segments, err := fieldpath.Parse(path)
 	if err != nil {
 		return nil, fmt.Errorf("invalid path '%s': %v", path, err)
@@ -165,11 +165,11 @@ func (r *Resolver) getValueFromPath(path string) (interface{}, error) {
 }
 
 // traverse walks the given segments read-only and returns the value at the end.
-func traverse(root interface{}, segments []fieldpath.Segment) (interface{}, error) {
+func traverse(root any, segments []fieldpath.Segment) (any, error) {
 	current := root
 	for _, segment := range segments {
 		if segment.Index >= 0 {
-			array, ok := current.([]interface{})
+			array, ok := current.([]any)
 			if !ok {
 				return nil, fmt.Errorf("expected array at path segment: %v", segment)
 			}
@@ -178,7 +178,7 @@ func traverse(root interface{}, segments []fieldpath.Segment) (interface{}, erro
 			}
 			current = array[segment.Index]
 		} else {
-			currentMap, ok := current.(map[string]interface{})
+			currentMap, ok := current.(map[string]any)
 			if !ok {
 				return nil, fmt.Errorf("expected map at path segment: %v", segment)
 			}
@@ -193,7 +193,7 @@ func traverse(root interface{}, segments []fieldpath.Segment) (interface{}, erro
 }
 
 // setValueAtPath sets a value in the resource using a dot-separated path.
-func (r *Resolver) setValueAtPath(path string, value interface{}) error {
+func (r *Resolver) setValueAtPath(path string, value any) error {
 	segments, err := fieldpath.Parse(path)
 	if err != nil {
 		return fmt.Errorf("invalid path '%s': %v", path, err)
@@ -202,8 +202,8 @@ func (r *Resolver) setValueAtPath(path string, value interface{}) error {
 	// We need to keep track of the parent and current object to be able to
 	// create new maps and arrays (pointers) as needed. This is crucial for
 	// maintaining the proper chain of references.
-	var parent interface{} = r.resource
-	var current interface{} = r.resource
+	var parent any = r.resource
+	var current any = r.resource
 	var parentKey string
 	var parentIndex int
 
@@ -216,16 +216,16 @@ func (r *Resolver) setValueAtPath(path string, value interface{}) error {
 			current = newCurrent
 
 			if i == len(segments)-1 {
-				array := current.([]interface{})
+				array := current.([]any)
 				array[segment.Index] = value
 				return nil
 			}
 			parent = current
 			parentIndex = segment.Index
 
-			current = getOrCreateNext(current.([]interface{}), segment.Index, segments[i+1].Index >= 0)
+			current = getOrCreateNext(current.([]any), segment.Index, segments[i+1].Index >= 0)
 		} else {
-			currentMap, ok := current.(map[string]interface{})
+			currentMap, ok := current.(map[string]any)
 			if !ok {
 				return fmt.Errorf("path segment %q already exists with type %T", parentKey, current)
 			}
@@ -239,9 +239,9 @@ func (r *Resolver) setValueAtPath(path string, value interface{}) error {
 			parentKey = segment.Name
 			if currentMap[segment.Name] == nil {
 				if segments[i+1].Index >= 0 {
-					currentMap[segment.Name] = make([]interface{}, 0)
+					currentMap[segment.Name] = make([]any, 0)
 				} else {
-					currentMap[segment.Name] = make(map[string]interface{})
+					currentMap[segment.Name] = make(map[string]any)
 				}
 			}
 			current = currentMap[segment.Name]
@@ -253,18 +253,18 @@ func (r *Resolver) setValueAtPath(path string, value interface{}) error {
 // handleArraySegment manages array access including creation and resizing.
 // current is never nil here - callers ensure it via getOrCreateNext or map init.
 func handleArraySegment(
-	current, parent interface{},
+	current, parent any,
 	segment fieldpath.Segment,
 	parentKey string,
 	parentIndex int,
-) (interface{}, error) {
-	array, ok := current.([]interface{})
+) (any, error) {
+	array, ok := current.([]any)
 	if !ok {
 		return nil, fmt.Errorf("expected array at segment %v, got %T", segment, current)
 	}
 
 	if segment.Index >= len(array) {
-		newArray := make([]interface{}, segment.Index+1)
+		newArray := make([]any, segment.Index+1)
 		copy(newArray, array)
 		updateParent(parent, parentKey, parentIndex, newArray)
 		return newArray, nil
@@ -276,12 +276,12 @@ func handleArraySegment(
 // getOrCreateNext ensures the next element in the path exists.
 // It initializes a new array or map based on whether the next
 // segment is array access.
-func getOrCreateNext(array []interface{}, index int, nextIsArray bool) interface{} {
+func getOrCreateNext(array []any, index int, nextIsArray bool) any {
 	if array[index] == nil {
 		if nextIsArray {
-			array[index] = make([]interface{}, 0)
+			array[index] = make([]any, 0)
 		} else {
-			array[index] = make(map[string]interface{})
+			array[index] = make(map[string]any)
 		}
 	}
 	return array[index]
@@ -290,11 +290,11 @@ func getOrCreateNext(array []interface{}, index int, nextIsArray bool) interface
 // updateParent updates the parent's reference to point to a new value.
 // This is crucial when we create new arrays or maps to ensure the entire
 // object structure remains properly connected.
-func updateParent(parent interface{}, key string, index int, value interface{}) {
+func updateParent(parent any, key string, index int, value any) {
 	switch p := parent.(type) {
-	case map[string]interface{}:
+	case map[string]any:
 		p[key] = value
-	case []interface{}:
+	case []any:
 		p[index] = value
 	}
 }

@@ -328,7 +328,7 @@ func BenchmarkComplex3TierApp_Scale(b *testing.B) {
 	for _, totalInstances := range []int{100, 500, 1000, 2500, 5000} {
 		b.Run(fmt.Sprintf("Cached/Instances=%d", totalInstances), func(b *testing.B) {
 			instances := make([]*unstructured.Unstructured, totalInstances)
-			for i := 0; i < totalInstances; i++ {
+			for i := range totalInstances {
 				tier := "development"
 				if i%2 == 0 {
 					tier = "production"
@@ -341,7 +341,7 @@ func BenchmarkComplex3TierApp_Scale(b *testing.B) {
 
 			for iter := 0; iter < b.N; iter++ {
 				var wg sync.WaitGroup
-				for i := 0; i < totalInstances; i++ {
+				for i := range totalInstances {
 					wg.Add(1)
 					go func(idx int) {
 						defer wg.Done()
@@ -374,7 +374,7 @@ func BenchmarkCartesianMatrix_Scale(b *testing.B) {
 	for _, totalInstances := range []int{100, 500, 1000} {
 		b.Run(fmt.Sprintf("Cached/Instances=%d/Matrix=5x4", totalInstances), func(b *testing.B) {
 			instances := make([]*unstructured.Unstructured, totalInstances)
-			for i := 0; i < totalInstances; i++ {
+			for i := range totalInstances {
 				instances[i] = benchCartesianInstance(fmt.Sprintf("cart-%04d", i))
 			}
 
@@ -383,7 +383,7 @@ func BenchmarkCartesianMatrix_Scale(b *testing.B) {
 
 			for iter := 0; iter < b.N; iter++ {
 				var wg sync.WaitGroup
-				for i := 0; i < totalInstances; i++ {
+				for i := range totalInstances {
 					wg.Add(1)
 					go func(idx int) {
 						defer wg.Done()
@@ -413,10 +413,10 @@ func BenchmarkMultiRGD_ManyInstances(b *testing.B) {
 				rgds := make([]*v1alpha1.ResourceGraphDefinition, numRGDs)
 				instances := make([][]*unstructured.Unstructured, numRGDs)
 
-				for r := 0; r < numRGDs; r++ {
+				for r := range numRGDs {
 					rgds[r] = benchCollectionRGD(fmt.Sprintf("rgd-%d", r), 5)
 					instances[r] = make([]*unstructured.Unstructured, instPerRGD)
-					for inst := 0; inst < instPerRGD; inst++ {
+					for inst := range instPerRGD {
 						instances[r][inst] = benchInstance(fmt.Sprintf("inst-%d-%d", r, inst), fmt.Sprintf("val-%d-%d", r, inst))
 					}
 					// Prime cache once for each RGD
@@ -428,8 +428,8 @@ func BenchmarkMultiRGD_ManyInstances(b *testing.B) {
 
 				for i := 0; i < b.N; i++ {
 					var wg sync.WaitGroup
-					for r := 0; r < numRGDs; r++ {
-						for inst := 0; inst < instPerRGD; inst++ {
+					for r := range numRGDs {
+						for inst := range instPerRGD {
 							wg.Add(1)
 							go func(rgdIdx, instIdx int) {
 								defer wg.Done()

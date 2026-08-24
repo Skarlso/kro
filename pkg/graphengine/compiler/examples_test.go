@@ -171,7 +171,7 @@ func TestExamplesGraphCompile(t *testing.T) {
 			decoder := k8syaml.NewYAMLOrJSONDecoder(bytes.NewReader(data), 4096)
 			var foundGraph bool
 			for {
-				var raw map[string]interface{}
+				var raw map[string]any
 				err := decoder.Decode(&raw)
 				if err == io.EOF {
 					break

@@ -107,10 +107,10 @@ func TestReconcileDeletionPreservesAuthorStatusWithoutRuntime(t *testing.T) {
 	addEmptyDeletionScope(instance)
 	metadata.SetInstanceFinalizer(instance)
 	instance.SetDeletionTimestamp(new(metav1.NewTime(time.Now())))
-	require.NoError(t, unstructured.SetNestedMap(instance.Object, map[string]interface{}{
+	require.NoError(t, unstructured.SetNestedMap(instance.Object, map[string]any{
 		"state":    string(v1alpha1.InstanceStateActive),
 		"endpoint": "https://example.test",
-		"conditions": []interface{}{map[string]interface{}{
+		"conditions": []any{map[string]any{
 			"type":               "AuthorHealthy",
 			"status":             "True",
 			"reason":             "Healthy",
@@ -128,7 +128,7 @@ func TestReconcileDeletionPreservesAuthorStatusWithoutRuntime(t *testing.T) {
 
 	stored := getStoredParentObject(t, raw)
 	assert.False(t, metadata.HasInstanceFinalizer(stored))
-	assert.Equal(t, "https://example.test", stored.Object["status"].(map[string]interface{})["endpoint"])
+	assert.Equal(t, "https://example.test", stored.Object["status"].(map[string]any)["endpoint"])
 	conditions := conditionsFromInstance(stored)
 	require.Len(t, conditions, 2)
 	authorHealthy := conditionByType(t, stored, "AuthorHealthy")
@@ -143,9 +143,9 @@ func TestReconcileDeletionSurfacesErrorsWithAuthorConditions(t *testing.T) {
 	instance := newInstanceObject("demo", "default")
 	metadata.SetInstanceFinalizer(instance)
 	instance.SetDeletionTimestamp(new(metav1.NewTime(time.Now())))
-	require.NoError(t, unstructured.SetNestedMap(instance.Object, map[string]interface{}{
+	require.NoError(t, unstructured.SetNestedMap(instance.Object, map[string]any{
 		"state": string(v1alpha1.InstanceStateActive),
-		"conditions": []interface{}{map[string]interface{}{
+		"conditions": []any{map[string]any{
 			"type":               "AuthorHealthy",
 			"status":             "True",
 			"reason":             "Healthy",

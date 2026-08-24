@@ -17,6 +17,7 @@ package core_test
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sync/atomic"
 	"time"
 
@@ -162,10 +163,8 @@ var _ = Describe("Graph Schema Watch", func() {
 		gk := schema.GroupKind{Group: group, Kind: kind}
 		environment.Eventually(t, 10*time.Second, 100*time.Millisecond, func() error {
 			keys := testEnv.SchemaWatcher.GraphsForGroupKind(gk)
-			for _, k := range keys {
-				if k == graphKey {
-					return nil
-				}
+			if slices.Contains(keys, graphKey) {
+				return nil
 			}
 			return fmt.Errorf("graph %s not yet indexed under %s (have %v)", graphKey, gk, keys)
 		})
@@ -438,13 +437,7 @@ var _ = Describe("Graph Schema Watch", func() {
 		// Index has the Graph.
 		gk := schema.GroupKind{Group: group, Kind: kind}
 		keys := testEnv.SchemaWatcher.GraphsForGroupKind(gk)
-		found := false
-		for _, k := range keys {
-			if k == graphKey {
-				found = true
-				break
-			}
-		}
+		found := slices.Contains(keys, graphKey)
 		if !found {
 			t.Fatalf("expected graph %s in index for %s, got %v", graphKey, gk, keys)
 		}
@@ -463,10 +456,8 @@ var _ = Describe("Graph Schema Watch", func() {
 		// Index entry must be gone.
 		environment.Eventually(t, 10*time.Second, 100*time.Millisecond, func() error {
 			keys := testEnv.SchemaWatcher.GraphsForGroupKind(gk)
-			for _, k := range keys {
-				if k == graphKey {
-					return fmt.Errorf("graph %s still in index after delete", graphKey)
-				}
+			if slices.Contains(keys, graphKey) {
+				return fmt.Errorf("graph %s still in index after delete", graphKey)
 			}
 			return nil
 		})

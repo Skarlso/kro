@@ -180,7 +180,7 @@ func TestReconcile(t *testing.T) {
 
 	prog := func(nodes int) *compiler.Program {
 		m := make(map[string]*compiler.Node, nodes)
-		for i := 0; i < nodes; i++ {
+		for i := range nodes {
 			m[string(rune('a'+i))] = &compiler.Node{}
 		}
 		return &compiler.Program{Nodes: m}

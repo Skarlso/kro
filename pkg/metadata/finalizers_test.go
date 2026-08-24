@@ -127,8 +127,8 @@ func TestInstanceFinalizerUnstructured(t *testing.T) {
 		{
 			name: "Set instance finalizer on unstructured obj w/o finalizers",
 			initialObject: &unstructured.Unstructured{
-				Object: map[string]interface{}{
-					"metadata": map[string]interface{}{},
+				Object: map[string]any{
+					"metadata": map[string]any{},
 				},
 			},
 			operation: SetInstanceFinalizer,
@@ -138,9 +138,9 @@ func TestInstanceFinalizerUnstructured(t *testing.T) {
 		{
 			name: "Set instance finalizer on unstructured obj w/ existing finalizers",
 			initialObject: &unstructured.Unstructured{
-				Object: map[string]interface{}{
-					"metadata": map[string]interface{}{
-						"finalizers": []interface{}{"some-other-finalizer"},
+				Object: map[string]any{
+					"metadata": map[string]any{
+						"finalizers": []any{"some-other-finalizer"},
 					},
 				},
 			},
@@ -151,9 +151,9 @@ func TestInstanceFinalizerUnstructured(t *testing.T) {
 		{
 			name: "Remov instance finalizer from unstructured object that has it",
 			initialObject: &unstructured.Unstructured{
-				Object: map[string]interface{}{
-					"metadata": map[string]interface{}{
-						"finalizers": []interface{}{kroFinalizer},
+				Object: map[string]any{
+					"metadata": map[string]any{
+						"finalizers": []any{kroFinalizer},
 					},
 				},
 			},
@@ -164,9 +164,9 @@ func TestInstanceFinalizerUnstructured(t *testing.T) {
 		{
 			name: "Try to remve instance finalizer when its not there)",
 			initialObject: &unstructured.Unstructured{
-				Object: map[string]interface{}{
-					"metadata": map[string]interface{}{
-						"finalizers": []interface{}{"some-other-finalizer"},
+				Object: map[string]any{
+					"metadata": map[string]any{
+						"finalizers": []any{"some-other-finalizer"},
 					},
 				},
 			},

@@ -394,7 +394,7 @@ func TestEventBufferOverflowDropsRatherThanBlocks(t *testing.T) {
 	s.Done(true)
 
 	// Fire several CRD events without draining; only the first 2 fit.
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		sw.onUpdate(
 			makeCRD("example.com", "Widget", "v0"),
 			makeCRD("example.com", "Widget", "v"+string(rune('a'+i))),

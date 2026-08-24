@@ -135,10 +135,7 @@ var _ = Describe("GraphRevision Integration", func() {
 				g.Expect(fresh.Status.LastIssuedRevision).To(Equal(revision))
 
 				gvs := listGraphRevisionsInEnv(ctx, testEnv, rgdName)
-				expectedCount := int(revision)
-				if expectedCount > isolatedGraphRevisionRetentionLimit {
-					expectedCount = isolatedGraphRevisionRetentionLimit
-				}
+				expectedCount := min(int(revision), isolatedGraphRevisionRetentionLimit)
 				g.Expect(gvs).To(HaveLen(expectedCount))
 
 				if revision <= int64(isolatedGraphRevisionRetentionLimit) {
@@ -178,14 +175,14 @@ var _ = Describe("GraphRevision Integration", func() {
 
 		instanceName := fmt.Sprintf("inst-%s", rand.String(5))
 		instance := &unstructured.Unstructured{
-			Object: map[string]interface{}{
+			Object: map[string]any{
 				"apiVersion": fmt.Sprintf("%s/%s", krov1alpha1.KRODomainName, "v1alpha1"),
 				"kind":       kind,
-				"metadata": map[string]interface{}{
+				"metadata": map[string]any{
 					"name":      instanceName,
 					"namespace": namespace,
 				},
-				"spec": map[string]interface{}{
+				"spec": map[string]any{
 					"data": "sticky-value",
 				},
 			},
@@ -222,10 +219,7 @@ var _ = Describe("GraphRevision Integration", func() {
 				g.Expect(cm.Labels).To(HaveKeyWithValue("revision", fmt.Sprintf("rev-%d", revision)))
 
 				gvs := listGraphRevisionsInEnv(ctx, testEnv, rgdName)
-				expectedCount := int(revision)
-				if expectedCount > isolatedGraphRevisionRetentionLimit {
-					expectedCount = isolatedGraphRevisionRetentionLimit
-				}
+				expectedCount := min(int(revision), isolatedGraphRevisionRetentionLimit)
 				g.Expect(gvs).To(HaveLen(expectedCount))
 
 				if revision <= int64(isolatedGraphRevisionRetentionLimit) {
@@ -323,14 +317,14 @@ var _ = Describe("GraphRevision Integration", func() {
 
 			instanceName := fmt.Sprintf("inst-%s", rand.String(5))
 			instance := &unstructured.Unstructured{
-				Object: map[string]interface{}{
+				Object: map[string]any{
 					"apiVersion": fmt.Sprintf("%s/%s", krov1alpha1.KRODomainName, "v1alpha1"),
 					"kind":       kind,
-					"metadata": map[string]interface{}{
+					"metadata": map[string]any{
 						"name":      instanceName,
 						"namespace": namespace,
 					},
-					"spec": map[string]interface{}{
+					"spec": map[string]any{
 						"data": "before-restart",
 					},
 				},
@@ -388,14 +382,14 @@ var _ = Describe("GraphRevision Integration", func() {
 
 			Eventually(func(g Gomega) {
 				current := &unstructured.Unstructured{
-					Object: map[string]interface{}{
+					Object: map[string]any{
 						"apiVersion": fmt.Sprintf("%s/%s", krov1alpha1.KRODomainName, "v1alpha1"),
 						"kind":       kind,
 					},
 				}
 				err := testEnv.Client.Get(ctx, types.NamespacedName{Name: instanceName, Namespace: namespace}, current)
 				g.Expect(err).ToNot(HaveOccurred())
-				current.Object["spec"] = map[string]interface{}{"data": "after-restart"}
+				current.Object["spec"] = map[string]any{"data": "after-restart"}
 				err = testEnv.Client.Update(ctx, current)
 				g.Expect(err).ToNot(HaveOccurred())
 			}, 10*time.Second, 250*time.Millisecond).WithContext(ctx).Should(Succeed())
@@ -507,14 +501,14 @@ var _ = Describe("GraphRevision Integration", func() {
 
 		instanceName := fmt.Sprintf("inst-%s", rand.String(5))
 		instance := &unstructured.Unstructured{
-			Object: map[string]interface{}{
+			Object: map[string]any{
 				"apiVersion": fmt.Sprintf("%s/%s", krov1alpha1.KRODomainName, "v1alpha1"),
 				"kind":       kind,
-				"metadata": map[string]interface{}{
+				"metadata": map[string]any{
 					"name":      instanceName,
 					"namespace": namespace,
 				},
-				"spec": map[string]interface{}{
+				"spec": map[string]any{
 					"data": "post-restart",
 				},
 			},
@@ -564,7 +558,7 @@ func newIsolatedGraphRevisionEnv(ctx SpecContext, maxGraphRevisions int) *enviro
 func stopEnvironmentWithRetry(testEnv *environment.Environment) error {
 	sleepTime := 1 * time.Millisecond
 	var err error
-	for i := 0; i < 12; i++ {
+	for range 12 {
 		if err = testEnv.Stop(); err == nil {
 			return nil
 		}

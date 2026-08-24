@@ -49,7 +49,7 @@ func addDeletionScope(instance *unstructured.Unstructured, gvk schema.GroupVersi
 		annotations = map[string]string{}
 	}
 	gks := map[string]struct{}{}
-	for _, value := range strings.Split(annotations[applyset.ApplySetGKsAnnotation], ",") {
+	for value := range strings.SplitSeq(annotations[applyset.ApplySetGKsAnnotation], ",") {
 		if value != "" {
 			gks[value] = struct{}{}
 		}
@@ -694,18 +694,18 @@ func TestSetUnmanagedRetriesOnConflict(t *testing.T) {
 
 	raw.PrependReactor("patch", "webapps", func(action k8stesting.Action) (bool, apimachineryruntime.Object, error) {
 		patchAction := action.(k8stesting.PatchAction)
-		var patchPayload map[string]interface{}
+		var patchPayload map[string]any
 		err := json.Unmarshal(patchAction.GetPatch(), &patchPayload)
 		require.NoError(t, err)
 
-		patchMeta, ok := patchPayload["metadata"].(map[string]interface{})
+		patchMeta, ok := patchPayload["metadata"].(map[string]any)
 		require.True(t, ok, "patch must include metadata")
 		_, hasResourceVersion := patchMeta["resourceVersion"]
 		require.True(t, hasResourceVersion, "patch must include resourceVersion")
 
-		finalizers, ok := patchMeta["finalizers"].([]interface{})
+		finalizers, ok := patchMeta["finalizers"].([]any)
 		require.True(t, ok, "patch must include finalizers array")
-		require.Equal(t, []interface{}{"other.io/finalizer"}, finalizers, "only kro finalizer should be removed")
+		require.Equal(t, []any{"other.io/finalizer"}, finalizers, "only kro finalizer should be removed")
 
 		attempt := attempts.Load()
 		if attempt == 1 {
