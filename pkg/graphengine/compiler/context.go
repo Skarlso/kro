@@ -453,8 +453,14 @@ func projectPayload(n *expv1alpha1.Node) (NodeKind, map[string]any, error) {
 // the target apiVersion/kind/metadata identity plus the contributed body's
 // top-level fields. The result flows through the same GVK-resolution and CEL
 // extraction pipeline as a template, so a patch body is type-checked against
-// the target schema and its CEL references become dependencies. Body keys may
-// not override apiVersion/kind/metadata — those identify the target.
+// the target schema and its CEL references become dependencies.
+//
+// apiVersion and kind identify the target and are always taken from the
+// PatchSpec. metadata.name and metadata.namespace likewise identify the
+// target and are authoritative from PatchSpec.Metadata — a body cannot
+// redirect the patch to a different object. Other metadata subfields the body
+// contributes (labels, annotations, finalizers, ...) ARE preserved and
+// applied, so a patch node can contribute metadata just like any other field.
 func projectPatchPayload(p *expv1alpha1.PatchSpec) (map[string]any, error) {
 	out := map[string]any{}
 	if p.Body != nil {
@@ -466,9 +472,21 @@ func projectPatchPayload(p *expv1alpha1.PatchSpec) (map[string]any, error) {
 	}
 	out["apiVersion"] = p.APIVersion
 	out["kind"] = p.Kind
-	metadata := map[string]any{"name": p.Metadata.Name}
+
+	// Start from any metadata the body contributed (labels, annotations, ...),
+	// then overlay the target identity so name/namespace stay authoritative and
+	// a body-supplied name/namespace can never redirect the target.
+	metadata := map[string]any{}
+	if bodyMeta, ok := out["metadata"].(map[string]any); ok {
+		maps.Copy(metadata, bodyMeta)
+	}
+	metadata["name"] = p.Metadata.Name
 	if p.Metadata.Namespace != "" {
 		metadata["namespace"] = p.Metadata.Namespace
+	} else {
+		// Namespace is part of the target identity; it comes only from
+		// PatchSpec.Metadata (or is defaulted downstream), never from the body.
+		delete(metadata, "namespace")
 	}
 	out["metadata"] = metadata
 	return out, nil

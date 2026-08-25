@@ -121,6 +121,91 @@ var _ = Describe("Graph Patch", func() {
 		}, 15*time.Second)
 	})
 
+	It("contributes metadata labels and annotations to a pre-existing resource", func() {
+		t := GinkgoT()
+		ns := env.CreateNamespace(t)
+
+		cmGVK := schema.GroupVersionKind{Version: "v1", Kind: "ConfigMap"}
+		cmKey := types.NamespacedName{Namespace: ns, Name: "hello"}
+
+		// A ConfigMap the Graph does not own; the patch contributes metadata to it.
+		target := &unstructured.Unstructured{}
+		target.SetGroupVersionKind(cmGVK)
+		target.SetNamespace(ns)
+		target.SetName("hello")
+		if err := unstructured.SetNestedStringMap(target.Object, map[string]string{"orig": "kept"}, "data"); err != nil {
+			t.Fatalf("set target data: %v", err)
+		}
+		ctx := env.Context()
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		if err := env.Client.Create(ctx, target); err != nil {
+			t.Fatalf("create target ConfigMap: %v", err)
+		}
+
+		g := &expv1alpha1.Graph{
+			ObjectMeta: metav1.ObjectMeta{Name: "hello-patcher", Namespace: ns},
+			Spec: expv1alpha1.GraphSpec{
+				Nodes: []expv1alpha1.Node{
+					{
+						ID: "cmpatcher",
+						Patch: &expv1alpha1.PatchSpec{
+							APIVersion: "v1",
+							Kind:       "ConfigMap",
+							Metadata:   expv1alpha1.PatchMetadata{Name: "hello", Namespace: ns},
+							Body: environment.RawExt(t, map[string]any{
+								"metadata": map[string]any{
+									"labels":      map[string]any{"touched-by": "kro"},
+									"annotations": map[string]any{"kro.run/note": "patched"},
+								},
+							}),
+						},
+					},
+				},
+			},
+		}
+		env.CreateGraph(t, g)
+
+		gKey := types.NamespacedName{Namespace: ns, Name: "hello-patcher"}
+		env.AwaitCondition(t, gKey, expv1alpha1.GraphConditionTypeReady, metav1.ConditionTrue, 15*time.Second)
+
+		// The contributed metadata is present; the pre-existing data survives.
+		env.AwaitObject(t, cmGVK, cmKey, func(u *unstructured.Unstructured) error {
+			if got := u.GetLabels()["touched-by"]; got != "kro" {
+				return fmt.Errorf("labels[touched-by]: want=kro got=%q", got)
+			}
+			if got := u.GetAnnotations()["kro.run/note"]; got != "patched" {
+				return fmt.Errorf("annotations[kro.run/note]: want=patched got=%q", got)
+			}
+			data, _, _ := unstructured.NestedStringMap(u.Object, "data")
+			if data["orig"] != "kept" {
+				return fmt.Errorf("data.orig: want=kept got=%q", data["orig"])
+			}
+			return nil
+		}, 15*time.Second)
+
+		// Remove the patch node; the contributed labels/annotations are released,
+		// the target object survives.
+		env.UpdateGraphSpec(t, gKey, func(cur *expv1alpha1.Graph) {
+			cur.Spec.Nodes = []expv1alpha1.Node{{
+				ID:  "keep",
+				Def: environment.RawExt(t, map[string]any{"x": 1}),
+			}}
+		})
+
+		env.AwaitObject(t, cmGVK, cmKey, func(u *unstructured.Unstructured) error {
+			if _, ok := u.GetLabels()["touched-by"]; ok {
+				return fmt.Errorf("labels[touched-by] still present after release")
+			}
+			data, _, _ := unstructured.NestedStringMap(u.Object, "data")
+			if data["orig"] != "kept" {
+				return fmt.Errorf("data.orig lost during release: got=%q", data["orig"])
+			}
+			return nil
+		}, 15*time.Second)
+	})
+
 	It("contributes and releases patches inside nested subgraphs", func() {
 		t := GinkgoT()
 		ns := env.CreateNamespace(t)

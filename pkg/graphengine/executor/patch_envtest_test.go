@@ -159,6 +159,81 @@ func TestPatch_ContributesFields(t *testing.T) {
 	assert.True(t, hasFieldManager(cm, c.FieldManager), "contribution is owned by the per-node field manager")
 }
 
+// TestPatch_ContributesMetadataLabels verifies a patch node can contribute
+// metadata fields (labels/annotations) to a pre-existing object via
+// body.metadata, while name/namespace remain the authoritative target
+// identity. Regression test for metadata being dropped by the payload
+// projection.
+func TestPatch_ContributesMetadataLabels(t *testing.T) {
+	cl := patchEnvClient(t)
+	ns := "default"
+	mustCreateConfigMap(t, cl, ns, "labelme", map[string]any{"orig": "kept"})
+
+	g := generator.NewGraph("g",
+		generator.WithNamespace(ns),
+		generator.WithPatch("cmpatcher", "v1", "ConfigMap", "labelme", map[string]any{
+			"metadata": map[string]any{
+				"labels":      map[string]any{"touched-by": "kro"},
+				"annotations": map[string]any{"kro.run/note": "patched"},
+			},
+		}),
+	)
+	g.SetUID("uid-metadata-labels")
+
+	rt := compileAndBuild(t, g)
+	res, err := NewSimple(cl).Apply(context.Background(), rt, watchrouter.NoopWatcher{})
+	require.NoError(t, err)
+	require.Len(t, res.Contributions, 1)
+	assert.Empty(t, res.Applied, "patch must not be recorded as an owned resource")
+
+	cm := getConfigMap(t, cl, ns, "labelme")
+	assert.Equal(t, "kro", cm.GetLabels()["touched-by"], "contributed label is present")
+	assert.Equal(t, "patched", cm.GetAnnotations()["kro.run/note"], "contributed annotation is present")
+
+	// The target identity and pre-existing content survive.
+	assert.Equal(t, "labelme", cm.GetName())
+	assert.Equal(t, ns, cm.GetNamespace())
+	data, _, _ := unstructured.NestedStringMap(cm.Object, "data")
+	assert.Equal(t, "kept", data["orig"], "pre-existing field survives")
+
+	// The contributed metadata is owned by the per-node field manager, so it is
+	// released on prune like any other contributed field.
+	assert.True(t, hasFieldManager(cm, res.Contributions[0].FieldManager))
+}
+
+// TestPatch_BodyCannotRedirectTarget verifies a body-supplied metadata.name /
+// metadata.namespace cannot redirect the patch away from the PatchSpec target
+// identity.
+func TestPatch_BodyCannotRedirectTarget(t *testing.T) {
+	cl := patchEnvClient(t)
+	ns := "default"
+	mustCreateConfigMap(t, cl, ns, "realtarget", map[string]any{"orig": "kept"})
+	mustCreateConfigMap(t, cl, ns, "decoy", map[string]any{"orig": "kept"})
+
+	g := generator.NewGraph("g",
+		generator.WithNamespace(ns),
+		generator.WithPatch("cmpatcher", "v1", "ConfigMap", "realtarget", map[string]any{
+			"metadata": map[string]any{
+				"name":   "decoy",
+				"labels": map[string]any{"touched-by": "kro"},
+			},
+		}),
+	)
+	g.SetUID("uid-no-redirect")
+
+	rt := compileAndBuild(t, g)
+	res, err := NewSimple(cl).Apply(context.Background(), rt, watchrouter.NoopWatcher{})
+	require.NoError(t, err)
+	require.Len(t, res.Contributions, 1)
+	assert.Equal(t, "realtarget", res.Contributions[0].Name, "target identity comes from PatchSpec, not body")
+
+	real := getConfigMap(t, cl, ns, "realtarget")
+	assert.Equal(t, "kro", real.GetLabels()["touched-by"], "label landed on the real target")
+
+	decoy := getConfigMap(t, cl, ns, "decoy")
+	assert.Empty(t, decoy.GetLabels()["touched-by"], "body metadata.name must not redirect the patch to the decoy")
+}
+
 // TestPatch_TargetAbsentSoftRequeue verifies that a patch whose target does
 // not exist is a soft requeue: ErrNotReady, the node is Unresolved, and no
 // contribution is recorded.
