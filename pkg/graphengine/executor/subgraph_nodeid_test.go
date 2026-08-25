@@ -176,10 +176,12 @@ func TestSimple_SubgraphCollectionWatch_NoCrossMatch(t *testing.T) {
 	assert.False(t, subB.selector.Matches(subAItem),
 		"subB's watch must NOT match subA's items")
 
-	// The collection watch namespace must come from the sample item, not be
-	// hardcoded empty (a namespaced ConfigMap defaults to the graph namespace).
-	assert.Equal(t, "default", subA.namespace,
-		"a namespaced collection watch must carry the item namespace, not empty")
+	// The collection watch namespace is intentionally empty: a collection can
+	// span multiple namespaces (per-item CEL-derived metadata.namespace), so the
+	// selector watch must list/watch across all of them. Scoping it to one
+	// sample's namespace would miss drift on items in other namespaces.
+	assert.Equal(t, "", subA.namespace,
+		"a collection watch must span all namespaces (empty), not be scoped to one")
 }
 
 type recordedReq struct {

@@ -716,11 +716,7 @@ func (s *Simple) applyCollectionTemplate(ctx context.Context, w watchrouter.Watc
 	// node (keyed by NodeID, matching every item by label) instead of N
 	// scalar watches — the coordinator keys state by NodeID, so per-item
 	// scalar watches would collapse to only the last item. Registered
-	// once up front before spawning parallel apply goroutines. Default the
-	// sample's namespace first (prepareItem does this per item later, but the
-	// watch is registered before any item runs) so the watch carries the
-	// resolved namespace instead of an empty one.
-	s.defaultNamespace(rt, mappings[0].namespaced, desired[0])
+	// once up front before spawning parallel apply goroutines.
 	if err := s.watchCollection(w, n, mappings[0].gvr, desired[0]); err != nil {
 		return []expv1alpha1.ManagedResource{}, fmt.Errorf("register collection watch: %w", err)
 	}
@@ -1141,9 +1137,14 @@ func (s *Simple) watchObject(w watchrouter.Watcher, nodeID string, gvr schema.Gr
 // ("subA.res" vs "subB.res") and no longer cross-match each other's items. The
 // instance-id label is stamped by the LabelInjector (invoked here so it is
 // present before the selector is built, idempotent with the apply-time call);
-// if it is absent the selector falls back to node-id only. Namespace comes from
-// the (already namespace-defaulted) sample item and is empty for cluster-scoped
-// resources.
+// if it is absent the selector falls back to node-id only.
+//
+// The watch Namespace is intentionally empty: a collection can template items
+// into MULTIPLE namespaces (each item's metadata.namespace is CEL-derived), so
+// the watch must span all of them. Scoping it to any one sample's namespace
+// would leave drift on items in other namespaces unobserved. See the
+// "corrects drift ... in every namespace the collection spans" integration
+// test.
 func (s *Simple) watchCollection(w watchrouter.Watcher, n *runtime.Node, gvr schema.GroupVersionResource, sample *unstructured.Unstructured) error {
 	if w == nil {
 		return nil
@@ -1158,7 +1159,7 @@ func (s *Simple) watchCollection(w watchrouter.Watcher, n *runtime.Node, gvr sch
 	return w.Watch(watchrouter.WatchRequest{
 		NodeID:    s.qualifiedPath(n.ID()),
 		GVR:       gvr,
-		Namespace: sample.GetNamespace(),
+		Namespace: "",
 		Selector:  labels.SelectorFromSet(set),
 	})
 }
