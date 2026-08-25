@@ -18,7 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
+	"sync"
 
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -41,11 +41,12 @@ import (
 	"github.com/kubernetes-sigs/kro/pkg/metadata"
 )
 
-// notReadyRequeueAfter is how long we wait before re-checking readiness
-// when an executor surfaces ErrNotReady. Short by default so converging
-// graphs settle quickly; if it becomes an API-server load problem we'll
-// add per-Graph backoff in status.
-const notReadyRequeueAfter = 1 * time.Second
+// notReadyRequeueAfter is the requeue delay for the first not-ready attempt
+// when an executor surfaces ErrNotReady. Subsequent consecutive not-ready
+// attempts back off exponentially (see backoff.go) up to backoffMax, so a
+// never-resolving reference decays to a slow poll instead of a 1/sec hammer.
+// A clean reconcile resets the streak. Kept as backoffBase.
+const notReadyRequeueAfter = backoffBase
 
 // Compiler is the narrow surface the reconciler needs from a Compiler. Kept
 // as an interface so tests can substitute a fake without spinning up a real
@@ -81,6 +82,23 @@ type Reconciler struct {
 	// namespace. When nil, the Graph's resources are applied with the kro
 	// controller identity (the base Executor).
 	Impersonation *impersonationCache
+
+	// backoff tracks per-Graph consecutive not-ready attempts so the soft
+	// ErrNotReady requeue delay grows (capped) instead of polling a
+	// never-resolving reference once per second forever. Lazily initialized
+	// via backoffOnce so a directly-constructed Reconciler (tests) works too.
+	backoff     *requeueBackoff
+	backoffOnce sync.Once
+}
+
+// ensureBackoff lazily initializes the per-Graph requeue backoff tracker.
+// Safe to call from multiple reconcile workers.
+func (r *Reconciler) ensureBackoff() {
+	r.backoffOnce.Do(func() {
+		if r.backoff == nil {
+			r.backoff = newRequeueBackoff()
+		}
+	})
 }
 
 // Reconcile is the main reconcile loop for Graph objects.
@@ -90,6 +108,7 @@ type Reconciler struct {
 // retry-on-conflict patch). Each path writes its condition via the typed
 // ConditionsMarker — never touches Status.Conditions directly.
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	r.ensureBackoff()
 	logger := log.FromContext(ctx).WithValues("graph", req.NamespacedName)
 
 	var g expv1alpha1.Graph
@@ -129,6 +148,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			}
 		}
 		r.Registry.Delete(req.NamespacedName)
+		r.backoff.reset(req.NamespacedName)
 		if r.Router != nil {
 			r.Router.RemoveGraph(req.NamespacedName)
 		}
@@ -151,12 +171,18 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		reconcileErr = errors.Join(reconcileErr, err)
 	}
 	// A not-ready signal is a soft requeue: the spec compiled, apply
-	// succeeded, the cluster just hasn't converged on readyWhen yet.
-	// Return nil error so controller-runtime doesn't apply error backoff,
-	// but ask for a timed requeue.
+	// succeeded, the cluster just hasn't converged on readyWhen yet (or a
+	// referenced field isn't visible). Return nil error so controller-runtime
+	// doesn't apply its own error backoff, but ask for a timed requeue with a
+	// capped exponential delay so a never-resolving reference (e.g. a typo)
+	// decays to a slow poll instead of a 1/sec hammer.
 	if errors.Is(reconcileErr, executor.ErrNotReady) {
-		return ctrl.Result{RequeueAfter: notReadyRequeueAfter}, nil
+		return ctrl.Result{RequeueAfter: r.backoff.next(req.NamespacedName)}, nil
 	}
+	// Any other outcome (clean converge or a hard error that will be retried
+	// with controller-runtime backoff) ends the not-ready streak, so a fixed
+	// typo returns to fast requeues on its next stall.
+	r.backoff.reset(req.NamespacedName)
 	return ctrl.Result{}, reconcileErr
 }
 
