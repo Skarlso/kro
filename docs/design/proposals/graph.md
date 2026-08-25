@@ -101,6 +101,10 @@ keyword. Evaluation order is derived from dependencies, not list position. The
 `${deployment.metadata.name}` expression in the Service creates a dependency edge: the Service
 cannot evaluate until the Deployment has been applied and its observed state is available.
 
+`spec.serviceAccountName` (optional) selects which ServiceAccount in the Graph's own namespace kro
+impersonates when applying the Graph's resources; when unset, the namespace's `default`
+ServiceAccount is impersonated. See [Security Posture](#security-posture) for the full model.
+
 ### Node Types
 
 Graph has five node types: `template`, `ref`, `def`, `graph`, and `patch`. Each is declared by a keyword on the node object. We choose explicit
@@ -374,19 +378,39 @@ via `patch:` nodes. The Graph's status contains only controller-managed conditio
 
 ## Security Posture
 
-Unlike cluster-scoped `ResourceGraphDefinition`, `Graph` introduces a new namespaced, user-creatable
-kind whose executor performs privileged actions (cross-namespace writes, cluster-scoped RBAC
-creation, foreign Secret reads, and prune) using the KRO controller's service account permissions.
+Unlike cluster-scoped `ResourceGraphDefinition`, `Graph` is a namespaced, user-creatable kind whose
+executor performs writes (including cross-namespace writes, cluster-scoped RBAC creation, foreign
+Secret reads, and prune). To keep that power from defaulting to the kro controller's own broad
+identity, a Graph's resources are applied **under an impersonated ServiceAccount**, not the
+controller service account.
 
-Because of this privileged execution model, `Graph` must **not** be aggregated into the built-in
-Kubernetes user roles (`edit`, `admin`, `view`). Instead, access to create or manage `Graph`
-resources must be explicitly granted via separate, dedicated roles and is gated behind the
-`GraphKind` feature gate (see the Helm `user-cluster-role.yaml` configuration).
+**Impersonation model.** The Graph controller applies each Graph's resources while impersonating a
+ServiceAccount resolved in the Graph's **own namespace**
+(`system:serviceaccount:<graph-namespace>:<name>`):
 
-A known limitation and follow-up is that a Graph's blast radius is not yet namespace-confined.
-Future work on credential scoping (such as caller credentials, short-lived tokens, and per-Graph
-service accounts) will provide finer-grained isolation and namespace confinement across KRO
-primitives.
+- `spec.serviceAccountName`, when set, selects which ServiceAccount in the Graph's namespace to
+  impersonate.
+- When unset, kro impersonates that namespace's `default` ServiceAccount, confining resource access
+  to the namespace by default.
+- The ServiceAccount is **always** resolved in the Graph's own namespace, so a Graph can never
+  escalate beyond the RBAC granted to a ServiceAccount a caller in that namespace could already use.
+  A Graph author cannot name a ServiceAccount in another namespace.
+
+Mechanically, the controller derives a per-identity controller-runtime client from the manager's REST
+config with `rest.ImpersonationConfig` set to the resolved username, cached one entry per distinct
+ServiceAccount. For this to take effect the **kro controller ServiceAccount must be granted the
+`impersonate` verb on `serviceaccounts`** (and, transitively, the ability to act as those accounts).
+Where impersonation is not wired (e.g. unit tests), the executor falls back to the controller
+identity.
+
+Because `Graph` is a privileged, user-creatable kind, it must **not** be aggregated into the built-in
+Kubernetes user roles (`edit`, `admin`, `view`). Access to create or manage `Graph` resources must be
+explicitly granted via separate, dedicated roles and is gated behind the `GraphKind` feature gate
+(see the Helm `user-cluster-role.yaml` configuration).
+
+This inverts the earlier posture: a Graph's blast radius is now bounded by a namespace ServiceAccount
+by default rather than the controller identity. Remaining follow-ups are finer-grained credential
+scoping — e.g. short-lived/bound tokens and caller-credential propagation — across KRO primitives.
 
 ## Relationship to Existing KREPs
 
