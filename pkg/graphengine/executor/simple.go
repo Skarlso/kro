@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 
 	"golang.org/x/sync/errgroup"
@@ -33,6 +34,7 @@ import (
 	apimachineryruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	expv1alpha1 "github.com/kubernetes-sigs/kro/api/v1alpha1"
@@ -69,6 +71,16 @@ type Simple struct {
 	// ApplyConcurrency bounds the number of concurrent SSA apply operations
 	// executed in parallel for collection nodes. 0 means use defaultApplyConcurrency.
 	ApplyConcurrency int
+	// nodePrefix qualifies node IDs with their enclosing subgraph path so
+	// identities stay unambiguous across frames that reuse the same local
+	// node ID (e.g. "res" declared inside both subgraph "subA" and "subB").
+	// Empty at the root. A child executor built by applySubgraph extends it
+	// with the owning subgraph node's ID and a '/' separator, so it reads
+	// like "subA/" (one level) or "subA/subB/" (nested). Every identity sink
+	// — the coordinator watch key, the kro.run/node-id label/selector, and
+	// the node-path annotation — derives from this via qualifiedPath /
+	// nodeIDToken so all three agree by construction.
+	nodePrefix string
 }
 
 // NewSimple constructs a Simple executor bound to the given client.
@@ -119,20 +131,6 @@ func (s *Simple) ApplyWithLabeler(
 	shadow := *s
 	shadow.LabelInjector = composed
 	return shadow.Apply(ctx, rt, w)
-}
-
-type prefixWatcher struct {
-	parent watchrouter.Watcher
-	prefix string
-}
-
-func (p *prefixWatcher) Watch(req watchrouter.WatchRequest) error {
-	req.NodeID = p.prefix + req.NodeID
-	return p.parent.Watch(req)
-}
-
-func (p *prefixWatcher) Done(commit bool) {
-	// Child watches commit/abort with the parent reconciler.
 }
 
 var _ Interface = (*Simple)(nil)
@@ -541,7 +539,7 @@ func (s *Simple) prepareItem(rt *runtime.Runtime, n *runtime.Node, obj *unstruct
 	if m.namespaced && obj.GetNamespace() == "" {
 		return fmt.Errorf("node %q: namespaced resource %s/%s must set metadata.namespace when the instance is cluster-scoped", n.ID(), obj.GetKind(), obj.GetName())
 	}
-	stampKROMeta(rt, n, obj, i, size)
+	s.stampKROMeta(rt, n, obj, i, size)
 	if s.LabelInjector != nil {
 		s.LabelInjector(obj)
 	}
@@ -578,7 +576,7 @@ func (s *Simple) applyScalarTemplate(ctx context.Context, w watchrouter.Watcher,
 		if err := s.prepareItem(rt, n, obj, i, size, mappings[i]); err != nil {
 			return applied, err
 		}
-		if err := s.watchObject(w, n.ID(), mappings[i].gvr, obj); err != nil {
+		if err := s.watchObject(w, s.qualifiedPath(n.ID()), mappings[i].gvr, obj); err != nil {
 			return applied, fmt.Errorf("register watch: %w", err)
 		}
 
@@ -590,7 +588,7 @@ func (s *Simple) applyScalarTemplate(ctx context.Context, w watchrouter.Watcher,
 		}
 		// Terminating: do not re-apply while the live object is being deleted.
 		if current != nil && current.GetDeletionTimestamp() != nil {
-			return applied, &ResourceDeletingError{NodeID: n.ID(), Namespace: obj.GetNamespace(), Name: obj.GetName()}
+			return applied, &ResourceDeletingError{NodeID: s.qualifiedPath(n.ID()), Namespace: obj.GetNamespace(), Name: obj.GetName()}
 		}
 		if err := applySetConflict(current, obj); err != nil {
 			return applied, err
@@ -718,7 +716,11 @@ func (s *Simple) applyCollectionTemplate(ctx context.Context, w watchrouter.Watc
 	// node (keyed by NodeID, matching every item by label) instead of N
 	// scalar watches — the coordinator keys state by NodeID, so per-item
 	// scalar watches would collapse to only the last item. Registered
-	// once up front before spawning parallel apply goroutines.
+	// once up front before spawning parallel apply goroutines. Default the
+	// sample's namespace first (prepareItem does this per item later, but the
+	// watch is registered before any item runs) so the watch carries the
+	// resolved namespace instead of an empty one.
+	s.defaultNamespace(rt, mappings[0].namespaced, desired[0])
 	if err := s.watchCollection(w, n, mappings[0].gvr, desired[0]); err != nil {
 		return []expv1alpha1.ManagedResource{}, fmt.Errorf("register collection watch: %w", err)
 	}
@@ -785,7 +787,7 @@ func (s *Simple) applyCollectionItem(ctx context.Context, rt *runtime.Runtime, n
 	// Terminating: a terminating item gates the whole node, but keep
 	// applying siblings so their watches/identities are recorded.
 	if current != nil && current.GetDeletionTimestamp() != nil {
-		st.recordDeleting(&ResourceDeletingError{NodeID: n.ID(), Namespace: obj.GetNamespace(), Name: obj.GetName()})
+		st.recordDeleting(&ResourceDeletingError{NodeID: s.qualifiedPath(n.ID()), Namespace: obj.GetNamespace(), Name: obj.GetName()})
 		return nil
 	}
 	if err := applySetConflict(current, obj); err != nil {
@@ -838,33 +840,70 @@ func (s *Simple) getLive(ctx context.Context, obj *unstructured.Unstructured) (*
 	return live, nil
 }
 
+// qualifiedPath returns the fully-qualified, human-readable node path for a
+// local node ID, joining the executor's frame prefix with '/' (e.g. "subA/res"
+// inside subgraph "subA", "res" at the root). This is the free-form rendering
+// used for the coordinator watch key, the ManagedResource store, and the
+// node-path annotation — it is never used as a label value.
+func (s *Simple) qualifiedPath(id string) string {
+	return s.nodePrefix + id
+}
+
+// nodeIDToken returns a bounded, label-safe rendering of a node's qualified
+// path for the kro.run/node-id label value and the collection watch selector.
+//
+// Node IDs are strictly alphanumeric (^[A-Za-z][A-Za-z0-9]*$), so '.' is an
+// unambiguous, reversible frame separator: the '.'-joined path (e.g.
+// "subA.res") is a valid label value and round-trips to the '/'-form. At the
+// root the token is just the bare node ID, preserving the documented
+// `kubectl get -l kro.run/node-id=<id>` query for top-level nodes.
+//
+// When the '.'-joined path would exceed the 63-char label-value limit (deep or
+// long-named nesting) it is replaced by a stable, collision-resistant hash so
+// the label stays valid at any depth. The full readable path is always
+// preserved in the node-path annotation regardless, so a hashed label never
+// costs debuggability. The selector is built from this same function, so it
+// matches the stamped label by construction.
+func (s *Simple) nodeIDToken(id string) string {
+	dotted := strings.ReplaceAll(s.qualifiedPath(id), "/", ".")
+	if len(dotted) <= validation.LabelValueMaxLength {
+		return dotted
+	}
+	// Fallback: "h-<40 hex>" of the '/'-form. The leading letter keeps the
+	// value a valid label (must start alphanumeric) and marks it as hashed.
+	sum := sha256.Sum256([]byte(s.qualifiedPath(id)))
+	return "h-" + hex.EncodeToString(sum[:20])
+}
+
 // stampKROMeta stamps the identity metadata kro relies on: the
-// kro.run/node-id label (used by selectors and
-// managed-resource discovery) and the internal.kro.run/apply-order annotation
-// (the reverse-topological deletion wave read by the instance deletion path).
-// For collection items it also stamps the collection-index / collection-size
-// labels (index within the expansion, total item count). Per-instance labels
-// are added separately by the executor's LabelInjector.
-func stampKROMeta(rt *runtime.Runtime, n *runtime.Node, obj *unstructured.Unstructured, index, size int) {
+// kro.run/node-id label (a bounded, label-safe token used by selectors and
+// managed-resource discovery), the internal.kro.run/node-path annotation (the
+// full human-readable qualified path), and the internal.kro.run/apply-order
+// annotation (the reverse-topological deletion wave read by the instance
+// deletion path). For collection items it also stamps the collection-index /
+// collection-size labels (index within the expansion, total item count).
+// Per-instance labels are added separately by the executor's LabelInjector.
+func (s *Simple) stampKROMeta(rt *runtime.Runtime, n *runtime.Node, obj *unstructured.Unstructured, index, size int) {
 	labels := obj.GetLabels()
 	if labels == nil {
 		labels = make(map[string]string, 3)
 	}
-	labels[metadata.NodeIDLabel] = n.ID()
+	labels[metadata.NodeIDLabel] = s.nodeIDToken(n.ID())
 	if n.IsCollection() {
 		labels[metadata.CollectionIndexLabel] = strconv.Itoa(index)
 		labels[metadata.CollectionSizeLabel] = strconv.Itoa(size)
 	}
 	obj.SetLabels(labels)
 
-	if order, ok := rt.ApplyOrder(n.ID()); ok {
-		annotations := obj.GetAnnotations()
-		if annotations == nil {
-			annotations = make(map[string]string, 1)
-		}
-		annotations[metadata.ApplyOrderAnnotation] = strconv.Itoa(order)
-		obj.SetAnnotations(annotations)
+	annotations := obj.GetAnnotations()
+	if annotations == nil {
+		annotations = make(map[string]string, 2)
 	}
+	annotations[metadata.NodePathAnnotation] = s.qualifiedPath(n.ID())
+	if order, ok := rt.ApplyOrder(n.ID()); ok {
+		annotations[metadata.ApplyOrderAnnotation] = strconv.Itoa(order)
+	}
+	obj.SetAnnotations(annotations)
 }
 
 // applyRef reads the external resource a ref node points at and returns its
@@ -889,7 +928,7 @@ func (s *Simple) applyRef(ctx context.Context, w watchrouter.Watcher, rt *runtim
 	// namespace" contract on ExternalRefMetadata.
 	s.defaultNamespace(rt, n.Namespaced(), ref)
 
-	if err := s.watchObject(w, n.ID(), n.GVR(), ref); err != nil {
+	if err := s.watchObject(w, s.qualifiedPath(n.ID()), n.GVR(), ref); err != nil {
 		return nil, fmt.Errorf("register watch: %w", err)
 	}
 
@@ -947,7 +986,7 @@ func (s *Simple) applyRefCollection(ctx context.Context, w watchrouter.Watcher, 
 	// Graph. The watch is keyed by NodeID with the user's label selector.
 	if w != nil {
 		if err := w.Watch(watchrouter.WatchRequest{
-			NodeID:    n.ID(),
+			NodeID:    s.qualifiedPath(n.ID()),
 			GVR:       n.GVR(),
 			Namespace: ns,
 			Selector:  selector,
@@ -999,9 +1038,13 @@ func refCollectionSelector(id string, ref *unstructured.Unstructured) (labels.Se
 // addressable as ${nodeID.childNode.field}. Managed resources and unresolved
 // NodeIDs from the child are returned with their IDs qualified by the
 // subgraph node ID so the reconciler's tracking stays unambiguous across
-// frames. Contributions from nested patch nodes are propagated up to the parent
-// result. The child's watches register against the same per-Graph Watcher,
-// so drift on a nested resource re-enqueues the owning Graph.
+// frames. The child executor also carries this frame prefix (child.nodePrefix),
+// so the identity metadata it stamps deep in the apply — the coordinator watch
+// key, the kro.run/node-id label/selector token, and the node-path annotation
+// — is qualified consistently at the source. Contributions from nested patch
+// nodes are propagated up to the parent result. The child's watches register
+// against the same per-Graph Watcher, so drift on a nested resource
+// re-enqueues the owning Graph.
 func (s *Simple) applySubgraph(ctx context.Context, rt *runtime.Runtime, w watchrouter.Watcher, n *runtime.Node) ([]expv1alpha1.ManagedResource, []string, []Contribution, error) {
 	sub := n.Spec().SubProgram
 	if sub == nil {
@@ -1013,11 +1056,17 @@ func (s *Simple) applySubgraph(ctx context.Context, rt *runtime.Runtime, w watch
 	)
 
 	prefix := n.ID() + "/"
-	var childWatcher watchrouter.Watcher = w
-	if w != nil {
-		childWatcher = &prefixWatcher{parent: w, prefix: prefix}
-	}
-	childResult, applyErr := s.Apply(ctx, childRT, childWatcher)
+	// The child executor carries the qualified frame prefix so every identity
+	// sink it writes — the coordinator watch key, the kro.run/node-id
+	// label/selector token, and the node-path annotation — is qualified at the
+	// point of construction and stays mutually consistent. (Previously a
+	// prefixWatcher rewrote only the watch key, leaving the label and selector
+	// unqualified, so sibling subgraphs reusing a local node ID cross-matched
+	// each other's items.) The store NodeID and unresolved IDs are still
+	// prefixed below, because managedResourceFrom records the raw local ID.
+	child := *s
+	child.nodePrefix = s.nodePrefix + prefix
+	childResult, applyErr := child.Apply(ctx, childRT, w)
 	applied := make([]expv1alpha1.ManagedResource, 0, len(childResult.Applied))
 	for _, mr := range childResult.Applied {
 		mr.NodeID = prefix + mr.NodeID
@@ -1084,12 +1133,17 @@ func (s *Simple) watchObject(w watchrouter.Watcher, nodeID string, gvr schema.Gr
 // watchCollection registers a single selector-based watch for a collection
 // node. The coordinator keys watch state by NodeID, so N per-item scalar
 // watches would collapse to only the last item and drift on the others would
-// go unobserved. One selector watch matching {instance-id, node-id} tracks
-// every item under this node. The instance-id label is stamped by the
-// LabelInjector (invoked here so it is present before the selector is built,
-// idempotent with the apply-time call); if it is absent the selector falls
-// back to node-id only. Namespace comes from the (already namespace-defaulted)
-// sample item and is empty for cluster-scoped resources.
+// go unobserved. One selector watch matching {instance-id, node-id-token}
+// tracks every item under this node. The node-id token is the bounded,
+// label-safe rendering of the node's qualified path (nodeIDToken), matching
+// the value stampKROMeta writes into the kro.run/node-id label — so two sibling
+// subgraphs that reuse the same local node ID get distinct tokens
+// ("subA.res" vs "subB.res") and no longer cross-match each other's items. The
+// instance-id label is stamped by the LabelInjector (invoked here so it is
+// present before the selector is built, idempotent with the apply-time call);
+// if it is absent the selector falls back to node-id only. Namespace comes from
+// the (already namespace-defaulted) sample item and is empty for cluster-scoped
+// resources.
 func (s *Simple) watchCollection(w watchrouter.Watcher, n *runtime.Node, gvr schema.GroupVersionResource, sample *unstructured.Unstructured) error {
 	if w == nil {
 		return nil
@@ -1097,14 +1151,14 @@ func (s *Simple) watchCollection(w watchrouter.Watcher, n *runtime.Node, gvr sch
 	if s.LabelInjector != nil {
 		s.LabelInjector(sample)
 	}
-	set := labels.Set{metadata.NodeIDLabel: n.ID()}
+	set := labels.Set{metadata.NodeIDLabel: s.nodeIDToken(n.ID())}
 	if uid := sample.GetLabels()[metadata.InstanceIDLabel]; uid != "" {
 		set[metadata.InstanceIDLabel] = uid
 	}
 	return w.Watch(watchrouter.WatchRequest{
-		NodeID:    n.ID(),
+		NodeID:    s.qualifiedPath(n.ID()),
 		GVR:       gvr,
-		Namespace: "",
+		Namespace: sample.GetNamespace(),
 		Selector:  labels.SelectorFromSet(set),
 	})
 }
@@ -1159,7 +1213,7 @@ func (s *Simple) applyPatch(ctx context.Context, rt *runtime.Runtime, w watchrou
 
 	// Register the watch before the read so a change to the target (including
 	// its creation) re-enqueues the Graph.
-	if err := s.watchObject(w, n.ID(), gvr, obj); err != nil {
+	if err := s.watchObject(w, s.qualifiedPath(n.ID()), gvr, obj); err != nil {
 		return Contribution{}, fmt.Errorf("register watch: %w", err)
 	}
 
@@ -1172,10 +1226,10 @@ func (s *Simple) applyPatch(ctx context.Context, rt *runtime.Runtime, w watchrou
 			obj.GetKind(), client.ObjectKeyFromObject(obj), ErrNotReady)
 	}
 	if current.GetDeletionTimestamp() != nil {
-		return Contribution{}, &ResourceDeletingError{NodeID: n.ID(), Namespace: obj.GetNamespace(), Name: obj.GetName()}
+		return Contribution{}, &ResourceDeletingError{NodeID: s.qualifiedPath(n.ID()), Namespace: obj.GetNamespace(), Name: obj.GetName()}
 	}
 
-	fieldManager := patchFieldManager(rt.Graph().GetUID(), n.ID())
+	fieldManager := patchFieldManager(rt.Graph().GetUID(), s.qualifiedPath(n.ID()))
 	subresource := n.Subresource()
 	if err := s.contributeApply(ctx, obj, fieldManager, subresource); err != nil {
 		if apierrors.IsConflict(err) {
@@ -1241,8 +1295,12 @@ func (s *Simple) Release(ctx context.Context, contributions []Contribution) erro
 // patchFieldManager derives a stable, unique field-manager identity for a
 // patch node: the first 12 hex characters of sha256(parentUID + "/" + nodeID),
 // prefixed so it reads as a kro-owned patch manager and stays under the
-// 128-character SSA limit. Stability across reconciles is what lets
-// release-on-prune drop exactly the fields a given patch node contributed.
+// 128-character SSA limit. nodeID is the node's fully-qualified path
+// (e.g. "subA/res"), so two sibling subgraphs that reuse the same local id get
+// distinct field managers — without qualification their patch nodes would share
+// one manager and release-on-prune could drop the other subgraph's fields.
+// Stability across reconciles is what lets release-on-prune drop exactly the
+// fields a given patch node contributed.
 func patchFieldManager(parentUID types.UID, nodeID string) string {
 	h := sha256.New()
 	h.Write([]byte(parentUID))

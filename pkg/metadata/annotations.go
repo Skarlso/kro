@@ -22,4 +22,14 @@ const (
 	// release-on-prune: contributions present last reconcile but absent this
 	// one have their fields released under their field manager.
 	PatchContributionsAnnotation = InternalKROPrefix + "patch-contributions"
+	// NodePathAnnotation records the fully-qualified, human-readable node path
+	// of a managed resource, using '/' as the frame separator (e.g.
+	// "subA/res" for node "res" declared inside subgraph node "subA").
+	//
+	// The kro.run/node-id LABEL cannot always hold this value: label values
+	// are bounded to 63 chars and may not contain '/'. For nested nodes the
+	// label therefore carries a bounded, label-safe TOKEN (the '.'-joined path
+	// when it fits, otherwise a hash) while this annotation always preserves
+	// the full readable path for display, debugging, and reverse lookup.
+	NodePathAnnotation = InternalKROPrefix + "node-path"
 )
