@@ -67,6 +67,11 @@ func setupGraphController(
 
 	exec := executor.NewSimple(mgr.GetClient())
 	exec.ApplyConcurrency = applyConcurrency
+	// Standalone Graph objects carry no ApplySet part-of ownership label, so
+	// per-Graph field-manager conflict detection is what keeps two Graphs that
+	// template the same object from flip-flopping its fields. The RGD/instance
+	// path leaves this off and relies on its ApplySet part-of guard instead.
+	exec.ConflictDetection = true
 
 	// A namespaced Graph applies its resources while impersonating a
 	// ServiceAccount in the Graph's namespace (default, or spec.serviceAccountName).

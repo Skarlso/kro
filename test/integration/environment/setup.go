@@ -365,6 +365,11 @@ func (e *Environment) setupController() error {
 
 		exec := executor.NewSimple(e.CtrlManager.GetClient())
 		exec.ApplyConcurrency = e.ControllerConfig.ReconcileConfig.ApplyConcurrency
+		// Match production wiring (cmd/controller/graphengine.go): standalone
+		// Graph objects carry no ApplySet part-of label, so per-Graph
+		// field-manager conflict detection is what stops two Graphs that template
+		// the same object from flip-flopping its fields.
+		exec.ConflictDetection = true
 
 		graphReconciler := &ctrlgraph.Reconciler{
 			Client:                  e.CtrlManager.GetClient(),

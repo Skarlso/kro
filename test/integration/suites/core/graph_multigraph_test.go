@@ -153,4 +153,74 @@ var _ = Describe("Graph Multi-Graph Isolation", func() {
 			15*time.Second,
 		)
 	})
+
+	// Regression for
+	// https://github.com/kubernetes-sigs/kro/pull/1355#issuecomment-5412875343:
+	// two Graphs that template the SAME field of the same object must not
+	// flip-flop it. Field-manager conflict detection lets the first writer keep
+	// ownership; the second is held not-ready and never overwrites the value.
+	It("does not flip-flop when two graphs contend for the same field", func() {
+		t := GinkgoT()
+		ns := env.CreateNamespace(t)
+
+		mkGraph := func(name, owner string) *expv1alpha1.Graph {
+			return &expv1alpha1.Graph{
+				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns},
+				Spec: expv1alpha1.GraphSpec{
+					Nodes: []expv1alpha1.Node{{
+						ID: "cm",
+						Template: environment.RawExt(t, map[string]any{
+							"apiVersion": "v1",
+							"kind":       "ConfigMap",
+							"metadata":   map[string]any{"name": "contested"},
+							// Both graphs write the SAME key with a different value.
+							"data": map[string]any{"owner": owner},
+						}),
+					}},
+				},
+			}
+		}
+
+		// owner-a is created first and should win ownership of data.owner.
+		env.CreateGraph(t, mkGraph("owner-a", "a"))
+		keyA := types.NamespacedName{Namespace: ns, Name: "owner-a"}
+		env.AwaitCondition(t, keyA, expv1alpha1.GraphConditionTypeReady, metav1.ConditionTrue, 20*time.Second)
+
+		cmKey := types.NamespacedName{Namespace: ns, Name: "contested"}
+		env.AwaitObject(t, configMapGVK, cmKey, func(u *unstructured.Unstructured) error {
+			data, _, _ := unstructured.NestedStringMap(u.Object, "data")
+			if data["owner"] != "a" {
+				return fmt.Errorf("data.owner=%q want a", data["owner"])
+			}
+			return nil
+		}, 15*time.Second)
+
+		// owner-b contends for the same field. It must NOT reach Ready=True
+		// (its apply is refused as a field-manager conflict).
+		env.CreateGraph(t, mkGraph("owner-b", "b"))
+		keyB := types.NamespacedName{Namespace: ns, Name: "owner-b"}
+		env.AwaitCondition(t, keyB, expv1alpha1.GraphConditionTypeReady, metav1.ConditionFalse, 20*time.Second)
+
+		// The value must stay "a" and never flip to "b": no flip-flop, and the
+		// resourceVersion is not churning between the two owners.
+		ctx := env.Context()
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		environment.Consistently(t, 3*time.Second, 200*time.Millisecond, func() error {
+			cur := &unstructured.Unstructured{}
+			cur.SetGroupVersionKind(configMapGVK)
+			if err := env.Client.Get(ctx, cmKey, cur); err != nil {
+				return err
+			}
+			data, _, _ := unstructured.NestedStringMap(cur.Object, "data")
+			if data["owner"] != "a" {
+				return fmt.Errorf("data.owner=%q — value flip-flopped away from the first owner", data["owner"])
+			}
+			return nil
+		})
+
+		// owner-a stays Ready throughout — its ownership is undisturbed.
+		env.AwaitCondition(t, keyA, expv1alpha1.GraphConditionTypeReady, metav1.ConditionTrue, 5*time.Second)
+	})
 })

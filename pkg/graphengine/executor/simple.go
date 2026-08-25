@@ -71,6 +71,16 @@ type Simple struct {
 	// ApplyConcurrency bounds the number of concurrent SSA apply operations
 	// executed in parallel for collection nodes. 0 means use defaultApplyConcurrency.
 	ApplyConcurrency int
+	// ConflictDetection, when true, makes Template applies use a per-Graph SSA
+	// field manager and refuse to force-steal a field already owned by another
+	// kro Graph's template manager (surfaced as ErrFieldManagerConflict, a soft
+	// not-ready). External drift (kubectl, other controllers) is still reclaimed
+	// by a forced re-apply. Off by default: the RGD/instance path relies on the
+	// shared FieldManager plus its ApplySet part-of ownership guard. Enabled only
+	// for the standalone Graph controller, whose objects carry no ApplySet
+	// part-of label, so without this two Graphs templating the same object under
+	// the shared forced FieldManager would flip-flop its fields forever.
+	ConflictDetection bool
 	// nodePrefix qualifies node IDs with their enclosing subgraph path so
 	// identities stay unambiguous across frames that reuse the same local
 	// node ID (e.g. "res" declared inside both subgraph "subA" and "subB").
@@ -103,6 +113,14 @@ func (s *Simple) WithGateReadiness(gate bool) *Simple {
 
 func (s *Simple) WithApplyConcurrency(concurrency int) *Simple {
 	s.ApplyConcurrency = concurrency
+	return s
+}
+
+// WithConflictDetection toggles per-Graph field-manager conflict detection for
+// Template applies (see the ConflictDetection field). Returns the receiver for
+// chaining.
+func (s *Simple) WithConflictDetection(on bool) *Simple {
+	s.ConflictDetection = on
 	return s
 }
 
@@ -593,8 +611,14 @@ func (s *Simple) applyScalarTemplate(ctx context.Context, w watchrouter.Watcher,
 		if err := applySetConflict(current, obj); err != nil {
 			return applied, err
 		}
-		if err := s.ssaApply(ctx, obj, FieldManager, true); err != nil {
-			// Scalar Template: an SSA failure is a hard error, unchanged.
+		if err := s.applyTemplateObject(ctx, current, obj, rt.Graph().GetUID(), s.qualifiedPath(n.ID())); err != nil {
+			// A peer-Graph field conflict is soft not-ready (wrapped with
+			// ErrNotReady) so the node gates its dependents and the reconcile
+			// backs off rather than flip-flopping the contested field. Any
+			// other scalar SSA failure stays a hard error, unchanged.
+			if errors.Is(err, ErrFieldManagerConflict) {
+				return applied, fmt.Errorf("%w (%w)", err, ErrNotReady)
+			}
 			return applied, err
 		}
 		// SSA returned UID + server-managed fields on obj. Record the
@@ -798,7 +822,14 @@ func (s *Simple) applyCollectionItem(ctx context.Context, rt *runtime.Runtime, n
 		return nil
 	}
 
-	if err := s.ssaApply(ctx, obj, FieldManager, true); err != nil {
+	if err := s.applyTemplateObject(ctx, current, obj, rt.Graph().GetUID(), s.qualifiedPath(n.ID())); err != nil {
+		// A peer-Graph field conflict is never tolerated as an update-rejection:
+		// record it as a soft failure so the collection is held not-ready and the
+		// reconcile backs off instead of flip-flopping the contested field.
+		if errors.Is(err, ErrFieldManagerConflict) {
+			st.recordFailure(i, fmt.Errorf("item %s/%s: %w", obj.GetNamespace(), obj.GetName(), err))
+			return nil
+		}
 		if current != nil {
 			// The object already exists; only the UPDATE was rejected. This is
 			// tolerated BY DESIGN, including permanent rejections such as a
@@ -1356,4 +1387,89 @@ func patchFieldManager(parentUID types.UID, nodeID string) string {
 	h.Write([]byte(nodeID))
 	sum := h.Sum(nil)
 	return "kro-graphengine.patch." + hex.EncodeToString(sum[:6])
+}
+
+// templateFieldManagerPrefix marks a field manager as a kro Graph template
+// writer. The classifier keys on this prefix to tell a peer Graph's ownership
+// (reject) apart from external drift (force-reclaim).
+const templateFieldManagerPrefix = "kro-graphengine.tmpl."
+
+// ErrFieldManagerConflict is the sentinel returned when a Template object's
+// field is already owned by a DIFFERENT kro Graph's template field manager.
+// kro refuses to force-steal a peer Graph's field, so the node is held soft
+// not-ready and the reconcile backs off instead of flip-flopping the field
+// between the two Graphs forever. It always also satisfies
+// errors.Is(err, ErrNotReady) at the call site (wrapped alongside it).
+var ErrFieldManagerConflict = errors.New("executor: field owned by a foreign field manager")
+
+// templateFieldManager derives a stable, per-Graph field-manager identity for a
+// Template node, mirroring patchFieldManager: the first 12 hex characters of
+// sha256(parentUID + "/" + nodeID), under the tmpl prefix so the conflict
+// classifier recognizes it as a kro Graph template writer. Keyed on the Graph
+// UID, two distinct Graphs that template the same object get distinct managers,
+// so SSA reports a field-level conflict instead of silently reassigning
+// ownership; keyed on the qualified nodeID, sibling subgraph nodes that reuse a
+// local id stay distinct.
+func templateFieldManager(parentUID types.UID, nodeID string) string {
+	h := sha256.New()
+	h.Write([]byte(parentUID))
+	h.Write([]byte("/"))
+	h.Write([]byte(nodeID))
+	sum := h.Sum(nil)
+	return templateFieldManagerPrefix + hex.EncodeToString(sum[:6])
+}
+
+// ownedByForeignGraphTemplate reports whether current carries a managedFields
+// entry under a kro Graph template manager (templateFieldManagerPrefix) OTHER
+// than self. It is how a template apply tells a peer Graph's ownership (which
+// must not be stolen) apart from external drift by a human or another
+// controller (which a forced re-apply legitimately reclaims). A nil current
+// (absent object) is never foreign-owned.
+func ownedByForeignGraphTemplate(current *unstructured.Unstructured, self string) bool {
+	if current == nil {
+		return false
+	}
+	for _, mf := range current.GetManagedFields() {
+		if mf.Manager == self {
+			continue
+		}
+		if strings.HasPrefix(mf.Manager, templateFieldManagerPrefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// applyTemplateObject SSA-applies a resolved Template object, choosing the
+// ownership strategy from ConflictDetection.
+//
+// Off (RGD/instance path, unchanged): a single forced apply under the shared
+// FieldManager. Drift — including a hand-edit — converges back on the next
+// reconcile, and cross-owner contention is caught earlier by the ApplySet
+// part-of guard.
+//
+// On (standalone Graph path): apply under a per-Graph template manager WITHOUT
+// force so the API server reports a field-level 409 when a field is already
+// owned by another manager. If that other manager is a peer Graph's template
+// writer, return ErrFieldManagerConflict (soft not-ready) — kro will not steal
+// a peer's field, which is what stops two Graphs from flip-flopping the same
+// object. If the conflicting owner is instead external drift (kubectl, another
+// controller), re-apply WITH force to reclaim it, preserving drift correction.
+func (s *Simple) applyTemplateObject(ctx context.Context, current, obj *unstructured.Unstructured, parentUID types.UID, nodeID string) error {
+	if !s.ConflictDetection {
+		return s.ssaApply(ctx, obj, FieldManager, true)
+	}
+
+	fieldManager := templateFieldManager(parentUID, nodeID)
+	err := s.ssaApply(ctx, obj, fieldManager, false)
+	if err == nil || !apierrors.IsConflict(err) {
+		return err
+	}
+	// A field is owned by another manager. Reject only if that manager is a
+	// peer Graph's template writer; otherwise the conflict is external drift
+	// we are allowed to reclaim with force.
+	if ownedByForeignGraphTemplate(current, fieldManager) {
+		return fmt.Errorf("template %s %q: %w", obj.GetKind(), client.ObjectKeyFromObject(obj), ErrFieldManagerConflict)
+	}
+	return s.ssaApply(ctx, obj, fieldManager, true)
 }
