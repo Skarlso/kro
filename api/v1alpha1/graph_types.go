@@ -194,10 +194,11 @@ type Node struct {
 	// after the node has been applied and its value published, so
 	// expressions typically reference the node's own published state
 	// (e.g. `cluster.status.phase == 'Active'`). Empty means the node is
-	// ready as soon as it is applied. For collection nodes (forEach) the
-	// node's value in scope is a list — use CEL list functions
-	// like `all()` and `exists()`:
-	//     readyWhen: [ "${appPods.all(p, p.status.phase == 'Running')}" ]
+	// ready as soon as it is applied. For collection nodes (forEach) each
+	// expression is evaluated once per item with `each` bound to that item,
+	// and the node is ready only when every item satisfies every expression
+	// (use `each`, not an aggregate over the node's own name):
+	//     readyWhen: [ "${each.status.phase == 'Running'}" ]
 	//
 	// +kubebuilder:validation:Optional
 	ReadyWhen []string `json:"readyWhen,omitempty"`
