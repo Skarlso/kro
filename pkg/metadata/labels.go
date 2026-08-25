@@ -28,12 +28,6 @@ import (
 )
 
 const (
-	// LabelKROPrefix is retained for compatibility.
-	// Deprecated: use KROPrefix.
-	LabelKROPrefix = KROPrefix
-)
-
-const (
 	NodeIDLabel = KROPrefix + "node-id"
 
 	// Collection labels for tracking collection membership and position.
@@ -133,7 +127,8 @@ func (gl GenericLabeler) ApplyLabels(meta metav1.Object) {
 // Merge merges the labels from the other labeler into the current
 // labeler. If there are any duplicate keys, an error is returned.
 func (gl GenericLabeler) Merge(other Labeler) (Labeler, error) {
-	newLabels := gl.Copy()
+	newLabels := map[string]string{}
+	maps.Copy(newLabels, gl)
 	for k, v := range other.Labels() {
 		if _, ok := newLabels[k]; ok {
 			return nil, fmt.Errorf("%v: found key '%s' in both maps", ErrDuplicatedLabels, k)
@@ -141,13 +136,6 @@ func (gl GenericLabeler) Merge(other Labeler) (Labeler, error) {
 		newLabels[k] = v
 	}
 	return GenericLabeler(newLabels), nil
-}
-
-// Copy returns a copy of the labels.
-func (gl GenericLabeler) Copy() map[string]string {
-	newGenericLabeler := map[string]string{}
-	maps.Copy(newGenericLabeler, gl)
-	return newGenericLabeler
 }
 
 // NewResourceGraphDefinitionLabeler returns a new labeler that sets the

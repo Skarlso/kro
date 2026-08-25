@@ -269,13 +269,13 @@ func TestValidateKubernetesVersion(t *testing.T) {
 }
 
 func TestValidateResourceGraphDefinition(t *testing.T) {
-	defaultRGDConfig := RGDConfig{
+	defaultRGDConfig := Config{
 		MaxCollectionDimensionSize: 10,
 	}
 	tests := []struct {
 		name      string
 		rgd       *v1alpha1.ResourceGraphDefinition
-		rgdConfig RGDConfig
+		rgdConfig Config
 		wantErr   bool
 	}{
 		{
@@ -417,13 +417,13 @@ func TestInferListElementType(t *testing.T) {
 }
 
 func TestValidateForEachDimensions(t *testing.T) {
-	defaultRGDConfig := RGDConfig{
+	defaultRGDConfig := Config{
 		MaxCollectionDimensionSize: 10,
 	}
 	tests := []struct {
 		name        string
 		rgd         *v1alpha1.ResourceGraphDefinition
-		rgdConfig   RGDConfig
+		rgdConfig   Config
 		expectError bool
 		errorMsg    string
 	}{
@@ -603,7 +603,7 @@ func TestValidateForEachDimensions(t *testing.T) {
 					},
 				},
 			},
-			rgdConfig:   RGDConfig{MaxCollectionDimensionSize: 0},
+			rgdConfig:   Config{MaxCollectionDimensionSize: 0},
 			expectError: true,
 			errorMsg:    "forEach cannot have more than 0 dimensions",
 		},

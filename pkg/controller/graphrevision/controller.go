@@ -37,14 +37,14 @@ import (
 	"github.com/kubernetes-sigs/kro/pkg/metrics"
 )
 
-type compileGraphFunc func(*krov1alpha1.ResourceGraphDefinition, graph.RGDConfig) (*graph.Graph, error)
+type compileGraphFunc func(*krov1alpha1.ResourceGraphDefinition, graph.Config) (*graph.Graph, error)
 
 // GraphRevisionReconciler reconciles GraphRevision objects.
 type GraphRevisionReconciler struct {
 	client.Client
 	compileGraph            compileGraphFunc
 	registry                *revisions.Registry
-	rgdConfig               graph.RGDConfig
+	rgdConfig               graph.Config
 	maxConcurrentReconciles int
 }
 
@@ -54,7 +54,7 @@ func NewGraphRevisionReconciler(
 	rgBuilder *graph.Builder,
 	registry *revisions.Registry,
 	maxConcurrentReconciles int,
-	rgdConfig graph.RGDConfig,
+	rgdConfig graph.Config,
 ) *GraphRevisionReconciler {
 	return &GraphRevisionReconciler{
 		compileGraph:            rgBuilder.NewResourceGraphDefinition,

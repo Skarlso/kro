@@ -39,9 +39,9 @@ import (
 
 	"github.com/kubernetes-sigs/kro/api/v1alpha1"
 	clientfake "github.com/kubernetes-sigs/kro/pkg/client/fake"
+	"github.com/kubernetes-sigs/kro/pkg/dag"
 	"github.com/kubernetes-sigs/kro/pkg/dynamiccontroller"
 	"github.com/kubernetes-sigs/kro/pkg/graph"
-	"github.com/kubernetes-sigs/kro/pkg/graph/dag"
 	"github.com/kubernetes-sigs/kro/pkg/graph/revisions"
 	"github.com/kubernetes-sigs/kro/pkg/metadata"
 	watch "github.com/kubernetes-sigs/kro/pkg/watch"

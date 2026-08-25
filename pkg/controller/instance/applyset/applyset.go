@@ -23,7 +23,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"maps"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 
@@ -130,14 +130,14 @@ func (m Metadata) GroupKindsString() string {
 			gkStrings = append(gkStrings, fmt.Sprintf("%s.%s", gk.Kind, gk.Group))
 		}
 	}
-	sort.Strings(gkStrings)
+	slices.Sort(gkStrings)
 	return strings.Join(gkStrings, ",")
 }
 
 // NamespacesString returns namespaces as comma-separated for KEP-3659 annotation.
 func (m Metadata) NamespacesString() string {
 	nsList := m.AdditionalNamespaces.UnsortedList()
-	sort.Strings(nsList)
+	slices.Sort(nsList)
 	return strings.Join(nsList, ",")
 }
 

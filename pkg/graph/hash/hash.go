@@ -16,6 +16,7 @@ package hash
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -111,22 +112,7 @@ func normalizeSpec(spec v1alpha1.ResourceGraphDefinitionSpec) (v1alpha1.Resource
 	}
 
 	slices.SortFunc(normalized.Resources, func(a, b *v1alpha1.Resource) int {
-		if a == nil && b == nil {
-			return 0
-		}
-		if a == nil {
-			return -1
-		}
-		if b == nil {
-			return 1
-		}
-		if a.ID < b.ID {
-			return -1
-		}
-		if a.ID > b.ID {
-			return 1
-		}
-		return 0
+		return cmp.Compare(resourceID(a), resourceID(b))
 	})
 
 	for i := range normalized.Resources {
@@ -152,6 +138,16 @@ func normalizeSpec(spec v1alpha1.ResourceGraphDefinitionSpec) (v1alpha1.Resource
 	}
 
 	return *normalized, nil
+}
+
+// resourceID returns r.ID, or "" for a nil Resource, so nil-safe sorting can
+// delegate directly to cmp.Compare. nil sorts consistently before any named
+// resource, matching the previous explicit nil-first ordering.
+func resourceID(r *v1alpha1.Resource) string {
+	if r == nil {
+		return ""
+	}
+	return r.ID
 }
 
 func normalizeRawExtension(ext runtime.RawExtension) (runtime.RawExtension, error) {

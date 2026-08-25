@@ -18,7 +18,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
-	"sort"
+	"slices"
 	"strings"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -140,9 +140,9 @@ func inventoryHash(
 		}
 		gkStrings = append(gkStrings, value)
 	}
-	sort.Strings(gkStrings)
+	slices.Sort(gkStrings)
 	nsStrings := namespaces.UnsortedList()
-	sort.Strings(nsStrings)
+	slices.Sort(nsStrings)
 	payload := strings.Join([]string{id, strings.Join(gkStrings, ","), strings.Join(nsStrings, ",")}, "\x00")
 	sum := sha256.Sum256([]byte(payload))
 	return "sha256:" + base64.RawURLEncoding.EncodeToString(sum[:])

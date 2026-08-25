@@ -259,7 +259,7 @@ func (e *Environment) initializeClients() error {
 
 func (e *Environment) setupController() error {
 	var err error
-	rgdConfig := graph.RGDConfig{
+	rgdConfig := graph.Config{
 		MaxCollectionSize:          1000,
 		MaxCollectionDimensionSize: 10,
 	}

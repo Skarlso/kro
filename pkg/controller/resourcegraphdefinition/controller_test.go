@@ -84,7 +84,7 @@ type stubManager struct {
 }
 
 type stubGraphBuilder struct {
-	build func(*v1alpha1.ResourceGraphDefinition, graph.RGDConfig) (*graph.Graph, error)
+	build func(*v1alpha1.ResourceGraphDefinition, graph.Config) (*graph.Graph, error)
 }
 
 type stubHandlerRegistration struct{}
@@ -184,7 +184,7 @@ func (m *stubManager) GetEventRecorderFor(name string) record.EventRecorder {
 
 func (m *stubManager) GetFieldIndexer() client.FieldIndexer { return nil }
 
-func (s *stubGraphBuilder) NewResourceGraphDefinition(rgd *v1alpha1.ResourceGraphDefinition, config graph.RGDConfig) (*graph.Graph, error) {
+func (s *stubGraphBuilder) NewResourceGraphDefinition(rgd *v1alpha1.ResourceGraphDefinition, config graph.Config) (*graph.Graph, error) {
 	return s.build(rgd, config)
 }
 
@@ -373,7 +373,7 @@ func newProcessedGraph() *graph.Graph {
 
 func newTestBuilder() resourceGraphBuilder {
 	return &stubGraphBuilder{
-		build: func(*v1alpha1.ResourceGraphDefinition, graph.RGDConfig) (*graph.Graph, error) {
+		build: func(*v1alpha1.ResourceGraphDefinition, graph.Config) (*graph.Graph, error) {
 			return newProcessedGraph(), nil
 		},
 	}
@@ -381,7 +381,7 @@ func newTestBuilder() resourceGraphBuilder {
 
 func newFailingBuilder(err error) resourceGraphBuilder {
 	return &stubGraphBuilder{
-		build: func(*v1alpha1.ResourceGraphDefinition, graph.RGDConfig) (*graph.Graph, error) {
+		build: func(*v1alpha1.ResourceGraphDefinition, graph.Config) (*graph.Graph, error) {
 			return nil, err
 		},
 	}
@@ -552,7 +552,7 @@ func TestNewResourceGraphDefinitionReconciler(t *testing.T) {
 			MaxConcurrentReconciles: 7,
 			MaxGraphRevisions:       20,
 			ApplyConcurrency:        15,
-			RGDConfig:               graph.RGDConfig{MaxCollectionSize: 32},
+			RGDConfig:               graph.Config{MaxCollectionSize: 32},
 		},
 	)
 
@@ -563,7 +563,7 @@ func TestNewResourceGraphDefinitionReconciler(t *testing.T) {
 	assert.Equal(t, 5*time.Second, r.cfg.ProgressRequeueDelay)
 	assert.Equal(t, 7, r.cfg.MaxConcurrentReconciles)
 	assert.Equal(t, 15, r.cfg.ApplyConcurrency)
-	assert.Equal(t, graph.RGDConfig{MaxCollectionSize: 32}, r.cfg.RGDConfig)
+	assert.Equal(t, graph.Config{MaxCollectionSize: 32}, r.cfg.RGDConfig)
 	assert.Equal(t, metadata.NewKROMetaLabeler().Labels(), r.metadataLabeler.Labels())
 }
 

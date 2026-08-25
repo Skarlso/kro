@@ -39,9 +39,9 @@ import (
 	"github.com/kubernetes-sigs/kro/pkg/cel/ast"
 	"github.com/kubernetes-sigs/kro/pkg/cel/conversion"
 	"github.com/kubernetes-sigs/kro/pkg/cel/library"
+	"github.com/kubernetes-sigs/kro/pkg/dag"
 	"github.com/kubernetes-sigs/kro/pkg/features"
 	"github.com/kubernetes-sigs/kro/pkg/graph/crd"
-	"github.com/kubernetes-sigs/kro/pkg/graph/dag"
 	"github.com/kubernetes-sigs/kro/pkg/graph/fieldpath"
 	"github.com/kubernetes-sigs/kro/pkg/graph/parser"
 	"github.com/kubernetes-sigs/kro/pkg/graph/schema"
@@ -134,11 +134,6 @@ type Config struct {
 	MaxCollectionDimensionSize int
 }
 
-// RGDConfig is a compatibility alias for Config.
-//
-// Deprecated: use Config.
-type RGDConfig = Config
-
 // NewResourceGraphDefinition creates a new ResourceGraphDefinition object from the given ResourceGraphDefinition
 // CRD. The ResourceGraphDefinition object is a fully processed and validated representation
 // of the resource graph definition CRD, it's underlying resources, and the relationships between
@@ -155,7 +150,7 @@ func (b *Builder) NewResourceGraphDefinition(originalCR *v1alpha1.ResourceGraphD
 
 	// SimpleSchema -> instance spec schema -> synthesized CRD + status-stripped
 	// CEL schema + scope. Depends only on the schema block, not resources, so it
-	// is computed up front and fed to CompileSource via the Source.
+	// is computed up front and fed to compileSource via the source.
 	instanceCRD, schemaWithoutStatus, crdScope, err := synthesizeInstanceCRD(rgd)
 	if err != nil {
 		return nil, fmt.Errorf("failed to build resourcegraphdefinition %q: %w", rgd.Name, err)
@@ -170,7 +165,7 @@ func (b *Builder) NewResourceGraphDefinition(originalCR *v1alpha1.ResourceGraphD
 		resourceSpecs = append(resourceSpecs, rs)
 	}
 
-	g, statusSchema, err := b.CompileSource(rgdSource{
+	g, statusSchema, err := b.compileSource(rgdSource{
 		resources:       resourceSpecs,
 		instanceGVR:     metadata.GetResourceGraphDefinitionInstanceGVR(rgd.Spec.Schema.Group, rgd.Spec.Schema.APIVersion, rgd.Spec.Schema.Kind),
 		namespaced:      crdScope == extv1.NamespaceScoped,
@@ -234,7 +229,7 @@ func synthesizeInstanceCRD(rgd *v1alpha1.ResourceGraphDefinition) (*extv1.Custom
 	return instanceCRD, schemaWithoutStatus, crdScope, nil
 }
 
-// rgdSource adapts a ResourceGraphDefinition's precomputed pieces to Source.
+// rgdSource adapts a ResourceGraphDefinition's precomputed pieces to source.
 type rgdSource struct {
 	resources       []ResourceSpec
 	instanceGVR     k8sschema.GroupVersionResource
@@ -249,12 +244,12 @@ func (s rgdSource) InstanceNamespaced() bool                    { return s.names
 func (s rgdSource) SchemaVarSchema() *spec.Schema               { return s.schemaVarSchema }
 func (s rgdSource) StatusRaw() []byte                           { return s.statusRaw }
 
-// CompileSource compiles a Source into a Graph: it builds resource nodes, derives
+// compileSource compiles a source into a Graph: it builds resource nodes, derives
 // the dependency DAG, type-checks every CEL expression against target schemas,
 // infers the instance status schema, and assembles the instance node. It does not
 // synthesize a CRD; callers that need one attach it to the returned Graph using
 // the returned status schema. This is the shared entry point for any graph consumer.
-func (b *Builder) CompileSource(src Source) (*Graph, *extv1.JSONSchemaProps, error) {
+func (b *Builder) compileSource(src source) (*Graph, *extv1.JSONSchemaProps, error) {
 	// Per-build schema cache: pointer-stable field lookups, discarded after build.
 	schemaCache := schema.NewCache()
 	p := parser.New(schemaCache)

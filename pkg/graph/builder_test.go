@@ -65,7 +65,7 @@ func disableOmitFeatureGate(t *testing.T) {
 	})
 }
 
-var defaultRGDConfig = RGDConfig{MaxCollectionDimensionSize: 5}
+var defaultRGDConfig = Config{MaxCollectionDimensionSize: 5}
 
 func TestLookupSchemaAtField_AdditionalProperties(t *testing.T) {
 	tests := []struct {
@@ -5000,8 +5000,8 @@ func TestBuildResourceNode_DirectSpec(t *testing.T) {
 	assert.Equal(t, "configmaps", node.Meta.GVR.Resource)
 }
 
-// testSource is a minimal Source implementation with no RGD type, proving a
-// non-RGD consumer can drive CompileSource.
+// testSource is a minimal source implementation with no RGD type, proving a
+// non-RGD consumer can drive compileSource.
 type testSource struct {
 	resources []ResourceSpec
 	gvr       schema.GroupVersionResource
@@ -5025,7 +5025,7 @@ func TestCompileSource_DirectConsumer(t *testing.T) {
 		"metadata": graphschema.ObjectMetaSchema,
 	})
 
-	g, statusSchema, err := builder.CompileSource(testSource{
+	g, statusSchema, err := builder.compileSource(testSource{
 		resources: []ResourceSpec{{
 			ID: "cm",
 			Object: map[string]any{
@@ -5044,12 +5044,12 @@ func TestCompileSource_DirectConsumer(t *testing.T) {
 	require.NotNil(t, statusSchema)
 	require.Contains(t, g.Nodes, "cm")
 	assert.Equal(t, []string{"cm"}, g.TopologicalOrder)
-	assert.Nil(t, g.CRD, "CompileSource must not synthesize a CRD")
+	assert.Nil(t, g.CRD, "compileSource must not synthesize a CRD")
 }
 
 // buildRGResourceForTest mirrors the pre-Step-8 buildRGResource: project an RGD
 // resource to a ResourceSpec and build its node. Production now uses
-// rgResourceSpec + buildResourceNode separately (via CompileSource).
+// rgResourceSpec + buildResourceNode separately (via compileSource).
 func buildRGResourceForTest(b *Builder, p *parser.Parser, res *krov1alpha1.Resource, instanceNamespaced bool) (*Node, error) {
 	rs, err := b.rgResourceSpec(res, 0)
 	if err != nil {

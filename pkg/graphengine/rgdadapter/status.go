@@ -26,7 +26,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/google/cel-go/cel"
@@ -480,7 +480,7 @@ func dedupConditionTypes(conds []library.Condition) ([]library.Condition, []stri
 	for t := range dupSet {
 		dups = append(dups, t)
 	}
-	sort.Strings(dups)
+	slices.Sort(dups)
 	return kept, dups
 }
 

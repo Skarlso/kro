@@ -33,38 +33,22 @@ const kroFinalizer = v1alpha1.KRODomainName + "/finalizer"
 const GraphFinalizer = v1alpha1.KRODomainName + "/graph-finalizer"
 
 // SetResourceGraphDefinitionFinalizer adds the kro finalizer to the object if it's not already present.
-func SetResourceGraphDefinitionFinalizer(obj metav1.Object) {
-	if !HasResourceGraphDefinitionFinalizer(obj) {
-		obj.SetFinalizers(append(obj.GetFinalizers(), kroFinalizer))
-	}
-}
+func SetResourceGraphDefinitionFinalizer(obj metav1.Object) { setKROFinalizer(obj) }
 
 // SetGraphRevisionFinalizer adds the kro finalizer to the object if it's not already present.
-func SetGraphRevisionFinalizer(obj metav1.Object) {
-	if !HasGraphRevisionFinalizer(obj) {
-		obj.SetFinalizers(append(obj.GetFinalizers(), kroFinalizer))
-	}
-}
+func SetGraphRevisionFinalizer(obj metav1.Object) { setKROFinalizer(obj) }
 
 // RemoveResourceGraphDefinitionFinalizer removes the kro finalizer from the object.
-func RemoveResourceGraphDefinitionFinalizer(obj metav1.Object) {
-	obj.SetFinalizers(removeString(obj.GetFinalizers(), kroFinalizer))
-}
+func RemoveResourceGraphDefinitionFinalizer(obj metav1.Object) { removeKROFinalizer(obj) }
 
 // RemoveGraphRevisionFinalizer removes the kro finalizer from the object.
-func RemoveGraphRevisionFinalizer(obj metav1.Object) {
-	obj.SetFinalizers(removeString(obj.GetFinalizers(), kroFinalizer))
-}
+func RemoveGraphRevisionFinalizer(obj metav1.Object) { removeKROFinalizer(obj) }
 
 // HasResourceGraphDefinitionFinalizer checks if the object has the kro finalizer.
-func HasResourceGraphDefinitionFinalizer(obj metav1.Object) bool {
-	return slices.Contains(obj.GetFinalizers(), kroFinalizer)
-}
+func HasResourceGraphDefinitionFinalizer(obj metav1.Object) bool { return hasKROFinalizer(obj) }
 
 // HasGraphRevisionFinalizer checks if the object has the kro finalizer.
-func HasGraphRevisionFinalizer(obj metav1.Object) bool {
-	return slices.Contains(obj.GetFinalizers(), kroFinalizer)
-}
+func HasGraphRevisionFinalizer(obj metav1.Object) bool { return hasKROFinalizer(obj) }
 
 // SetInstanceFinalizer adds an instance-specific finalizer to an unstructured object.
 func SetInstanceFinalizer(obj client.Object) {
@@ -97,13 +81,28 @@ func SetGraphFinalizer(obj metav1.Object) {
 
 // RemoveGraphFinalizer drops the Graph finalizer if it's present.
 func RemoveGraphFinalizer(obj metav1.Object) {
-	obj.SetFinalizers(removeString(obj.GetFinalizers(), GraphFinalizer))
+	obj.SetFinalizers(slices.DeleteFunc(obj.GetFinalizers(), func(item string) bool {
+		return item == GraphFinalizer
+	}))
 }
 
 // Helper functions
 
-func removeString(slice []string, s string) []string {
-	return slices.DeleteFunc(slice, func(item string) bool {
-		return item == s
-	})
+// setKROFinalizer adds the kro finalizer to the object if it's not already present.
+func setKROFinalizer(obj metav1.Object) {
+	if !hasKROFinalizer(obj) {
+		obj.SetFinalizers(append(obj.GetFinalizers(), kroFinalizer))
+	}
+}
+
+// hasKROFinalizer checks if the object has the kro finalizer.
+func hasKROFinalizer(obj metav1.Object) bool {
+	return slices.Contains(obj.GetFinalizers(), kroFinalizer)
+}
+
+// removeKROFinalizer removes the kro finalizer from the object.
+func removeKROFinalizer(obj metav1.Object) {
+	obj.SetFinalizers(slices.DeleteFunc(obj.GetFinalizers(), func(item string) bool {
+		return item == kroFinalizer
+	}))
 }

@@ -46,7 +46,7 @@ import (
 )
 
 type resourceGraphBuilder interface {
-	NewResourceGraphDefinition(*v1alpha1.ResourceGraphDefinition, graph.RGDConfig) (*graph.Graph, error)
+	NewResourceGraphDefinition(*v1alpha1.ResourceGraphDefinition, graph.Config) (*graph.Graph, error)
 }
 
 // Config holds tunable parameters for the RGD reconciler.
@@ -57,7 +57,7 @@ type Config struct {
 	MaxConcurrentReconciles int
 	MaxGraphRevisions       int
 	ApplyConcurrency        int
-	RGDConfig               graph.RGDConfig
+	RGDConfig               graph.Config
 }
 
 // ResourceGraphDefinitionReconciler reconciles a ResourceGraphDefinition object

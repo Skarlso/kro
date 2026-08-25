@@ -17,11 +17,11 @@ package simpleschema
 import (
 	"errors"
 	"fmt"
-	"sort"
+	"slices"
 
 	extv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 
-	"github.com/kubernetes-sigs/kro/pkg/graph/dag"
+	"github.com/kubernetes-sigs/kro/pkg/dag"
 	"github.com/kubernetes-sigs/kro/pkg/simpleschema/types"
 )
 
@@ -161,7 +161,7 @@ func (t *transformer) buildSchema(spec map[string]any) (*extv1.JSONSchemaProps, 
 	// Field iteration above ranges over a map, so the required list is built in
 	// nondeterministic order. Sort it to keep the synthesized CRD stable across
 	// builds (avoids spurious server-side-apply diffs on re-reconcile).
-	sort.Strings(schema.Required)
+	slices.Sort(schema.Required)
 
 	return schema, nil
 }

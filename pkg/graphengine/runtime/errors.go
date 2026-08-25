@@ -16,6 +16,7 @@ package runtime
 
 import (
 	"errors"
+	"slices"
 	"strings"
 )
 
@@ -57,10 +58,7 @@ func IsCELDataPending(err error) bool {
 		return true
 	}
 	msg := err.Error()
-	for _, p := range celDataPendingPatterns {
-		if strings.Contains(msg, p) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(celDataPendingPatterns, func(p string) bool {
+		return strings.Contains(msg, p)
+	})
 }

@@ -20,7 +20,7 @@ import (
 	"k8s.io/kube-openapi/pkg/validation/spec"
 
 	krocel "github.com/kubernetes-sigs/kro/pkg/cel"
-	"github.com/kubernetes-sigs/kro/pkg/graph/dag"
+	"github.com/kubernetes-sigs/kro/pkg/dag"
 	"github.com/kubernetes-sigs/kro/pkg/graph/variable"
 )
 

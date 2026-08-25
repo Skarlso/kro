@@ -293,7 +293,7 @@ func main() {
 			MaxConcurrentReconciles: resourceGraphDefinitionConcurrentReconciles,
 			MaxGraphRevisions:       rgdMaxGraphRevisions,
 			ApplyConcurrency:        applyConcurrency,
-			RGDConfig: graph.RGDConfig{
+			RGDConfig: graph.Config{
 				MaxCollectionSize:          rgdMaxCollectionSize,
 				MaxCollectionDimensionSize: rgdMaxCollectionDimensionSize,
 			},
@@ -321,7 +321,7 @@ func main() {
 		resourceGraphDefinitionGraphBuilder,
 		graphRevisionRegistry,
 		graphRevisionConcurrentReconciles,
-		graph.RGDConfig{
+		graph.Config{
 			MaxCollectionSize:          rgdMaxCollectionSize,
 			MaxCollectionDimensionSize: rgdMaxCollectionDimensionSize,
 		},
