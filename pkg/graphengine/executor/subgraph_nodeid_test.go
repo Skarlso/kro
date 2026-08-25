@@ -176,12 +176,12 @@ func TestSimple_SubgraphCollectionWatch_NoCrossMatch(t *testing.T) {
 	assert.False(t, subB.selector.Matches(subAItem),
 		"subB's watch must NOT match subA's items")
 
-	// The collection watch namespace is intentionally empty: a collection can
-	// span multiple namespaces (per-item CEL-derived metadata.namespace), so the
-	// selector watch must list/watch across all of them. Scoping it to one
-	// sample's namespace would miss drift on items in other namespaces.
-	assert.Equal(t, "", subA.namespace,
-		"a collection watch must span all namespaces (empty), not be scoped to one")
+	// Both subgraph collections template every item into the graph namespace,
+	// so the watch is scoped to that single namespace (the optimization). A
+	// collection that spanned namespaces would fall back to "" — see
+	// TestSimple_CollectionWatchNamespace.
+	assert.Equal(t, "default", subA.namespace,
+		"a single-namespace collection watch should be scoped to that namespace")
 }
 
 type recordedReq struct {
@@ -220,6 +220,75 @@ func TestPatchFieldManager_QualifiedPathIsUnique(t *testing.T) {
 // when the '.'-joined qualified path would exceed the 63-char label limit
 // (deep nesting or long node names), the label falls back to a bounded hash
 // while the node-path annotation still carries the full readable path.
+// TestSimple_CollectionWatchNamespace verifies the collection-watch namespace
+// optimization: the single selector watch is scoped to one namespace when the
+// whole collection lands there, and left all-namespaces ("") only when it
+// genuinely spans namespaces.
+func TestSimple_CollectionWatchNamespace(t *testing.T) {
+	t.Parallel()
+
+	collectionWatchNS := func(t *testing.T, g *expv1alpha1.Graph) string {
+		t.Helper()
+		cl := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
+		w := &recordingWatcher{}
+		_, err := NewSimple(cl).Apply(context.Background(), compileAndBuild(t, g), w)
+		require.NoError(t, err)
+		for i := range w.reqs {
+			if w.reqs[i].Selector != nil { // the collection selector watch
+				return w.reqs[i].Namespace
+			}
+		}
+		t.Fatal("no collection selector watch was registered")
+		return ""
+	}
+
+	t.Run("single namespace is scoped", func(t *testing.T) {
+		t.Parallel()
+		g := generator.NewGraph("g",
+			generator.WithNamespace("team-a"),
+			generator.WithDef("src", map[string]any{"names": []any{"alpha", "beta"}}),
+			generator.WithTemplate("cm", map[string]any{
+				"apiVersion": "v1", "kind": "ConfigMap",
+				"metadata": map[string]any{"name": "${'cm-' + n}"}, // no namespace → defaults to graph ns
+				"data":     map[string]any{"k": "v"},
+			}, generator.ForEachDim("n", "${src.names}")),
+		)
+		assert.Equal(t, "team-a", collectionWatchNS(t, g),
+			"every item defaults to the graph namespace, so the watch should be scoped to it")
+	})
+
+	t.Run("explicit single namespace is scoped", func(t *testing.T) {
+		t.Parallel()
+		g := generator.NewGraph("g",
+			generator.WithNamespace("team-a"),
+			generator.WithDef("src", map[string]any{"names": []any{"alpha", "beta"}}),
+			generator.WithTemplate("cm", map[string]any{
+				"apiVersion": "v1", "kind": "ConfigMap",
+				"metadata": map[string]any{"name": "${'cm-' + n}", "namespace": "other"},
+				"data":     map[string]any{"k": "v"},
+			}, generator.ForEachDim("n", "${src.names}")),
+		)
+		assert.Equal(t, "other", collectionWatchNS(t, g),
+			"all items pin the same explicit namespace, so the watch should be scoped to it")
+	})
+
+	t.Run("multiple namespaces fall back to all-namespaces", func(t *testing.T) {
+		t.Parallel()
+		g := generator.NewGraph("g",
+			generator.WithNamespace("team-a"),
+			generator.WithDef("src", map[string]any{"names": []any{"alpha", "beta"}}),
+			generator.WithTemplate("cm", map[string]any{
+				"apiVersion": "v1", "kind": "ConfigMap",
+				// alpha → ns-alpha, beta → ns-beta: the collection spans namespaces.
+				"metadata": map[string]any{"name": "${'cm-' + n}", "namespace": "${'ns-' + n}"},
+				"data":     map[string]any{"k": "v"},
+			}, generator.ForEachDim("n", "${src.names}")),
+		)
+		assert.Equal(t, "", collectionWatchNS(t, g),
+			"a collection spanning namespaces must keep an all-namespaces watch")
+	})
+}
+
 func TestSimple_SubgraphNodeID_HashFallback(t *testing.T) {
 	t.Parallel()
 

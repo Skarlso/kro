@@ -717,7 +717,14 @@ func (s *Simple) applyCollectionTemplate(ctx context.Context, w watchrouter.Watc
 	// scalar watches — the coordinator keys state by NodeID, so per-item
 	// scalar watches would collapse to only the last item. Registered
 	// once up front before spawning parallel apply goroutines.
-	if err := s.watchCollection(w, n, mappings[0].gvr, desired[0]); err != nil {
+	//
+	// The watch namespace is scoped to a single namespace when every item in
+	// the (fully-resolved) collection lands there, and left empty (all-
+	// namespaces) only when the collection genuinely spans namespaces. A
+	// namespaced watch is cheaper than an all-namespaces one, so this avoids
+	// the broad watch for the common single-namespace case.
+	ns := s.collectionWatchNamespace(rt, desired, mappings)
+	if err := s.watchCollection(w, n, mappings[0].gvr, desired[0], ns); err != nil {
 		return []expv1alpha1.ManagedResource{}, fmt.Errorf("register collection watch: %w", err)
 	}
 
@@ -1126,6 +1133,46 @@ func (s *Simple) watchObject(w watchrouter.Watcher, nodeID string, gvr schema.Gr
 	})
 }
 
+// collectionWatchNamespace returns the namespace to scope a collection node's
+// selector watch to. A collection can template items into DIFFERENT namespaces
+// (each item's metadata.namespace is CEL-derived), so the watch must span all
+// of them in that case. But the common case is a single namespace, and a
+// namespaced watch is cheaper than an all-namespaces one — so scope the watch
+// when every resolved item lands in the same namespace, and fall back to ""
+// (all-namespaces) only when they genuinely differ.
+//
+// desired is the fully-resolved item set (namespaces already CEL-evaluated),
+// so this decision is exact. Items are not yet namespace-defaulted here
+// (prepareItem does that inside the apply goroutines), so the same defaulting
+// is applied read-only: an empty namespace on a namespaced kind resolves to the
+// Graph namespace. A genuinely-empty namespace (cluster-scoped, or a namespaced
+// item that would fail validation) yields "" so the watch stays broad rather
+// than wrong.
+func (s *Simple) collectionWatchNamespace(rt *runtime.Runtime, desired []*unstructured.Unstructured, mappings []applyMapping) string {
+	graphNS := rt.Graph().GetNamespace()
+	var seen string
+	for i, obj := range desired {
+		ns := obj.GetNamespace()
+		if ns == "" && mappings[i].namespaced {
+			ns = graphNS
+		}
+		if ns == "" {
+			// Cluster-scoped, or an unresolved namespace we can't scope to:
+			// keep the watch all-namespaces.
+			return ""
+		}
+		if seen == "" {
+			seen = ns
+			continue
+		}
+		if ns != seen {
+			// The collection spans multiple namespaces — must watch all.
+			return ""
+		}
+	}
+	return seen
+}
+
 // watchCollection registers a single selector-based watch for a collection
 // node. The coordinator keys watch state by NodeID, so N per-item scalar
 // watches would collapse to only the last item and drift on the others would
@@ -1139,13 +1186,13 @@ func (s *Simple) watchObject(w watchrouter.Watcher, nodeID string, gvr schema.Gr
 // present before the selector is built, idempotent with the apply-time call);
 // if it is absent the selector falls back to node-id only.
 //
-// The watch Namespace is intentionally empty: a collection can template items
-// into MULTIPLE namespaces (each item's metadata.namespace is CEL-derived), so
-// the watch must span all of them. Scoping it to any one sample's namespace
-// would leave drift on items in other namespaces unobserved. See the
-// "corrects drift ... in every namespace the collection spans" integration
-// test.
-func (s *Simple) watchCollection(w watchrouter.Watcher, n *runtime.Node, gvr schema.GroupVersionResource, sample *unstructured.Unstructured) error {
+// ns is the watch namespace computed by collectionWatchNamespace: a single
+// namespace when the whole collection lands there, or "" (all-namespaces) when
+// it spans namespaces or is cluster-scoped. Scoping to a single namespace is a
+// cheaper watch than the all-namespaces one; the broad watch is used only when
+// the collection genuinely needs it (see the "corrects drift ... in every
+// namespace the collection spans" integration test).
+func (s *Simple) watchCollection(w watchrouter.Watcher, n *runtime.Node, gvr schema.GroupVersionResource, sample *unstructured.Unstructured, ns string) error {
 	if w == nil {
 		return nil
 	}
@@ -1159,7 +1206,7 @@ func (s *Simple) watchCollection(w watchrouter.Watcher, n *runtime.Node, gvr sch
 	return w.Watch(watchrouter.WatchRequest{
 		NodeID:    s.qualifiedPath(n.ID()),
 		GVR:       gvr,
-		Namespace: "",
+		Namespace: ns,
 		Selector:  labels.SelectorFromSet(set),
 	})
 }
