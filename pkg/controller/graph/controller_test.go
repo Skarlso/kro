@@ -683,9 +683,8 @@ func TestReconcile_MissingCRDInRefAndPatchAndSubgraphTracked(t *testing.T) {
 			},
 			{
 				ID: "patchNode",
-				Patch: &expv1alpha1.PatchSpec{
-					APIVersion: "patch.example.com/v1",
-					Kind:       "PatchKind",
+				Patch: &runtime.RawExtension{
+					Raw: []byte(`{"apiVersion":"patch.example.com/v1","kind":"PatchKind","metadata":{"name":"p"},"data":{"k":"v"}}`),
 				},
 			},
 			{

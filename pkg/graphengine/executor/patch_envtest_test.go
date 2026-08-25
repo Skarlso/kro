@@ -171,8 +171,11 @@ func TestPatch_ContributesMetadataLabels(t *testing.T) {
 
 	g := generator.NewGraph("g",
 		generator.WithNamespace(ns),
-		generator.WithPatch("cmpatcher", "v1", "ConfigMap", "labelme", map[string]any{
+		generator.WithPatchManifest("cmpatcher", map[string]any{
+			"apiVersion": "v1",
+			"kind":       "ConfigMap",
 			"metadata": map[string]any{
+				"name":        "labelme",
 				"labels":      map[string]any{"touched-by": "kro"},
 				"annotations": map[string]any{"kro.run/note": "patched"},
 			},
@@ -201,10 +204,11 @@ func TestPatch_ContributesMetadataLabels(t *testing.T) {
 	assert.True(t, hasFieldManager(cm, res.Contributions[0].FieldManager))
 }
 
-// TestPatch_BodyCannotRedirectTarget verifies a body-supplied metadata.name /
-// metadata.namespace cannot redirect the patch away from the PatchSpec target
-// identity.
-func TestPatch_BodyCannotRedirectTarget(t *testing.T) {
+// TestPatch_MetadataNameIsTheTarget verifies metadata.name in the manifest is
+// the sole source of patch target identity: there is no separate identity vs.
+// body in the raw-manifest model, so the patch lands only on the ConfigMap
+// named in metadata.name and leaves a same-shaped sibling object untouched.
+func TestPatch_MetadataNameIsTheTarget(t *testing.T) {
 	cl := patchEnvClient(t)
 	ns := "default"
 	mustCreateConfigMap(t, cl, ns, "realtarget", map[string]any{"orig": "kept"})
@@ -212,26 +216,28 @@ func TestPatch_BodyCannotRedirectTarget(t *testing.T) {
 
 	g := generator.NewGraph("g",
 		generator.WithNamespace(ns),
-		generator.WithPatch("cmpatcher", "v1", "ConfigMap", "realtarget", map[string]any{
+		generator.WithPatchManifest("cmpatcher", map[string]any{
+			"apiVersion": "v1",
+			"kind":       "ConfigMap",
 			"metadata": map[string]any{
-				"name":   "decoy",
+				"name":   "realtarget",
 				"labels": map[string]any{"touched-by": "kro"},
 			},
 		}),
 	)
-	g.SetUID("uid-no-redirect")
+	g.SetUID("uid-target")
 
 	rt := compileAndBuild(t, g)
 	res, err := NewSimple(cl).Apply(context.Background(), rt, watchrouter.NoopWatcher{})
 	require.NoError(t, err)
 	require.Len(t, res.Contributions, 1)
-	assert.Equal(t, "realtarget", res.Contributions[0].Name, "target identity comes from PatchSpec, not body")
+	assert.Equal(t, "realtarget", res.Contributions[0].Name, "target identity comes from metadata.name in the manifest")
 
 	real := getConfigMap(t, cl, ns, "realtarget")
-	assert.Equal(t, "kro", real.GetLabels()["touched-by"], "label landed on the real target")
+	assert.Equal(t, "kro", real.GetLabels()["touched-by"], "label landed on the target named in metadata.name")
 
 	decoy := getConfigMap(t, cl, ns, "decoy")
-	assert.Empty(t, decoy.GetLabels()["touched-by"], "body metadata.name must not redirect the patch to the decoy")
+	assert.Empty(t, decoy.GetLabels()["touched-by"], "the decoy object named in a sibling ConfigMap is untouched")
 }
 
 // TestPatch_TargetAbsentSoftRequeue verifies that a patch whose target does
@@ -384,14 +390,8 @@ func TestPatch_StatusSubresourceRouting(t *testing.T) {
 
 	g := generator.NewGraph("g",
 		generator.WithNamespace(ns),
-		generator.WithPatchSpec("p", &expv1alpha1.PatchSpec{
-			APIVersion:  "v1",
-			Kind:        "Pod",
-			Metadata:    expv1alpha1.PatchMetadata{Name: "statuspod"},
-			Subresource: "status",
-			Body: generator.RawExtFromMap(map[string]any{
-				"status": map[string]any{"phase": "Running"},
-			}),
+		generator.WithPatch("p", "v1", "Pod", "statuspod", map[string]any{
+			"status": map[string]any{"phase": "Running"},
 		}),
 	)
 	g.SetUID("uid-status")
@@ -491,14 +491,8 @@ func TestPatch_StatusSubresourceLegacyUpdateConflictResolution(t *testing.T) {
 	// 3. Apply a status change through a patch node (contributeApply path) under kro's SSA manager.
 	g := generator.NewGraph("g",
 		generator.WithNamespace(ns),
-		generator.WithPatchSpec("p", &expv1alpha1.PatchSpec{
-			APIVersion:  "test.kro.run/v1",
-			Kind:        "Widget",
-			Metadata:    expv1alpha1.PatchMetadata{Name: "target-widget"},
-			Subresource: "status",
-			Body: generator.RawExtFromMap(map[string]any{
-				"status": map[string]any{"phase": "Running"},
-			}),
+		generator.WithPatch("p", "test.kro.run/v1", "Widget", "target-widget", map[string]any{
+			"status": map[string]any{"phase": "Running"},
 		}),
 	)
 	g.SetUID("uid-status-upgrade")

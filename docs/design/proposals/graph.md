@@ -114,10 +114,25 @@ is deleted.
 
 #### `patch:`
 
-Contributes fields to a resource you don't own. The resource must already exist. The node applies the contributed `body` via server-side apply under a dedicated per-node field manager (`kro-graphengine.patch.<hash>`). On prune, your
-contributed fields are released (relinquished by applying an empty object under that manager) — the target resource itself is not deleted.
+Contributes fields to a resource you don't own. The resource must already exist. `patch:` is authored
+exactly like `template:` — a raw partial manifest, with no wrapper around the contributed fields. The
+node applies that manifest via server-side apply under a dedicated per-node field manager
+(`kro-graphengine.patch.<hash>`). On prune, your contributed fields are released (relinquished by
+applying an empty object under that manager) — the target resource itself is not deleted.
 
-`PatchSpec` declares `apiVersion`, `kind`, `metadata` (`name` and optional `namespace`), optional `subresource` (`""` or `"status"`), and `body`. Note that `forEach` is not supported on patch nodes.
+A patch node's manifest declares `apiVersion`, `kind`, `metadata` (`name` required, `namespace`
+optional — identity only, not a contribution), and the contributed fields at the top level, same as
+`template:`. There is no explicit `subresource:` field; the target endpoint is **derived from field
+presence**:
+
+- A top-level `status:` field targets the status subresource.
+- `spec:`, `data:`, or other top-level fields, or `metadata.labels`/`metadata.annotations`, target the
+  main resource.
+- A single patch node may not mix `status:` with main-resource fields — they target different API
+  endpoints. If a resource needs both, split into two patch nodes.
+- The scale subresource is not supported.
+
+Note that `forEach` is not supported on patch nodes.
 
 ```yaml
 - id: instanceStatus
@@ -126,11 +141,9 @@ contributed fields are released (relinquished by applying an empty object under 
     kind: WebApp
     metadata:
       name: my-webapp
-    subresource: status
-    body:
-      status:
-        endpoint: ${service.status.loadBalancer.ingress[0].hostname}
-        ready: ${deployment.status.availableReplicas > 0}
+    status:
+      endpoint: ${service.status.loadBalancer.ingress[0].hostname}
+      ready: ${deployment.status.availableReplicas > 0}
 ```
 
 #### `ref:`

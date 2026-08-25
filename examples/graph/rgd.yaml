@@ -251,7 +251,7 @@ spec:
                       blockOwnerDeletion: true
                 spec:
                   nodes: >-
-                    ${"${[{'id': 'schema', 'ref': {'apiVersion': schema.spec.schema.group + '/' + schema.spec.schema.apiVersion, 'kind': schema.spec.schema.kind, 'metadata': {'name': instance.metadata.name, 'namespace': instance.metadata.namespace}}}] + schema.spec.resources.filter(r, has(r.externalRef) && !has(r.externalRef.metadata.selector)).map(r, {'id': r.id, 'ref': {'apiVersion': r.externalRef.apiVersion, 'kind': r.externalRef.kind, 'metadata': {'name': r.externalRef.metadata.name}.merge(has(r.externalRef.metadata.namespace) && r.externalRef.metadata.namespace != '' ? {'namespace': r.externalRef.metadata.namespace} : {})}}) + schema.spec.resources.filter(r, has(r.externalRef) && has(r.externalRef.metadata.selector)).map(r, {'id': r.id, 'ref': {'apiVersion': r.externalRef.apiVersion, 'kind': r.externalRef.kind, 'metadata': {'selector': r.externalRef.metadata.selector}.merge(has(r.externalRef.metadata.namespace) && r.externalRef.metadata.namespace != '' ? {'namespace': r.externalRef.metadata.namespace} : {})}}) + schema.spec.resources.filter(r, !has(r.externalRef)).map(r, r.merge({'readyWhen': r.?readyWhen.orValue([]).map(expr, expr.replace('each.', r.id + '.')), 'template': r.template.merge({'metadata': (has(r.template.metadata) ? r.template.metadata : {}).merge({'labels': (has(r.template.metadata) && has(r.template.metadata.labels) ? r.template.metadata.labels : {}).merge({'kro.run/instance-id': string(instance.metadata.uid), 'kro.run/instance-name': instance.metadata.name, 'kro.run/instance-namespace': instance.metadata.namespace, 'kro.run/instance-group': schema.spec.schema.group, 'kro.run/instance-version': schema.spec.schema.apiVersion, 'kro.run/instance-kind': schema.spec.schema.kind})})})})) + [{'id': 'rgdInstancePatch', 'patch': {'apiVersion': schema.spec.schema.group + '/' + schema.spec.schema.apiVersion, 'kind': schema.spec.schema.kind, 'metadata': {'name': instance.metadata.name, 'namespace': instance.metadata.namespace}, 'subresource': 'status', 'body': {'status': {'state': '${' + (schema.spec.resources.size() == 0 ? 'true' : schema.spec.resources.map(r, r.id + '.ready().orValue(false)').join(' && ')) + ' ? \'ACTIVE\' : \'IN_PROGRESS\'}', 'conditions': [{'type': 'Ready', 'status': '${' + (schema.spec.resources.size() == 0 ? 'true' : schema.spec.resources.map(r, r.id + '.ready().orValue(false)').join(' && ')) + ' ? \'True\' : \'False\'}', 'reason': 'Ready', 'observedGeneration': instance.metadata.generation, 'lastTransitionTime': instance.metadata.creationTimestamp}]}.merge(schema.?spec.?schema.?status.orValue({}))}}]}"}
+                    ${"${[{'id': 'schema', 'ref': {'apiVersion': schema.spec.schema.group + '/' + schema.spec.schema.apiVersion, 'kind': schema.spec.schema.kind, 'metadata': {'name': instance.metadata.name, 'namespace': instance.metadata.namespace}}}] + schema.spec.resources.filter(r, has(r.externalRef) && !has(r.externalRef.metadata.selector)).map(r, {'id': r.id, 'ref': {'apiVersion': r.externalRef.apiVersion, 'kind': r.externalRef.kind, 'metadata': {'name': r.externalRef.metadata.name}.merge(has(r.externalRef.metadata.namespace) && r.externalRef.metadata.namespace != '' ? {'namespace': r.externalRef.metadata.namespace} : {})}}) + schema.spec.resources.filter(r, has(r.externalRef) && has(r.externalRef.metadata.selector)).map(r, {'id': r.id, 'ref': {'apiVersion': r.externalRef.apiVersion, 'kind': r.externalRef.kind, 'metadata': {'selector': r.externalRef.metadata.selector}.merge(has(r.externalRef.metadata.namespace) && r.externalRef.metadata.namespace != '' ? {'namespace': r.externalRef.metadata.namespace} : {})}}) + schema.spec.resources.filter(r, !has(r.externalRef)).map(r, r.merge({'readyWhen': r.?readyWhen.orValue([]).map(expr, expr.replace('each.', r.id + '.')), 'template': r.template.merge({'metadata': (has(r.template.metadata) ? r.template.metadata : {}).merge({'labels': (has(r.template.metadata) && has(r.template.metadata.labels) ? r.template.metadata.labels : {}).merge({'kro.run/instance-id': string(instance.metadata.uid), 'kro.run/instance-name': instance.metadata.name, 'kro.run/instance-namespace': instance.metadata.namespace, 'kro.run/instance-group': schema.spec.schema.group, 'kro.run/instance-version': schema.spec.schema.apiVersion, 'kro.run/instance-kind': schema.spec.schema.kind})})})})) + [{'id': 'rgdInstancePatch', 'patch': {'apiVersion': schema.spec.schema.group + '/' + schema.spec.schema.apiVersion, 'kind': schema.spec.schema.kind, 'metadata': {'name': instance.metadata.name, 'namespace': instance.metadata.namespace}, 'status': {'state': '${' + (schema.spec.resources.size() == 0 ? 'true' : schema.spec.resources.map(r, r.id + '.ready().orValue(false)').join(' && ')) + ' ? \'ACTIVE\' : \'IN_PROGRESS\'}', 'conditions': [{'type': 'Ready', 'status': '${' + (schema.spec.resources.size() == 0 ? 'true' : schema.spec.resources.map(r, r.id + '.ready().orValue(false)').join(' && ')) + ' ? \'True\' : \'False\'}', 'reason': 'Ready', 'observedGeneration': instance.metadata.generation, 'lastTransitionTime': instance.metadata.creationTimestamp}]}.merge(schema.?spec.?schema.?status.orValue({}))}]}"}
 
             # ─── L1: Write status back to the RGD ────────────────────────────
             - id: rgdStatus
@@ -261,52 +261,50 @@ spec:
                 metadata:
                   name: >-
                     ${"${schema.metadata.name}"}
-                subresource: status
-                body:
-                  status:
-                    state: >-
-                      ${"${validation.result.valid && crd.ready().orValue(false) ? 'Active' : 'Inactive'}"}
-                    topologicalOrder: >-
-                      ${"${checks.allIDs}"}
-                    conditions:
-                      - type: Ready
-                        status: >-
-                          ${"${validation.result.valid && crd.ready().orValue(false) ? 'True' : 'False'}"}
-                        reason: >-
-                          ${"${validation.result.valid && crd.ready().orValue(false) ? 'Ready' : 'Invalid'}"}
-                        message: >-
-                          ${"${validation.result.valid ? '' : validation.result.message}"}
-                        observedGeneration: >-
-                          ${"${schema.metadata.generation}"}
-                        lastTransitionTime: >-
-                          ${"${schema.metadata.creationTimestamp}"}
-                      - type: GraphAccepted
-                        status: >-
-                          ${"${validation.result.valid ? 'True' : 'False'}"}
-                        reason: >-
-                          ${"${validation.result.valid ? 'Valid' : 'Invalid'}"}
-                        message: >-
-                          ${"${validation.result.valid ? 'resource graph and schema are valid' : validation.result.message}"}
-                        observedGeneration: >-
-                          ${"${schema.metadata.generation}"}
-                        lastTransitionTime: >-
-                          ${"${schema.metadata.creationTimestamp}"}
-                      - type: KindReady
-                        status: >-
-                          ${"${validation.result.valid && crd.ready().orValue(false) ? 'True' : 'False'}"}
-                        reason: >-
-                          ${"${validation.result.valid && crd.ready().orValue(false) ? 'Ready' : 'Invalid'}"}
-                        message: >-
-                          ${"${validation.result.valid ? '' : validation.result.message}"}
-                        observedGeneration: >-
-                          ${"${schema.metadata.generation}"}
-                        lastTransitionTime: >-
-                          ${"${schema.metadata.creationTimestamp}"}
-                      - type: ControllerReady
-                        status: "True"
-                        reason: Running
-                        message: controller is running
-                        observedGeneration: >-
-                          ${"${schema.metadata.generation}"}
-                        lastTransitionTime: >-
+                status:
+                  state: >-
+                    ${"${validation.result.valid && crd.ready().orValue(false) ? 'Active' : 'Inactive'}"}
+                  topologicalOrder: >-
+                    ${"${checks.allIDs}"}
+                  conditions:
+                    - type: Ready
+                      status: >-
+                        ${"${validation.result.valid && crd.ready().orValue(false) ? 'True' : 'False'}"}
+                      reason: >-
+                        ${"${validation.result.valid && crd.ready().orValue(false) ? 'Ready' : 'Invalid'}"}
+                      message: >-
+                        ${"${validation.result.valid ? '' : validation.result.message}"}
+                      observedGeneration: >-
+                        ${"${schema.metadata.generation}"}
+                      lastTransitionTime: >-
+                        ${"${schema.metadata.creationTimestamp}"}
+                    - type: GraphAccepted
+                      status: >-
+                        ${"${validation.result.valid ? 'True' : 'False'}"}
+                      reason: >-
+                        ${"${validation.result.valid ? 'Valid' : 'Invalid'}"}
+                      message: >-
+                        ${"${validation.result.valid ? 'resource graph and schema are valid' : validation.result.message}"}
+                      observedGeneration: >-
+                        ${"${schema.metadata.generation}"}
+                      lastTransitionTime: >-
+                        ${"${schema.metadata.creationTimestamp}"}
+                    - type: KindReady
+                      status: >-
+                        ${"${validation.result.valid && crd.ready().orValue(false) ? 'True' : 'False'}"}
+                      reason: >-
+                        ${"${validation.result.valid && crd.ready().orValue(false) ? 'Ready' : 'Invalid'}"}
+                      message: >-
+                        ${"${validation.result.valid ? '' : validation.result.message}"}
+                      observedGeneration: >-
+                        ${"${schema.metadata.generation}"}
+                      lastTransitionTime: >-
+                        ${"${schema.metadata.creationTimestamp}"}
+                    - type: ControllerReady
+                      status: "True"
+                      reason: Running
+                      message: controller is running
+                      observedGeneration: >-
+                        ${"${schema.metadata.generation}"}
+                      lastTransitionTime: >-
                           ${"${schema.metadata.creationTimestamp}"}

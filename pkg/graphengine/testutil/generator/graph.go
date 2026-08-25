@@ -66,23 +66,27 @@ func WithRef(id string, ref *expv1alpha1.ExternalRef) GraphOption {
 	})
 }
 
-// WithPatchSpec appends a patch node from a fully-built PatchSpec. Use this
-// when a test needs to set the namespace, subresource, or a dynamic GVK.
-func WithPatchSpec(id string, patch *expv1alpha1.PatchSpec) GraphOption {
-	return appendNode(func() expv1alpha1.Node {
-		return expv1alpha1.Node{ID: id, Patch: patch}
-	})
+// WithPatch appends a patch node targeting apiVersion/kind/name, with
+// contribution merged at the top level of the manifest (so callers pass
+// e.g. {"data": {...}}, {"metadata": {"labels": {...}}}, or {"status": {...}}
+// to drive the derived endpoint).
+func WithPatch(id, apiVersion, kind, name string, contribution map[string]any) GraphOption {
+	manifest := map[string]any{
+		"apiVersion": apiVersion,
+		"kind":       kind,
+		"metadata":   map[string]any{"name": name},
+	}
+	for k, v := range contribution {
+		manifest[k] = v
+	}
+	return WithPatchManifest(id, manifest)
 }
 
-// WithPatch appends a patch node contributing body to the target identified
-// by apiVersion/kind/name on the main resource. body is the contributed
-// partial manifest (top-level keys such as spec or data).
-func WithPatch(id, apiVersion, kind, name string, body map[string]any) GraphOption {
-	return WithPatchSpec(id, &expv1alpha1.PatchSpec{
-		APIVersion: apiVersion,
-		Kind:       kind,
-		Metadata:   expv1alpha1.PatchMetadata{Name: name},
-		Body:       rawExt(body),
+// WithPatchManifest appends a patch node from a full manifest map, for tests
+// needing namespace, status, or other full control over the patch shape.
+func WithPatchManifest(id string, manifest map[string]any) GraphOption {
+	return appendNode(func() expv1alpha1.Node {
+		return expv1alpha1.Node{ID: id, Patch: rawExt(manifest)}
 	})
 }
 
@@ -160,8 +164,8 @@ func rawExt(obj map[string]any) *runtime.RawExtension {
 	}
 }
 
-// RawExtFromMap wraps a map as a RawExtension. Exposed so tests can build a
-// PatchSpec body inline.
+// RawExtFromMap wraps a map as a RawExtension. Exposed so tests can build
+// raw node payloads (e.g. patch manifests) inline.
 func RawExtFromMap(obj map[string]any) *runtime.RawExtension {
 	return rawExt(obj)
 }

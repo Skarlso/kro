@@ -66,13 +66,8 @@ func TestCompilePatch_DynamicGVK(t *testing.T) {
 
 	g := generator.NewGraph("g",
 		generator.WithDef("cfg", map[string]any{"group": "v1"}),
-		generator.WithPatchSpec("p", &expv1alpha1.PatchSpec{
-			APIVersion: "${cfg.group}",
-			Kind:       "ConfigMap",
-			Metadata:   expv1alpha1.PatchMetadata{Name: "existing"},
-			Body: generator.RawExtFromMap(map[string]any{
-				"data": map[string]any{"k": "v"},
-			}),
+		generator.WithPatch("p", "${cfg.group}", "ConfigMap", "existing", map[string]any{
+			"data": map[string]any{"k": "v"},
 		}),
 	)
 
@@ -94,12 +89,7 @@ func TestCompilePatch_RejectsForEach(t *testing.T) {
 
 	g := generator.NewGraph("g",
 		generator.WithDef("src", map[string]any{"names": []any{"a", "b"}}),
-		generator.WithPatchSpec("p", &expv1alpha1.PatchSpec{
-			APIVersion: "v1",
-			Kind:       "ConfigMap",
-			Metadata:   expv1alpha1.PatchMetadata{Name: "existing"},
-			Body:       generator.RawExtFromMap(map[string]any{"data": map[string]any{"k": "v"}}),
-		}),
+		generator.WithPatch("p", "v1", "ConfigMap", "existing", map[string]any{"data": map[string]any{"k": "v"}}),
 	)
 	// Attach a forEach axis to the patch node directly.
 	g.Spec.Nodes[len(g.Spec.Nodes)-1].ForEach = []expv1alpha1.ForEachDimension{{"n": "${src.names}"}}
@@ -115,10 +105,11 @@ func TestCompilePatch_RequiresName(t *testing.T) {
 
 	g := generator.NewGraph("g",
 		generator.WithDef("cfg", map[string]any{"x": "y"}),
-		generator.WithPatchSpec("p", &expv1alpha1.PatchSpec{
-			APIVersion: "v1",
-			Kind:       "ConfigMap",
-			Body:       generator.RawExtFromMap(map[string]any{"data": map[string]any{"k": "v"}}),
+		generator.WithPatchManifest("p", map[string]any{
+			"apiVersion": "v1",
+			"kind":       "ConfigMap",
+			"metadata":   map[string]any{},
+			"data":       map[string]any{"k": "v"},
 		}),
 	)
 
@@ -145,4 +136,111 @@ func TestCompilePatch_ReferencingPatchNodeRejected(t *testing.T) {
 	_, err := newTestCompiler(t).Compile(g)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), `patch node "p" does not publish a value into scope and cannot be referenced in CEL expressions`)
+}
+
+// TestCompilePatch_LabelsOnlyTargetsMainResource verifies a patch that only
+// contributes metadata.labels (no status) derives to the main-resource
+// endpoint (empty Subresource), not the status subresource.
+func TestCompilePatch_LabelsOnlyTargetsMainResource(t *testing.T) {
+	t.Parallel()
+
+	g := generator.NewGraph("g",
+		generator.WithPatchManifest("p", map[string]any{
+			"apiVersion": "v1",
+			"kind":       "ConfigMap",
+			"metadata": map[string]any{
+				"name":   "existing",
+				"labels": map[string]any{"team": "kro"},
+			},
+		}),
+	)
+
+	prog, err := newTestCompiler(t).Compile(g)
+	require.NoError(t, err)
+
+	n := prog.Nodes["p"]
+	require.NotNil(t, n)
+	assert.Empty(t, n.Subresource, "labels-only patch targets the main resource, not status")
+}
+
+// TestCompilePatch_StatusOnlyRoutesToStatusSubresource verifies a patch that
+// only contributes a top-level status field derives to the status
+// subresource.
+func TestCompilePatch_StatusOnlyRoutesToStatusSubresource(t *testing.T) {
+	t.Parallel()
+
+	g := generator.NewGraph("g",
+		generator.WithPatch("p", "v1", "Pod", "statuspod", map[string]any{
+			"status": map[string]any{"phase": "Running"},
+		}),
+	)
+
+	prog, err := newTestCompiler(t).Compile(g)
+	require.NoError(t, err)
+
+	n := prog.Nodes["p"]
+	require.NotNil(t, n)
+	assert.Equal(t, "status", n.Subresource)
+}
+
+// TestCompilePatch_StatusAndMainFieldRejected verifies a single patch node
+// mixing a top-level status field with a main-resource field (e.g. spec) is
+// a compile error: a patch must target exactly one endpoint.
+func TestCompilePatch_StatusAndMainFieldRejected(t *testing.T) {
+	t.Parallel()
+
+	g := generator.NewGraph("g",
+		generator.WithPatchManifest("p", map[string]any{
+			"apiVersion": "v1",
+			"kind":       "Pod",
+			"metadata":   map[string]any{"name": "statuspod"},
+			"status":     map[string]any{"phase": "Running"},
+			"spec":       map[string]any{"nodeName": "node-1"},
+		}),
+	)
+
+	_, err := newTestCompiler(t).Compile(g)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "a patch node targets a single endpoint")
+}
+
+// TestCompilePatch_IdentityOnlyRejected verifies a patch node with only
+// identity fields (apiVersion/kind/metadata.name) and no contributed field
+// is a compile error.
+func TestCompilePatch_IdentityOnlyRejected(t *testing.T) {
+	t.Parallel()
+
+	g := generator.NewGraph("g",
+		generator.WithPatchManifest("p", map[string]any{
+			"apiVersion": "v1",
+			"kind":       "ConfigMap",
+			"metadata":   map[string]any{"name": "existing"},
+		}),
+	)
+
+	_, err := newTestCompiler(t).Compile(g)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "patch node contributes no fields")
+}
+
+// TestCompilePatch_MetadataNameIsTheTarget verifies metadata.name is the
+// sole source of patch target identity — there is no separate identity vs.
+// body in the raw-manifest model, so whatever name is set in metadata is
+// the target the patch resolves against.
+func TestCompilePatch_MetadataNameIsTheTarget(t *testing.T) {
+	t.Parallel()
+
+	g := generator.NewGraph("g",
+		generator.WithPatch("p", "v1", "ConfigMap", "realtarget", map[string]any{
+			"data": map[string]any{"k": "v"},
+		}),
+	)
+
+	prog, err := newTestCompiler(t).Compile(g)
+	require.NoError(t, err)
+
+	n := prog.Nodes["p"]
+	require.NotNil(t, n)
+	assert.Equal(t, NodeKindPatch, n.Kind)
+	assert.Equal(t, "configmaps", n.GVR.Resource)
 }

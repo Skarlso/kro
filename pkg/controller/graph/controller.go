@@ -399,7 +399,15 @@ func trackSchemaDependencies(sub schemawatcher.Subscription, nodes []expv1alpha1
 				}
 			}
 		case n.Patch != nil:
-			extractAndTrackGVK(sub, n.ID, n.Patch.APIVersion, n.Patch.Kind)
+			if len(n.Patch.Raw) > 0 {
+				var tm typeMeta
+				if err := yaml.Unmarshal(n.Patch.Raw, &tm); err == nil {
+					extractAndTrackGVK(sub, n.ID, tm.APIVersion, tm.Kind)
+				} else {
+					log.Log.V(1).Info("failed to parse patch in trackSchemaDependencies",
+						"nodeID", n.ID, "error", err)
+				}
+			}
 		case n.Ref != nil:
 			extractAndTrackGVK(sub, n.ID, n.Ref.APIVersion, n.Ref.Kind)
 		case n.Template != nil:

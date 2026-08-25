@@ -111,12 +111,10 @@ func validateKindCompatibility(n *expv1alpha1.Node) error {
 	}
 	if n.Patch != nil {
 		// A patch contributes to a single existing target, so it does not
-		// expand into a collection. The target must be nameable.
+		// expand into a collection. Name-required and endpoint derivation are
+		// enforced later against the unmarshalled payload (derivePatchEndpoint).
 		if len(n.ForEach) > 0 {
 			return fmt.Errorf("forEach is not supported on patch nodes")
-		}
-		if n.Patch.Metadata.Name == "" {
-			return fmt.Errorf("patch target requires metadata.name")
 		}
 		return nil
 	}

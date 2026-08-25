@@ -16,7 +16,6 @@ package compiler
 
 import (
 	"fmt"
-	"maps"
 	"strings"
 
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -272,13 +271,21 @@ func (ctx *CompilationContext) buildNode(p *parser.Parser, n *expv1alpha1.Node, 
 		return nil, nil, err
 	}
 
+	var subresource string
+	if kind == NodeKindPatch {
+		subresource, err = derivePatchEndpoint(payload)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+
 	return &Node{
 		ID:          n.ID,
 		Index:       order,
 		Kind:        kind,
 		GVR:         mapping.Resource,
 		Namespaced:  mapping.Scope.Name() == meta.RESTScopeNameNamespace,
-		Subresource: patchSubresource(n),
+		Subresource: subresource,
 		Object:      &unstructured.Unstructured{Object: payload},
 		Variables:   common.Variables,
 		ForEach:     common.ForEach,
@@ -315,13 +322,57 @@ func parseNodeCommon(n *expv1alpha1.Node, descriptors []variable.FieldDescriptor
 	}, nil
 }
 
-// patchSubresource returns the target subresource for a patch node and ""
-// for every other kind.
-func patchSubresource(n *expv1alpha1.Node) string {
-	if n.Patch != nil {
-		return n.Patch.Subresource
+// derivePatchEndpoint computes the target subresource for a patch node from
+// its unmarshalled manifest payload, per the field-presence rules:
+//
+//   - identity is metadata.name (required, non-empty) and metadata.namespace
+//     (optional).
+//   - mainContribution is any top-level key other than apiVersion, kind,
+//     metadata, status, OR a metadata key other than name/namespace (so
+//     metadata.labels/annotations count as main contributions).
+//   - statusContribution is a top-level status key.
+//
+// A patch must target exactly one endpoint: mixing status with main-resource
+// fields is rejected, and identity-only patches (no contributed fields) are
+// rejected. Returns "" for the main resource or "status" for the status
+// subresource.
+func derivePatchEndpoint(payload map[string]any) (string, error) {
+	name := nestedString(payload, "metadata", "name")
+	if name == "" {
+		return "", fmt.Errorf("patch target requires metadata.name")
 	}
-	return ""
+
+	mainContribution := false
+	statusContribution := false
+	for key := range payload {
+		switch key {
+		case "apiVersion", "kind", "metadata":
+			// identity, not a contribution
+		case "status":
+			statusContribution = true
+		default:
+			mainContribution = true
+		}
+	}
+	if md, ok := payload["metadata"].(map[string]any); ok {
+		for key := range md {
+			if key != "name" && key != "namespace" {
+				mainContribution = true
+				break
+			}
+		}
+	}
+
+	switch {
+	case statusContribution && mainContribution:
+		return "", fmt.Errorf("a patch node targets a single endpoint: status fields cannot be combined with spec/metadata/other fields in one patch node — split them into separate patch nodes")
+	case !statusContribution && !mainContribution:
+		return "", fmt.Errorf("patch node contributes no fields")
+	case statusContribution:
+		return "status", nil
+	default:
+		return "", nil
+	}
 }
 
 // buildDynamicNode compiles a Template or Patch whose apiVersion or kind is
@@ -349,12 +400,19 @@ func (ctx *CompilationContext) buildDynamicNode(
 	if err != nil {
 		return nil, nil, err
 	}
+	var subresource string
+	if kind == NodeKindPatch {
+		subresource, err = derivePatchEndpoint(payload)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
 	return &Node{
 		ID:          n.ID,
 		Index:       order,
 		Kind:        kind,
 		DynamicGVK:  true,
-		Subresource: patchSubresource(n),
+		Subresource: subresource,
 		Object:      &unstructured.Unstructured{Object: payload},
 		Variables:   common.Variables,
 		ForEach:     common.ForEach,
@@ -439,7 +497,7 @@ func projectPayload(n *expv1alpha1.Node) (NodeKind, map[string]any, error) {
 		}
 		return NodeKindDef, obj, nil
 	case n.Patch != nil:
-		obj, err := projectPatchPayload(n.Patch)
+		obj, err := unmarshalRaw(n.Patch.Raw)
 		if err != nil {
 			return 0, nil, fmt.Errorf("patch: %w", err)
 		}
@@ -447,49 +505,6 @@ func projectPayload(n *expv1alpha1.Node) (NodeKind, map[string]any, error) {
 	default:
 		return 0, nil, fmt.Errorf("no payload set")
 	}
-}
-
-// projectPatchPayload merges a PatchSpec into a single manifest-shaped map:
-// the target apiVersion/kind/metadata identity plus the contributed body's
-// top-level fields. The result flows through the same GVK-resolution and CEL
-// extraction pipeline as a template, so a patch body is type-checked against
-// the target schema and its CEL references become dependencies.
-//
-// apiVersion and kind identify the target and are always taken from the
-// PatchSpec. metadata.name and metadata.namespace likewise identify the
-// target and are authoritative from PatchSpec.Metadata — a body cannot
-// redirect the patch to a different object. Other metadata subfields the body
-// contributes (labels, annotations, finalizers, ...) ARE preserved and
-// applied, so a patch node can contribute metadata just like any other field.
-func projectPatchPayload(p *expv1alpha1.PatchSpec) (map[string]any, error) {
-	out := map[string]any{}
-	if p.Body != nil {
-		body, err := unmarshalRaw(p.Body.Raw)
-		if err != nil {
-			return nil, fmt.Errorf("body: %w", err)
-		}
-		maps.Copy(out, body)
-	}
-	out["apiVersion"] = p.APIVersion
-	out["kind"] = p.Kind
-
-	// Start from any metadata the body contributed (labels, annotations, ...),
-	// then overlay the target identity so name/namespace stay authoritative and
-	// a body-supplied name/namespace can never redirect the target.
-	metadata := map[string]any{}
-	if bodyMeta, ok := out["metadata"].(map[string]any); ok {
-		maps.Copy(metadata, bodyMeta)
-	}
-	metadata["name"] = p.Metadata.Name
-	if p.Metadata.Namespace != "" {
-		metadata["namespace"] = p.Metadata.Namespace
-	} else {
-		// Namespace is part of the target identity; it comes only from
-		// PatchSpec.Metadata (or is defaulted downstream), never from the body.
-		delete(metadata, "namespace")
-	}
-	out["metadata"] = metadata
-	return out, nil
 }
 
 func unmarshalRaw(raw []byte) (map[string]any, error) {

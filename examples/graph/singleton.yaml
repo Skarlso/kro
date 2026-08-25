@@ -187,11 +187,9 @@ spec:
         metadata:
           name: ${claims[0].name}
           namespace: ${claims[0].namespace}
-        subresource: status
-        body:
-          status:
-            active: >-
-              ${claims[0].key == claims.filter(x, x.identity == claims[0].identity)
-                .sortBy(x, x.creationTimestamp)
-                .sortBy(x, -x.priority)[0].key}
-            claim: "${claims[0].identity}"
+        status:
+          active: >-
+            ${claims[0].key == claims.filter(x, x.identity == claims[0].identity)
+              .sortBy(x, x.creationTimestamp)
+              .sortBy(x, -x.priority)[0].key}
+          claim: "${claims[0].identity}"

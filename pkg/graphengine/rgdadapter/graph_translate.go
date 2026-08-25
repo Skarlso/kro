@@ -101,11 +101,12 @@ const StatusPatchNodeID = "instance"
 //
 // The node targets the instance GVK (Schema.Group/APIVersion/Kind), keys the
 // target by ${schema.metadata.name} (+ namespace for namespaced instances),
-// and carries the author fields verbatim under body.status so their ${...}
-// CEL is compiled and type-checked like any patch body. BuildRuntimeForInstance
-// marks this node soft-deps + per-field-tolerant so it never gates on the
-// resources it reads and omits unresolved fields (mirroring
-// ProjectInstanceStatus's per-field progressive projection).
+// and carries the author fields verbatim under the manifest's top-level
+// status so their ${...} CEL is compiled and type-checked like any patch
+// manifest. BuildRuntimeForInstance marks this node soft-deps +
+// per-field-tolerant so it never gates on the resources it reads and omits
+// unresolved fields (mirroring ProjectInstanceStatus's per-field progressive
+// projection).
 func authorStatusPatchNode(rgd *v1alpha1.ResourceGraphDefinition) (v1alpha1.Node, bool, error) {
 	if rgd.Spec.Schema == nil {
 		return v1alpha1.Node{}, false, nil
@@ -137,22 +138,21 @@ func authorStatusPatchNode(rgd *v1alpha1.ResourceGraphDefinition) (v1alpha1.Node
 	apiVersion := group + "/" + rgd.Spec.Schema.APIVersion
 	namespaced := rgd.Spec.Schema.Scope != v1alpha1.ResourceScopeCluster
 
-	bodyRaw, err := json.Marshal(map[string]any{"status": statusMap})
-	if err != nil {
-		return v1alpha1.Node{}, false, fmt.Errorf("rgdadapter: marshal status body: %w", err)
-	}
-
-	patch := &v1alpha1.PatchSpec{
-		APIVersion:  apiVersion,
-		Kind:        kind,
-		Subresource: "status",
-		Metadata:    v1alpha1.PatchMetadata{Name: "${schema.metadata.name}"},
-		Body:        &runtime.RawExtension{Raw: bodyRaw},
-	}
+	metadata := map[string]any{"name": "${schema.metadata.name}"}
 	if namespaced {
-		patch.Metadata.Namespace = "${schema.metadata.namespace}"
+		metadata["namespace"] = "${schema.metadata.namespace}"
 	}
-	return v1alpha1.Node{ID: StatusPatchNodeID, Patch: patch}, true, nil
+	manifest := map[string]any{
+		"apiVersion": apiVersion,
+		"kind":       kind,
+		"metadata":   metadata,
+		"status":     statusMap,
+	}
+	raw, err := json.Marshal(manifest)
+	if err != nil {
+		return v1alpha1.Node{}, false, fmt.Errorf("rgdadapter: marshal status patch manifest: %w", err)
+	}
+	return v1alpha1.Node{ID: StatusPatchNodeID, Patch: &runtime.RawExtension{Raw: raw}}, true, nil
 }
 
 func resourceToNode(res *v1alpha1.Resource) (v1alpha1.Node, error) {

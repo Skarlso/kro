@@ -119,64 +119,24 @@ spec:
                       type: array
                     patch:
                       description: |-
-                        Patch contributes fields to a resource this node does not own. The
-                        target identified by APIVersion, Kind, and Metadata must already
-                        exist; the node applies the contributed body under a dedicated
-                        field manager (server-side apply) without taking ownership of the
-                        whole object. On prune the contributed fields are released — the
-                        field manager relinquishes them — but the target object is never
-                        deleted. A patch may target the status subresource.
-                      properties:
-                        apiVersion:
-                          description: |-
-                            APIVersion of the target resource ("apps/v1", "v1", ...). May be a
-                            CEL expression.
-                          type: string
-                        body:
-                          description: |-
-                            Body holds the contributed fields as a partial object. Top-level
-                            keys (spec, data, status, metadata, ...) are merged onto the target's
-                            apiVersion/kind/metadata identity before apply. Values may contain
-                            CEL expressions that reference other nodes.
-                          type: object
-                          x-kubernetes-preserve-unknown-fields: true
-                        kind:
-                          description: |-
-                            Kind of the target resource ("Deployment", "ConfigMap", ...). May be
-                            a CEL expression.
-                          type: string
-                        metadata:
-                          description: |-
-                            Metadata identifies the target object by name (and optional
-                            namespace).
-                          properties:
-                            name:
-                              description: Name of the target object. May be a CEL
-                                expression.
-                              minLength: 1
-                              type: string
-                            namespace:
-                              description: |-
-                                Namespace of the target object. Empty defaults to the Graph's
-                                namespace for namespaced targets. May be a CEL expression.
-                              type: string
-                          required:
-                          - name
-                          type: object
-                        subresource:
-                          description: |-
-                            Subresource selects the target subresource the contribution applies
-                            to. Empty applies to the main resource; "status" routes the apply
-                            through the status subresource.
-                          enum:
-                          - ""
-                          - status
-                          type: string
-                      required:
-                      - apiVersion
-                      - kind
-                      - metadata
+                        Patch contributes fields to a resource this node does not own,
+                        authored as a raw partial manifest exactly like Template (apiVersion,
+                        kind, metadata.name required, metadata.namespace optional, plus the
+                        contributed fields). The target identified by apiVersion, kind, and
+                        metadata.name (+ namespace) must already exist; the node applies the
+                        contributed fields under a dedicated field manager (server-side apply)
+                        without taking ownership of the whole object. On prune the
+                        contributed fields are released — the field manager relinquishes them
+                        — but the target object is never deleted.
+
+                        The target subresource is derived from field presence rather than
+                        declared explicitly: a top-level `status` key routes the apply
+                        through the status subresource, while any other top-level key (or any
+                        metadata field beyond name/namespace) routes to the main resource. A
+                        single patch node may not mix status fields with main-resource
+                        fields, and it must contribute at least one field beyond identity.
                       type: object
+                      x-kubernetes-preserve-unknown-fields: true
                     readyWhen:
                       description: |-
                         ReadyWhen is a list of CEL expressions that must all evaluate to

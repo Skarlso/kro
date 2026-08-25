@@ -64,12 +64,12 @@ var _ = Describe("Graph Patch", func() {
 					},
 					{
 						ID: "p",
-						Patch: &expv1alpha1.PatchSpec{
-							APIVersion: "v1",
-							Kind:       "ConfigMap",
-							Metadata:   expv1alpha1.PatchMetadata{Name: "patch-target"},
-							Body:       environment.RawExt(t, map[string]any{"data": map[string]any{"added": "contributed"}}),
-						},
+						Patch: environment.RawExt(t, map[string]any{
+							"apiVersion": "v1",
+							"kind":       "ConfigMap",
+							"metadata":   map[string]any{"name": "patch-target"},
+							"data":       map[string]any{"added": "contributed"},
+						}),
 					},
 				},
 			},
@@ -150,17 +150,16 @@ var _ = Describe("Graph Patch", func() {
 				Nodes: []expv1alpha1.Node{
 					{
 						ID: "cmpatcher",
-						Patch: &expv1alpha1.PatchSpec{
-							APIVersion: "v1",
-							Kind:       "ConfigMap",
-							Metadata:   expv1alpha1.PatchMetadata{Name: "hello", Namespace: ns},
-							Body: environment.RawExt(t, map[string]any{
-								"metadata": map[string]any{
-									"labels":      map[string]any{"touched-by": "kro"},
-									"annotations": map[string]any{"kro.run/note": "patched"},
-								},
-							}),
-						},
+						Patch: environment.RawExt(t, map[string]any{
+							"apiVersion": "v1",
+							"kind":       "ConfigMap",
+							"metadata": map[string]any{
+								"name":        "hello",
+								"namespace":   ns,
+								"labels":      map[string]any{"touched-by": "kro"},
+								"annotations": map[string]any{"kro.run/note": "patched"},
+							},
+						}),
 					},
 				},
 			},
@@ -247,7 +246,7 @@ var _ = Describe("Graph Patch", func() {
 										"apiVersion": "v1",
 										"kind":       "ConfigMap",
 										"metadata":   map[string]any{"name": "nested-patch-target"},
-										"body":       map[string]any{"data": map[string]any{"nested-added": "nested-contributed"}},
+										"data":       map[string]any{"nested-added": "nested-contributed"},
 									},
 								},
 							},
