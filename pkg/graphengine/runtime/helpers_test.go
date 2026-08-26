@@ -115,7 +115,7 @@ func TestOrderedIntersection_IdentityLess(t *testing.T) {
 		idless("v", "a"), idless("v", "b"), idless("v", "c"),
 	}
 	got := orderedIntersection(rows, rows)
-	var vals []string
+	vals := make([]string, 0, len(got))
 	for _, o := range got {
 		vals = append(vals, o.Object["v"].(string))
 	}
@@ -341,7 +341,7 @@ func TestSetObserved_Collection_IdentityLess(t *testing.T) {
 	n := &Node{spec: spec}
 	n.SetObserved(rows, rows)
 
-	var vals []string
+	vals := make([]string, 0, len(n.Observed()))
 	for _, o := range n.Observed() {
 		vals = append(vals, o.Object["v"].(string))
 	}
