@@ -35,6 +35,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apiserver/pkg/cel/openapi"
 	"k8s.io/client-go/dynamic"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/kubernetes-sigs/kro/api/v1alpha1"
 	celunstructured "github.com/kubernetes-sigs/kro/pkg/cel/unstructured"
@@ -273,12 +274,40 @@ func (c *Controller) reconcileViaGraphEngine(
 
 	// All apply outcomes (success, soft-not-ready, or retryable apply error)
 	// have their conditions and status persisted above. Requeue on any apply error
-	// with the configured interval so the instance retries without counting as
-	// a reconcile-level infrastructural error.
+	// so the instance retries without counting as a reconcile-level
+	// infrastructural error.
 	if applyErr != nil {
+		// A soft ErrNotReady (a node waiting on data/readiness) is requeued with
+		// a capped exponential delay keyed per-instance, so a never-resolving
+		// reference decays to a slow poll instead of a flat-interval hammer. Any
+		// other apply error keeps the flat DefaultRequeueDuration behavior.
+		if errors.Is(applyErr, executor.ErrNotReady) {
+			return c.notReadyRequeue(instanceKey(inst), applyErr)
+		}
 		return c.delayedRequeue(applyErr)
 	}
+	// Clean converge: end the not-ready backoff streak so a fixed reference
+	// returns to fast requeues on its next stall.
+	c.backoff.reset(instanceKey(inst))
 	return nil
+}
+
+// instanceKey is the per-instance backoff key. Namespaced instances key on
+// namespace/name; cluster-scoped instances key on name alone.
+func instanceKey(inst *unstructured.Unstructured) client.ObjectKey {
+	return client.ObjectKey{Namespace: inst.GetNamespace(), Name: inst.GetName()}
+}
+
+// notReadyRequeue returns the soft not-ready requeue for key: a capped
+// exponential delay from the per-instance backoff tracker. When the operator
+// disabled delayed requeues (DefaultRequeueDuration==0), it honors that with
+// requeue.None and does not force a timer — child watch events still drive the
+// next cycle.
+func (c *Controller) notReadyRequeue(key client.ObjectKey, err error) error {
+	if c.reconcileConfig.DefaultRequeueDuration == 0 {
+		return requeue.None(err)
+	}
+	return requeue.NeededAfter(err, c.backoff.next(key))
 }
 
 func (c *Controller) delayedRequeue(err error) error {

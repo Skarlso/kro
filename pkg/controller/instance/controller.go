@@ -18,6 +18,7 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"sync"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -118,6 +119,25 @@ type Controller struct {
 	// feature gate flags, captured once at construction time.
 	eventsEnabled  bool
 	metricsEnabled bool
+
+	// backoff tracks per-instance consecutive soft not-ready attempts so the
+	// requeue delay grows (capped) instead of polling a never-resolving
+	// reference at a flat interval forever. Lazily initialized via backoffOnce
+	// so a directly-constructed Controller (tests) works too. Its first-attempt
+	// delay is seeded from reconcileConfig.DefaultRequeueDuration.
+	backoff     *requeueBackoff
+	backoffOnce sync.Once
+}
+
+// ensureBackoff lazily initializes the per-instance requeue backoff tracker,
+// seeding its base delay from the configured DefaultRequeueDuration. Safe to
+// call from multiple reconcile workers.
+func (c *Controller) ensureBackoff() {
+	c.backoffOnce.Do(func() {
+		if c.backoff == nil {
+			c.backoff = newRequeueBackoff(c.reconcileConfig.DefaultRequeueDuration)
+		}
+	})
 }
 
 // NewController constructs a new controller that resolves the newest issued
@@ -179,6 +199,7 @@ func (c *Controller) WithGraphEngineCompiler(comp rgdadapter.Compiler) {
 
 // Reconcile implements dynamiccontroller.Handler.
 func (c *Controller) Reconcile(ctx context.Context, req ctrl.Request) (err error) {
+	c.ensureBackoff()
 	log := c.log.WithValues("namespace", req.Namespace, "name", req.Name)
 
 	// Get per-instance watcher from the coordinator.
@@ -244,6 +265,9 @@ func (c *Controller) Reconcile(ctx context.Context, req ctrl.Request) (err error
 	// Deletion must not depend on resolving the current GraphRevision or CEL.
 	// Build a context without a runtime and use persisted ApplySet inventory.
 	if inst.GetDeletionTimestamp() != nil {
+		// The instance is going away — end any not-ready backoff streak so a
+		// later instance reusing this key starts fresh at the base delay.
+		c.backoff.reset(req.NamespacedName)
 		dcx = NewDeletionContext(
 			ctx, log, c.gvr, c.namespaced, c.client.Dynamic(), c.client.RESTMapper(),
 			c.reconcileConfig, inst,
