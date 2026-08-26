@@ -389,20 +389,11 @@ func derivePatchEndpoint(payload map[string]any) (string, error) {
 // validatePatchPayload rejects fields a patch node must never contribute,
 // independent of target GVK (so it runs for literal- and dynamic-GVK patches):
 //
-//   - Legacy shape: top-level `body`/`subresource`. A literal GVK's schema
-//     type-check already rejects these, but a dynamic-GVK patch is schemaless
-//     and would otherwise route to the main resource and silently drop the
-//     contribution — this closes that bypass.
 //   - Identity/lifecycle metadata: metadata.ownerReferences, finalizers,
 //     deletionTimestamp, uid. A patch contributes fields without owning the
 //     target; these could make the GC delete or terminate a target the patch
 //     does not own, breaking the CRD's "never deletes its target" guarantee.
 func validatePatchPayload(payload map[string]any) error {
-	for _, key := range []string{"body", "subresource"} {
-		if _, ok := payload[key]; ok {
-			return fmt.Errorf("patch node has a legacy top-level %q field: patch nodes are raw partial manifests — author the contributed fields directly (a top-level status routes to the status subresource, everything else to the main resource) instead of wrapping them in body/subresource", key)
-		}
-	}
 	md, ok := payload["metadata"].(map[string]any)
 	if !ok {
 		return nil
