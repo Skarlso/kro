@@ -75,6 +75,18 @@ type GraphStatus struct {
 	//
 	// +kubebuilder:validation:Optional
 	ManagedResources []ManagedResource `json:"managedResources,omitempty"`
+
+	// AppliedServiceAccount is the impersonation username
+	// (system:serviceaccount:<namespace>:<name>) the Graph last applied its
+	// resources under. Teardown resolves the executor from THIS identity rather
+	// than the current spec.serviceAccountName, so editing that field between
+	// apply and delete cannot strand resources under an identity that can no
+	// longer see them. Empty for a Graph that has never applied (or one last
+	// applied by a kro version predating this field), in which case teardown
+	// falls back to the current spec.
+	//
+	// +kubebuilder:validation:Optional
+	AppliedServiceAccount string `json:"appliedServiceAccount,omitempty"`
 }
 
 // ManagedResource is a lightweight pointer to a cluster resource the Graph

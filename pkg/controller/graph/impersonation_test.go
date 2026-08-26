@@ -129,6 +129,73 @@ func TestExecutorFor_DefaultServiceAccount(t *testing.T) {
 	assert.Equal(t, "system:serviceaccount:team-a:default", capturedUser)
 }
 
+// TestTeardownExecutorFor_UsesPersistedIdentity is the #5 regression: teardown
+// must resolve the executor from the identity the Graph ACTUALLY applied under
+// (Status.AppliedServiceAccount), not the current spec.serviceAccountName —
+// otherwise editing that field between apply and delete runs teardown as an
+// identity that can no longer see the resources, orphaning them.
+func TestTeardownExecutorFor_UsesPersistedIdentity(t *testing.T) {
+	base := executor.NewSimple(fake.NewClientBuilder().Build())
+	var builtFor []string
+	r := &Reconciler{
+		Executor: base,
+		Impersonation: NewImpersonation(base, func(user string) (client.Client, error) {
+			builtFor = append(builtFor, user)
+			return fake.NewClientBuilder().Build(), nil
+		}, nil),
+	}
+
+	// Applied under SA-X, but spec now names SA-Y (edited after apply).
+	g := graphWithSA("team-a", "sa-y")
+	g.Status.AppliedServiceAccount = "system:serviceaccount:team-a:sa-x"
+
+	_, err := r.teardownExecutorFor(g)
+	require.NoError(t, err)
+	require.Equal(t, []string{"system:serviceaccount:team-a:sa-x"}, builtFor,
+		"teardown must impersonate the persisted applied identity, not the current spec")
+}
+
+// TestTeardownExecutorFor_FallsBackToSpec verifies that a Graph with no recorded
+// applied identity (never applied, or a pre-field kro version) tears down using
+// the current spec identity.
+func TestTeardownExecutorFor_FallsBackToSpec(t *testing.T) {
+	base := executor.NewSimple(fake.NewClientBuilder().Build())
+	var builtFor []string
+	r := &Reconciler{
+		Executor: base,
+		Impersonation: NewImpersonation(base, func(user string) (client.Client, error) {
+			builtFor = append(builtFor, user)
+			return fake.NewClientBuilder().Build(), nil
+		}, nil),
+	}
+
+	g := graphWithSA("team-a", "deployer") // no Status.AppliedServiceAccount
+	_, err := r.teardownExecutorFor(g)
+	require.NoError(t, err)
+	require.Equal(t, []string{"system:serviceaccount:team-a:deployer"}, builtFor,
+		"with no persisted identity, teardown falls back to the current spec")
+}
+
+// TestAppliedIdentity verifies appliedIdentity returns the impersonation
+// username only when impersonation is wired, and "" otherwise (so teardown then
+// falls back to the spec / base identity).
+func TestAppliedIdentity(t *testing.T) {
+	base := executor.NewSimple(fake.NewClientBuilder().Build())
+
+	withImp := &Reconciler{
+		Executor: base,
+		Impersonation: NewImpersonation(base, func(string) (client.Client, error) {
+			return fake.NewClientBuilder().Build(), nil
+		}, nil),
+	}
+	assert.Equal(t, "system:serviceaccount:team-a:deployer",
+		withImp.appliedIdentity(graphWithSA("team-a", "deployer")))
+
+	noImp := &Reconciler{Executor: base} // Impersonation nil
+	assert.Equal(t, "", noImp.appliedIdentity(graphWithSA("team-a", "deployer")),
+		"without impersonation, no applied identity is recorded (teardown falls back to spec)")
+}
+
 // TestExecutorFor_NoImpersonationFallsBackToBase verifies that when
 // impersonation is not wired (e.g. unit tests, or a build that leaves it off),
 // the Graph's resources are applied with the base executor / kro identity.

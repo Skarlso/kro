@@ -140,9 +140,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 	if !g.DeletionTimestamp.IsZero() {
 		logger.V(1).Info("graph is deleting")
-		// Resolve the impersonated executor for this Graph so teardown runs
-		// under the same identity that applied the resources.
-		ex, err := r.executorFor(&g)
+		// Resolve the executor from the identity the Graph ACTUALLY applied
+		// under (persisted in status), not the current spec.serviceAccountName:
+		// editing that field between apply and delete would otherwise run
+		// teardown as an identity that can no longer see the resources, orphaning
+		// children and wedging the finalizer. Fall back to the current spec when
+		// no applied identity was recorded (never applied, or a pre-field kro).
+		ex, err := r.teardownExecutorFor(&g)
 		if err != nil {
 			return ctrl.Result{}, fmt.Errorf("resolve impersonated executor: %w", err)
 		}
@@ -330,6 +334,17 @@ func (r *Reconciler) reconcileGraph(ctx context.Context, g *expv1alpha1.Graph) e
 	default:
 		watcher.Done(false)
 		marker.ResourcesApplyFailed(applyErr.Error())
+	}
+
+	// Record the identity that applied under, but ONLY when the apply reached
+	// the cluster (clean or soft not-ready) — never on a hard failure, which
+	// must preserve the last-good identity so teardown can still see resources a
+	// prior identity applied. Empty when impersonation is inactive (the base
+	// controller identity), in which case teardown falls back to the spec.
+	if !errors.Is(applyErr, executor.ErrNotReady) && applyErr != nil {
+		// hard failure: leave AppliedServiceAccount untouched
+	} else if user := r.appliedIdentity(g); user != "" {
+		g.Status.AppliedServiceAccount = user
 	}
 
 	// Diff previous vs the new applied set. Entries whose NodeID is
@@ -650,6 +665,13 @@ func (r *Reconciler) updateStatus(ctx context.Context, g *expv1alpha1.Graph) err
 		} else {
 			dc.Status.Conditions = g.Status.Conditions
 			dc.Status.ManagedResources = g.Status.ManagedResources
+		}
+		// Persist the applied identity whenever we have one (never regress a
+		// recorded identity to empty), independent of the generation gate: it
+		// tracks the identity that applied the resources, which teardown depends
+		// on and which is orthogonal to spec generation.
+		if g.Status.AppliedServiceAccount != "" {
+			dc.Status.AppliedServiceAccount = g.Status.AppliedServiceAccount
 		}
 
 		if equality.Semantic.DeepEqual(current.Status, dc.Status) {

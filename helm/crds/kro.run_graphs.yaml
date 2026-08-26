@@ -285,6 +285,17 @@ spec:
           status:
             description: GraphStatus defines the observed state of a Graph.
             properties:
+              appliedServiceAccount:
+                description: |-
+                  AppliedServiceAccount is the impersonation username
+                  (system:serviceaccount:<namespace>:<name>) the Graph last applied its
+                  resources under. Teardown resolves the executor from THIS identity rather
+                  than the current spec.serviceAccountName, so editing that field between
+                  apply and delete cannot strand resources under an identity that can no
+                  longer see them. Empty for a Graph that has never applied (or one last
+                  applied by a kro version predating this field), in which case teardown
+                  falls back to the current spec.
+                type: string
               conditions:
                 description: |-
                   Conditions represent the latest available observations of the Graph's

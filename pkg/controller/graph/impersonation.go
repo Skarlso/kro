@@ -76,8 +76,43 @@ func (r *Reconciler) executorFor(g *expv1alpha1.Graph) (executor.Interface, erro
 		// before this point when impersonation is required but not wired.
 		return r.Executor, nil
 	}
+	return r.executorForUser(serviceAccountUsername(g))
+}
 
-	user := serviceAccountUsername(g)
+// appliedIdentity returns the impersonation username the Graph applies under
+// this cycle, or "" when impersonation is inactive (the base controller
+// identity). Recorded in Status.AppliedServiceAccount on a successful apply so
+// teardown can resolve the same identity; empty leaves teardown to fall back to
+// the current spec.
+func (r *Reconciler) appliedIdentity(g *expv1alpha1.Graph) string {
+	if r.Impersonation == nil || r.Impersonation.newExec == nil {
+		return ""
+	}
+	return serviceAccountUsername(g)
+}
+
+// teardownExecutorFor resolves the executor for deleting a Graph's resources.
+// It uses the identity the Graph ACTUALLY applied under (Status
+// .AppliedServiceAccount) so teardown is unaffected by a later edit to
+// spec.serviceAccountName. When no applied identity was recorded (the Graph
+// never applied, or was last applied by a kro version predating the field), it
+// falls back to the current spec via executorFor.
+func (r *Reconciler) teardownExecutorFor(g *expv1alpha1.Graph) (executor.Interface, error) {
+	if user := g.Status.AppliedServiceAccount; user != "" {
+		return r.executorForUser(user)
+	}
+	return r.executorFor(g)
+}
+
+// executorForUser returns the executor bound to a specific impersonation
+// username, caching one entry per distinct identity. Teardown uses this with
+// the persisted Status.AppliedServiceAccount so it runs under the identity that
+// actually applied the resources, not the current spec. Falls back to the base
+// executor when impersonation is not wired.
+func (r *Reconciler) executorForUser(user string) (executor.Interface, error) {
+	if r.Impersonation == nil || r.Impersonation.newExec == nil {
+		return r.Executor, nil
+	}
 
 	r.Impersonation.mu.Lock()
 	defer r.Impersonation.mu.Unlock()
