@@ -18,6 +18,8 @@ import (
 	"fmt"
 
 	"github.com/go-logr/logr"
+	"k8s.io/client-go/kubernetes"
+	authorizationv1client "k8s.io/client-go/kubernetes/typed/authorization/v1"
 	"k8s.io/client-go/metadata"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -86,6 +88,18 @@ func setupGraphController(
 		cfg := rest.CopyConfig(baseCfg)
 		cfg.Impersonate = rest.ImpersonationConfig{UserName: user}
 		return client.New(cfg, client.Options{Mapper: mapper})
+	}, func(user string) (authorizationv1client.AuthorizationV1Interface, error) {
+		// Same impersonated config drives the SelfSubjectAccessReview gate, so
+		// "self" is the Graph's ServiceAccount. A client-go Clientset is used
+		// (rather than the controller-runtime client) to avoid scheme wiring for
+		// the SSAR type.
+		cfg := rest.CopyConfig(baseCfg)
+		cfg.Impersonate = rest.ImpersonationConfig{UserName: user}
+		cs, err := kubernetes.NewForConfig(cfg)
+		if err != nil {
+			return nil, err
+		}
+		return cs.AuthorizationV1(), nil
 	})
 
 	reconciler := &ctrlgraph.Reconciler{

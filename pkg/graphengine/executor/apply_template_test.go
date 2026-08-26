@@ -157,36 +157,47 @@ func TestSimple_ApplyTemplate_TerminatingCollectionItemStillAppliesSiblings(t *t
 		"a terminating item must not be advertised as applied")
 }
 
-// A watch that cannot be registered is a hard error: the executor's drift
-// detection depends on the watch existing, so continuing would silently lose
-// events for that resource.
-func TestSimple_ApplyTemplate_WatchRegistrationFailureIsHard(t *testing.T) {
+// A watch that cannot be registered must NOT abort the apply (issue #17): the
+// pre-drift base behavior applied everything and only lost drift detection.
+// The object is still applied, Apply returns no error, and the node is not
+// recorded Unresolved.
+func TestSimple_ApplyTemplate_WatchRegistrationFailureIsSoftFail(t *testing.T) {
 	t.Parallel()
 
 	t.Run("scalar", func(t *testing.T) {
 		t.Parallel()
 		cl := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
-		_, err := NewSimple(cl).Apply(context.Background(),
+		res, err := NewSimple(cl).Apply(context.Background(),
 			compileAndBuild(t, scalarCMGraph("cm")),
 			failWatcher{err: errors.New("informer unavailable")})
 
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "register watch")
-		assert.False(t, errors.Is(err, ErrNotReady),
-			"a watch registration failure must not be softened into a requeue")
-		assert.False(t, cmExists(t, cl, "cm"),
-			"nothing may be applied once the watch could not be declared")
+		require.NoError(t, err,
+			"a watch registration failure must not abort the apply")
+		assert.True(t, cmExists(t, cl, "cm"),
+			"the object must still be applied even though its drift watch failed")
+		assert.NotContains(t, res.Unresolved, "cm",
+			"a lost drift watch must not mark the node unresolved")
+		names := make([]string, 0, len(res.Applied))
+		for _, a := range res.Applied {
+			names = append(names, a.Name)
+		}
+		assert.Contains(t, names, "cm", "the applied object must still be tracked")
 	})
 
 	t.Run("collection", func(t *testing.T) {
 		t.Parallel()
 		cl := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
-		_, err := NewSimple(cl).Apply(context.Background(),
+		res, err := NewSimple(cl).Apply(context.Background(),
 			compileAndBuild(t, collectionCMGraph()),
 			failWatcher{err: errors.New("informer unavailable")})
 
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "collection watch")
+		require.NoError(t, err,
+			"a collection watch registration failure must not abort the apply")
+		assert.True(t, cmExists(t, cl, "cm-alpha"),
+			"collection items must still be applied even though the drift watch failed")
+		assert.True(t, cmExists(t, cl, "cm-beta"))
+		assert.Empty(t, res.Unresolved,
+			"a lost collection drift watch must not mark the node unresolved")
 	})
 }
 

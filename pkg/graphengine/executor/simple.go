@@ -36,6 +36,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	expv1alpha1 "github.com/kubernetes-sigs/kro/api/v1alpha1"
 	"github.com/kubernetes-sigs/kro/pkg/applyset"
@@ -81,6 +82,13 @@ type Simple struct {
 	// part-of label, so without this two Graphs templating the same object under
 	// the shared forced FieldManager would flip-flop its fields forever.
 	ConflictDetection bool
+	// CanWatch, when non-nil, gates drift-watch registration on whether the
+	// identity this executor applies under may watch the target GVR. Returns
+	// (false, nil) when not permitted (the watch is skipped, drift detection
+	// degraded), (true, nil) when permitted, or a non-nil error on an
+	// inconclusive check (treated as skip). Nil (RGD/instance path, controller
+	// identity) means no gate — every watch is attempted.
+	CanWatch func(ctx context.Context, gvr schema.GroupVersionResource, namespace string) (bool, error)
 	// nodePrefix qualifies node IDs with their enclosing subgraph path so
 	// identities stay unambiguous across frames that reuse the same local
 	// node ID (e.g. "res" declared inside both subgraph "subA" and "subB").
@@ -594,8 +602,12 @@ func (s *Simple) applyScalarTemplate(ctx context.Context, w watchrouter.Watcher,
 		if err := s.prepareItem(rt, n, obj, i, size, mappings[i]); err != nil {
 			return applied, err
 		}
-		if err := s.watchObject(w, s.qualifiedPath(n.ID()), mappings[i].gvr, obj); err != nil {
-			return applied, fmt.Errorf("register watch: %w", err)
+		if err := s.watchObject(ctx, w, s.qualifiedPath(n.ID()), mappings[i].gvr, obj); err != nil {
+			// A failure to register the drift watch must not abort the apply:
+			// the object is still applied, only drift re-enqueue is lost for it
+			// (the base pre-drift behavior). Log and continue.
+			log.FromContext(ctx).Info("drift watch registration failed; applying without drift detection for this node",
+				"node", s.qualifiedPath(n.ID()), "gvr", mappings[i].gvr.String(), "err", err.Error())
 		}
 
 		// Fetch the live object: a hard GET error aborts,
@@ -748,8 +760,12 @@ func (s *Simple) applyCollectionTemplate(ctx context.Context, w watchrouter.Watc
 	// namespaced watch is cheaper than an all-namespaces one, so this avoids
 	// the broad watch for the common single-namespace case.
 	ns := s.collectionWatchNamespace(rt, desired, mappings)
-	if err := s.watchCollection(w, rt, n, mappings[0].gvr, desired[0], ns); err != nil {
-		return []expv1alpha1.ManagedResource{}, fmt.Errorf("register collection watch: %w", err)
+	if err := s.watchCollection(ctx, w, rt, n, mappings[0].gvr, desired[0], ns); err != nil {
+		// A failure to register the collection drift watch must not abort the
+		// apply: the collection is still applied, only drift re-enqueue is lost
+		// for it. Log and continue.
+		log.FromContext(ctx).Info("collection drift watch registration failed; applying without drift detection for this node",
+			"node", s.qualifiedPath(n.ID()), "gvr", mappings[0].gvr.String(), "err", err.Error())
 	}
 
 	bound := defaultApplyConcurrency
@@ -965,8 +981,12 @@ func (s *Simple) applyRef(ctx context.Context, w watchrouter.Watcher, rt *runtim
 	// namespace" contract on ExternalRefMetadata.
 	s.defaultNamespace(rt, n.Namespaced(), ref)
 
-	if err := s.watchObject(w, s.qualifiedPath(n.ID()), n.GVR(), ref); err != nil {
-		return nil, fmt.Errorf("register watch: %w", err)
+	if err := s.watchObject(ctx, w, s.qualifiedPath(n.ID()), n.GVR(), ref); err != nil {
+		// A failure to register the drift watch must not abort the apply: the
+		// live object is still read and published below, only drift re-enqueue
+		// is lost. Log and continue.
+		log.FromContext(ctx).Info("drift watch registration failed; reading ref without drift detection",
+			"node", s.qualifiedPath(n.ID()), "gvr", n.GVR().String(), "err", err.Error())
 	}
 
 	live := &unstructured.Unstructured{}
@@ -1021,14 +1041,18 @@ func (s *Simple) applyRefCollection(ctx context.Context, w watchrouter.Watcher, 
 	// Register the selector watch BEFORE the list so a matching object that
 	// appears between the list and watch registration still re-enqueues the
 	// Graph. The watch is keyed by NodeID with the user's label selector.
-	if w != nil {
+	// A failure to register the watch (or a denied access review) must not
+	// abort: the collection is still listed and published below, only drift
+	// re-enqueue is lost. Log and continue.
+	if w != nil && !s.skipWatchForIdentity(ctx, n.GVR(), ns) {
 		if err := w.Watch(watchrouter.WatchRequest{
 			NodeID:    s.qualifiedPath(n.ID()),
 			GVR:       n.GVR(),
 			Namespace: ns,
 			Selector:  selector,
 		}); err != nil {
-			return nil, fmt.Errorf("register collection watch: %w", err)
+			log.FromContext(ctx).Info("external collection drift watch registration failed; reading without drift detection",
+				"node", s.qualifiedPath(n.ID()), "gvr", n.GVR().String(), "err", err.Error())
 		}
 	}
 
@@ -1155,8 +1179,16 @@ func (s *Simple) mappingFor(n *runtime.Node, obj *unstructured.Unstructured) (sc
 // dynamic controller re-enqueues the Graph when the resource changes out
 // from under us. Cluster-scoped resources are watched with Namespace="".
 // A nil watcher is treated as a Noop.
-func (s *Simple) watchObject(w watchrouter.Watcher, nodeID string, gvr schema.GroupVersionResource, obj *unstructured.Unstructured) error {
+//
+// When CanWatch is set (impersonated Graph path) it gates the registration on
+// whether the applying identity may watch the target GVR: a denied or
+// inconclusive check skips the watch (drift detection degraded for that GVR)
+// and returns nil so the caller still applies the object.
+func (s *Simple) watchObject(ctx context.Context, w watchrouter.Watcher, nodeID string, gvr schema.GroupVersionResource, obj *unstructured.Unstructured) error {
 	if w == nil {
+		return nil
+	}
+	if s.skipWatchForIdentity(ctx, gvr, obj.GetNamespace()) {
 		return nil
 	}
 	return w.Watch(watchrouter.WatchRequest{
@@ -1165,6 +1197,28 @@ func (s *Simple) watchObject(w watchrouter.Watcher, nodeID string, gvr schema.Gr
 		Name:      obj.GetName(),
 		Namespace: obj.GetNamespace(),
 	})
+}
+
+// skipWatchForIdentity reports whether the drift watch on gvr/namespace should
+// be skipped because CanWatch denies (or cannot confirm) that the applying
+// identity may watch it. Nil CanWatch (RGD/instance path) never skips. A denied
+// or inconclusive check logs that drift detection is degraded and returns true.
+func (s *Simple) skipWatchForIdentity(ctx context.Context, gvr schema.GroupVersionResource, namespace string) bool {
+	if s.CanWatch == nil {
+		return false
+	}
+	allowed, err := s.CanWatch(ctx, gvr, namespace)
+	if err != nil {
+		log.FromContext(ctx).Info("skipping drift watch: access review inconclusive; drift detection degraded for this GVR",
+			"gvr", gvr.String(), "namespace", namespace, "err", err.Error())
+		return true
+	}
+	if !allowed {
+		log.FromContext(ctx).Info("skipping drift watch: impersonated ServiceAccount may not watch this GVR; drift detection degraded",
+			"gvr", gvr.String(), "namespace", namespace)
+		return true
+	}
+	return false
 }
 
 // collectionWatchNamespace returns the namespace to scope a collection node's
@@ -1228,8 +1282,11 @@ func (s *Simple) collectionWatchNamespace(rt *runtime.Runtime, desired []*unstru
 // cheaper watch than the all-namespaces one; the broad watch is used only when
 // the collection genuinely needs it (see the "corrects drift ... in every
 // namespace the collection spans" integration test).
-func (s *Simple) watchCollection(w watchrouter.Watcher, rt *runtime.Runtime, n *runtime.Node, gvr schema.GroupVersionResource, sample *unstructured.Unstructured, ns string) error {
+func (s *Simple) watchCollection(ctx context.Context, w watchrouter.Watcher, rt *runtime.Runtime, n *runtime.Node, gvr schema.GroupVersionResource, sample *unstructured.Unstructured, ns string) error {
 	if w == nil {
+		return nil
+	}
+	if s.skipWatchForIdentity(ctx, gvr, ns) {
 		return nil
 	}
 	if s.LabelInjector != nil {
@@ -1303,8 +1360,12 @@ func (s *Simple) applyPatch(ctx context.Context, rt *runtime.Runtime, w watchrou
 
 	// Register the watch before the read so a change to the target (including
 	// its creation) re-enqueues the Graph.
-	if err := s.watchObject(w, s.qualifiedPath(n.ID()), gvr, obj); err != nil {
-		return Contribution{}, fmt.Errorf("register watch: %w", err)
+	if err := s.watchObject(ctx, w, s.qualifiedPath(n.ID()), gvr, obj); err != nil {
+		// A failure to register the drift watch must not abort the apply: the
+		// patch contribution below still lands, only drift re-enqueue is lost.
+		// Log and continue.
+		log.FromContext(ctx).Info("drift watch registration failed; applying patch without drift detection",
+			"node", s.qualifiedPath(n.ID()), "gvr", gvr.String(), "err", err.Error())
 	}
 
 	current, err := s.getLive(ctx, obj)

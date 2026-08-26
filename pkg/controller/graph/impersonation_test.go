@@ -15,11 +15,18 @@
 package graph
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	authorizationv1 "k8s.io/api/authorization/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	k8sfake "k8s.io/client-go/kubernetes/fake"
+	authorizationv1client "k8s.io/client-go/kubernetes/typed/authorization/v1"
+	clienttesting "k8s.io/client-go/testing"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -79,7 +86,7 @@ func TestExecutorFor_ImpersonationOverride(t *testing.T) {
 		Impersonation: NewImpersonation(base, func(user string) (client.Client, error) {
 			builtFor = append(builtFor, user)
 			return fake.NewClientBuilder().Build(), nil
-		}),
+		}, nil),
 	}
 
 	// Override ServiceAccount → impersonate system:serviceaccount:team-a:deployer.
@@ -114,7 +121,7 @@ func TestExecutorFor_DefaultServiceAccount(t *testing.T) {
 		Impersonation: NewImpersonation(base, func(user string) (client.Client, error) {
 			capturedUser = user
 			return fake.NewClientBuilder().Build(), nil
-		}),
+		}, nil),
 	}
 
 	_, err := r.executorFor(graphWithSA("team-a", ""))
@@ -132,4 +139,50 @@ func TestExecutorFor_NoImpersonationFallsBackToBase(t *testing.T) {
 	ex, err := r.executorFor(graphWithSA("team-a", "deployer"))
 	require.NoError(t, err)
 	assert.Same(t, base, ex, "without impersonation wired, must use the base executor unchanged")
+}
+
+// TestNewImpersonation_CanWatchBoundToIdentity verifies that when a newAuthz
+// factory is supplied, each shadow executor gets a CanWatch gate bound to that
+// impersonated identity, and that the gate returns the SelfSubjectAccessReview
+// decision for the target GVR/verb. This covers the wiring; the real SSAR round
+// trip is left to integration.
+func TestNewImpersonation_CanWatchBoundToIdentity(t *testing.T) {
+	base := executor.NewSimple(fake.NewClientBuilder().Build())
+
+	var authzUser string
+	imp := NewImpersonation(base,
+		func(string) (client.Client, error) { return fake.NewClientBuilder().Build(), nil },
+		func(user string) (authorizationv1client.AuthorizationV1Interface, error) {
+			authzUser = user
+			cs := k8sfake.NewSimpleClientset()
+			// Allow only "watch configmaps"; deny everything else.
+			cs.PrependReactor("create", "selfsubjectaccessreviews",
+				func(action clienttesting.Action) (bool, runtime.Object, error) {
+					ssar := action.(clienttesting.CreateAction).GetObject().(*authorizationv1.SelfSubjectAccessReview)
+					ra := ssar.Spec.ResourceAttributes
+					ssar.Status.Allowed = ra != nil && ra.Verb == "watch" && ra.Resource == "configmaps"
+					return true, ssar, nil
+				})
+			return cs.AuthorizationV1(), nil
+		})
+
+	r := &Reconciler{Executor: base, Impersonation: imp}
+	ex, err := r.executorFor(graphWithSA("team-a", "deployer"))
+	require.NoError(t, err)
+	assert.Equal(t, "system:serviceaccount:team-a:deployer", authzUser,
+		"the authz factory must be built for the impersonated identity")
+
+	shadow, ok := ex.(*executor.Simple)
+	require.True(t, ok, "the impersonated executor must be a *Simple")
+	require.NotNil(t, shadow.CanWatch, "a CanWatch gate must be bound when newAuthz is supplied")
+
+	allowed, err := shadow.CanWatch(context.Background(),
+		schema.GroupVersionResource{Version: "v1", Resource: "configmaps"}, "team-a")
+	require.NoError(t, err)
+	assert.True(t, allowed, "watching configmaps must be permitted for this identity")
+
+	allowed, err = shadow.CanWatch(context.Background(),
+		schema.GroupVersionResource{Group: "rbac.authorization.k8s.io", Version: "v1", Resource: "clusterrolebindings"}, "")
+	require.NoError(t, err)
+	assert.False(t, allowed, "watching a GVR the SA cannot read must be denied")
 }

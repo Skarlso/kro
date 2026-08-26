@@ -267,7 +267,7 @@ func TestWatchObject(t *testing.T) {
 				rec = &recordingWatcher{}
 				w = rec
 			}
-			err := (&Simple{}).watchObject(w, "n",
+			err := (&Simple{}).watchObject(context.Background(), w, "n",
 				schema.GroupVersionResource{Version: "v1", Resource: "configmaps"}, obj("cm"))
 			require.NoError(t, err)
 			if rec != nil {
@@ -300,7 +300,8 @@ func TestApplySubgraph_NilProgram(t *testing.T) {
 // TestApply_SoftAndWatchErrors covers the soft-error continuation paths in
 // Apply that the happy-path table doesn't reach: an includeWhen that
 // references not-yet-available data marks the node Unresolved and requeues,
-// and a watch-registration failure aborts the apply with a wrapped error.
+// and a watch-registration failure is soft (issue #17): the object is still
+// applied and the apply does not abort.
 func TestApply_SoftAndWatchErrors(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -331,19 +332,6 @@ func TestApply_SoftAndWatchErrors(t *testing.T) {
 			wantNotRdy: true,
 			unresolved: []string{"cm"},
 		},
-		{
-			name: "watch registration failure aborts apply with a wrapped error",
-			graph: generator.NewGraph("g",
-				generator.WithNamespace("default"),
-				generator.WithTemplate("cm", map[string]any{
-					"apiVersion": "v1", "kind": "ConfigMap",
-					"metadata": map[string]any{"name": "cm"},
-					"data":     map[string]any{"k": "v"},
-				}),
-			),
-			watcher: errWatcher{},
-			wantErr: "register watch",
-		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -366,12 +354,6 @@ func TestApply_SoftAndWatchErrors(t *testing.T) {
 		})
 	}
 }
-
-// errWatcher fails every Watch call so the registration error path is hit.
-type errWatcher struct{}
-
-func (errWatcher) Watch(watchrouter.WatchRequest) error { return assert.AnError }
-func (errWatcher) Done(bool)                            {}
 
 // nodeFromSpec materializes a runtime.Node for the given compiled spec by
 // constructing a one-node Runtime and fetching the wrapper back, since

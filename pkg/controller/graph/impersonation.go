@@ -24,9 +24,14 @@
 package graph
 
 import (
+	"context"
 	"fmt"
 	"sync"
 
+	authorizationv1 "k8s.io/api/authorization/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	authorizationv1client "k8s.io/client-go/kubernetes/typed/authorization/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	expv1alpha1 "github.com/kubernetes-sigs/kro/api/v1alpha1"
@@ -94,7 +99,20 @@ func (r *Reconciler) executorFor(g *expv1alpha1.Graph) (executor.Interface, erro
 // client.New over a rest.Config carrying rest.ImpersonationConfig); it is a
 // parameter so tests can supply an in-memory client instead of a real REST
 // stack.
-func NewImpersonation(base *executor.Simple, newClient func(user string) (client.Client, error)) *impersonationCache {
+//
+// newAuthz, when non-nil, builds an AuthorizationV1 client from the SAME
+// impersonated rest.Config so each shadow executor also gets a CanWatch gate
+// bound to that identity. CanWatch issues a SelfSubjectAccessReview (correct
+// because the config already impersonates the target ServiceAccount, so "self"
+// IS the Graph's SA) for verb=watch on the target GVR; a denied review skips
+// the drift watch so a Graph cannot make the controller open a watch on a GVR
+// its own SA may not read. newAuthz may be nil (tests / no authz stack), in
+// which case CanWatch is left nil and every watch is attempted.
+func NewImpersonation(
+	base *executor.Simple,
+	newClient func(user string) (client.Client, error),
+	newAuthz func(user string) (authorizationv1client.AuthorizationV1Interface, error),
+) *impersonationCache {
 	return &impersonationCache{
 		byUser: map[string]executor.Interface{},
 		newExec: func(user string) (executor.Interface, error) {
@@ -106,7 +124,39 @@ func NewImpersonation(base *executor.Simple, newClient func(user string) (client
 			// point the copy at the impersonated client.
 			shadow := *base
 			shadow.Client = cl
+			if newAuthz != nil {
+				authz, err := newAuthz(user)
+				if err != nil {
+					return nil, err
+				}
+				shadow.CanWatch = canWatchFor(authz)
+			}
 			return &shadow, nil
 		},
+	}
+}
+
+// canWatchFor builds a CanWatch gate that asks whether the identity behind authz
+// (already impersonating the Graph's ServiceAccount) may watch the target GVR,
+// via a SelfSubjectAccessReview. A review error is returned as-is so the caller
+// treats it as an inconclusive skip.
+func canWatchFor(authz authorizationv1client.AuthorizationV1Interface) func(context.Context, schema.GroupVersionResource, string) (bool, error) {
+	return func(ctx context.Context, gvr schema.GroupVersionResource, namespace string) (bool, error) {
+		ssar := &authorizationv1.SelfSubjectAccessReview{
+			Spec: authorizationv1.SelfSubjectAccessReviewSpec{
+				ResourceAttributes: &authorizationv1.ResourceAttributes{
+					Verb:      "watch",
+					Group:     gvr.Group,
+					Version:   gvr.Version,
+					Resource:  gvr.Resource,
+					Namespace: namespace,
+				},
+			},
+		}
+		resp, err := authz.SelfSubjectAccessReviews().Create(ctx, ssar, metav1.CreateOptions{})
+		if err != nil {
+			return false, err
+		}
+		return resp.Status.Allowed, nil
 	}
 }

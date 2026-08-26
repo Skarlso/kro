@@ -130,18 +130,21 @@ func TestSimple_ApplyRefCollection_ListFailureIsHard(t *testing.T) {
 	assert.False(t, errors.Is(err, ErrNotReady))
 }
 
-// The collection watch must be declared before the list, and a failure to
-// declare it aborts rather than proceeding with an unwatched collection.
-func TestSimple_ApplyRefCollection_WatchFailureIsHard(t *testing.T) {
+// A failure to declare the external-collection watch must NOT abort (issue
+// #17): the collection is still listed and published, only drift detection is
+// lost. Apply succeeds and the ref node is not marked unresolved.
+func TestSimple_ApplyRefCollection_WatchFailureIsSoftFail(t *testing.T) {
 	t.Parallel()
 	cl := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
 
-	_, err := NewSimple(cl).Apply(context.Background(),
+	res, err := NewSimple(cl).Apply(context.Background(),
 		compileAndBuild(t, selectorRefGraph()),
 		failWatcher{err: errors.New("informer unavailable")})
 
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "collection watch")
+	require.NoError(t, err,
+		"a collection watch registration failure must not abort the apply")
+	assert.NotContains(t, res.Unresolved, "pods",
+		"a lost external-collection drift watch must not mark the ref unresolved")
 }
 
 // A collection template registers ONE selector watch for the whole node rather
