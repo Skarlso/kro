@@ -151,11 +151,20 @@ func intendedManagedResources(rt *krotruntime.Runtime) []expv1alpha1.ManagedReso
 			if gvk.Kind == "" || obj.GetName() == "" {
 				continue
 			}
+			// Namespace-default exactly as the executor does before apply
+			// (defaultNamespace): a namespaced object with no explicit namespace
+			// lands in the Graph's namespace. Without this the intent entry
+			// (ns="") would not dedup against the applied entry (ns=graph) and
+			// the write-ahead would rewrite status every cycle.
+			ns := obj.GetNamespace()
+			if ns == "" && n.Namespaced() {
+				ns = rt.Graph().GetNamespace()
+			}
 			mr := expv1alpha1.ManagedResource{
 				NodeID:     n.ID(),
 				APIVersion: gvk.GroupVersion().String(),
 				Kind:       gvk.Kind,
-				Namespace:  obj.GetNamespace(),
+				Namespace:  ns,
 				Name:       obj.GetName(),
 			}
 			k := keyOf(mr)
