@@ -123,6 +123,12 @@ spec:
               value: {{ .Values.config.applyConcurrency | default 20 | quote }}
             - name: KRO_CEL_COST_LIMIT
               value: {{ .Values.config.celCostLimit | default 0 | quote }}
+            - name: KRO_CONTROLLER_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: KRO_CONTROLLER_SERVICE_ACCOUNT
+              value: {{ include "kro.serviceAccountName" . | quote }}
           {{- with .Values.deployment.extraEnv }}
             {{- toYaml . | nindent 12 }}
           {{- end }}
@@ -183,6 +189,10 @@ spec:
             - "$(KRO_APPLY_CONCURRENCY)"
             - --cel-cost-limit
             - "$(KRO_CEL_COST_LIMIT)"
+            - --controller-namespace
+            - "$(KRO_CONTROLLER_NAMESPACE)"
+            - --controller-service-account
+            - "$(KRO_CONTROLLER_SERVICE_ACCOUNT)"
             {{- if .Values.config.enableLeaderElection }}
             - --leader-elect
             {{- if ne .Values.config.leaderElectionNamespace "" }}

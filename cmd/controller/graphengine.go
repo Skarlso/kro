@@ -49,6 +49,7 @@ func setupGraphController(
 	concurrentReconciles int,
 	maxCollectionSize int,
 	applyConcurrency int,
+	controllerServiceAccount string,
 ) error {
 	router := watchrouter.NewRouter(logger.WithName("graph-watch-router"), watchrouter.Config{}, metaClient)
 	if err := mgr.Add(router); err != nil {
@@ -88,15 +89,16 @@ func setupGraphController(
 	})
 
 	reconciler := &ctrlgraph.Reconciler{
-		Client:                  mgr.GetClient(),
-		Compiler:                cmp,
-		Registry:                reg,
-		Executor:                exec,
-		Router:                  router,
-		SchemaWatcher:           sw,
-		MaxConcurrentReconciles: concurrentReconciles,
-		MaxCollectionSize:       maxCollectionSize,
-		Impersonation:           impersonation,
+		Client:                   mgr.GetClient(),
+		Compiler:                 cmp,
+		Registry:                 reg,
+		Executor:                 exec,
+		Router:                   router,
+		SchemaWatcher:            sw,
+		MaxConcurrentReconciles:  concurrentReconciles,
+		MaxCollectionSize:        maxCollectionSize,
+		Impersonation:            impersonation,
+		ControllerServiceAccount: controllerServiceAccount,
 	}
 	if err := reconciler.SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setup graph reconciler: %w", err)

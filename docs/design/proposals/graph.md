@@ -290,7 +290,7 @@ Reconciliation proceeds in topological order derived from hard dependency edges:
 1. **Compilation & Cache:** Compilation is cached in an in-memory `Registry` keyed by the Graph's `(namespace, name)` and validated against an FNV-64a hash of the normalized `GraphSpec`. A `SchemaWatcher` tracks the CRD GroupKinds required by the Graph (including dynamic GVK subscriptions); when a tracked CRD changes, the cache is invalidated and the Graph is re-enqueued for compilation against fresh schemas.
 2. **Evaluation & Scope:** A node evaluates as soon as its hard dependencies are in scope — meaning they have been applied and their observed state is available from the cluster. Nodes do not wait for upstream dependencies to pass `readyWhen`.
 3. **Application & Field Management:**
-   - `template:` nodes apply their desired manifest via Server-Side Apply (SSA). On the RGD/instance path the shared field manager `kro.run/applyset` is used with force ownership. On the standalone Graph path a per-Graph field manager `kro-graphengine.tmpl.<graph>.<node>` is used **without** force so the API server reports a field-level conflict: a field owned by a *peer Graph's* template manager is never stolen (the node is held soft not-ready), external drift (a human or another controller) is reclaimed with force, and a conflict with the *same* Graph's own manager (a sibling node) is exempted rather than reported as foreign.
+   - `template:` nodes apply their desired manifest via Server-Side Apply (SSA). On the RGD/instance path the shared field manager `kro.run/applyset` is used with force ownership. On the standalone Graph path a per-Graph field manager `kro-graphengine.tmpl.<graph>.<node>` is used **without** force so the API server reports a field-level conflict: a field owned by a _peer Graph's_ template manager is never stolen (the node is held soft not-ready), external drift (a human or another controller) is reclaimed with force, and a conflict with the _same_ Graph's own manager (a sibling node) is exempted rather than reported as foreign.
    - `patch:` nodes apply contributed fields under a dedicated per-node field manager (`kro-graphengine.patch.<graph>.<node>`) without force. A conflict with this Graph's own stale patch identity (a re-keyed node, or a legacy pre-segment manager) is force-reclaimed; a foreign or peer-Graph field is left as a soft conflict. On delete or prune, releasing the contribution applies an empty object under that manager to relinquish field ownership without deleting the target object.
 4. **Reconciliation Parallelism:** Within a single Graph, nodes evaluate serially in topological order; collection instances evaluate in bounded parallel (default ApplyConcurrency=20). Across Graphs, reconciliation is fully parallel via controller-runtime's work queue.
 
@@ -404,6 +404,18 @@ ServiceAccount. For this to take effect the **kro controller ServiceAccount must
 `impersonate` verb on `serviceaccounts`** (and, transitively, the ability to act as those accounts).
 Where impersonation is not wired (e.g. unit tests), the executor falls back to the controller
 identity.
+
+**Controller self-impersonation guard.** The one identity the namespace confinement does *not*
+naturally protect against is the kro controller's **own** ServiceAccount: a Graph created in the
+controller's namespace could name the controller SA (or its `default` could resolve to it) and thereby
+apply resources under the controller's own broad identity — turning `create graphs` in that namespace
+into an escalation to the controller's privileges. The controller therefore knows its own identity
+(via `--controller-namespace`/`--controller-service-account`, wired from the downward API and the
+ServiceAccount name in the Helm chart) and **refuses** any Graph whose resolved impersonation username
+equals it, marking the Graph `Accepted=False` (reason `InvalidGraph`) before compile or apply. This
+guard covers only the controller's *own* SA; any *other* privileged ServiceAccount reachable in a
+namespace remains the operator's responsibility to scope via RBAC (and, if desired, by restricting the
+controller's `impersonate` grant with `resourceNames`).
 
 Because `Graph` is a privileged, user-creatable kind, it must **not** be aggregated into the built-in
 Kubernetes user roles (`edit`, `admin`, `view`). Access to create or manage `Graph` resources must be

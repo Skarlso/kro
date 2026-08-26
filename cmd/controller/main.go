@@ -16,6 +16,7 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"os"
 	"strings"
 	"time"
@@ -99,6 +100,8 @@ func main() {
 		leaderElectionRenewDeadline   time.Duration
 		leaderElectionRetryPeriod     time.Duration
 		featureGatesFlag              string
+		controllerNamespace           string
+		controllerServiceAccount      string
 	)
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8078", "The address the metric endpoint binds to.")
@@ -192,6 +195,13 @@ func main() {
 		Development: true,
 	}
 	opts.BindFlags(flag.CommandLine)
+
+	flag.StringVar(&controllerNamespace, "controller-namespace", "",
+		"The namespace the kro controller runs in (from the downward API). Used with "+
+			"--controller-service-account to refuse a Graph that would impersonate kro's own ServiceAccount.")
+	flag.StringVar(&controllerServiceAccount, "controller-service-account", "",
+		"The name of the kro controller's own ServiceAccount. Used with --controller-namespace "+
+			"to refuse a Graph that would impersonate kro's own (privileged) identity.")
 
 	flag.Parse()
 
@@ -336,6 +346,13 @@ func main() {
 	// it never starts in existing deployments unless explicitly enabled.
 	if features.FeatureGate.Enabled(features.GraphKind) {
 		setupLog.Info("GraphKind feature enabled; starting Graph controller")
+		// Compose kro's own impersonation identity so the Graph controller can
+		// refuse a Graph that would impersonate it. Empty when the deployment
+		// doesn't supply both parts (e.g. local runs) — the guard is then a no-op.
+		var controllerSA string
+		if controllerNamespace != "" && controllerServiceAccount != "" {
+			controllerSA = fmt.Sprintf("system:serviceaccount:%s:%s", controllerNamespace, controllerServiceAccount)
+		}
 		if err := setupGraphController(
 			mgr,
 			geCmp,
@@ -344,6 +361,7 @@ func main() {
 			graphConcurrentReconciles,
 			rgdMaxCollectionSize,
 			applyConcurrency,
+			controllerSA,
 		); err != nil {
 			setupLog.Error(err, "unable to set up Graph controller")
 			os.Exit(1)

@@ -423,6 +423,96 @@ func TestReconcile(t *testing.T) {
 	}
 }
 
+func TestReconcile_RefusesControllerSelfImpersonation(t *testing.T) {
+	t.Parallel()
+	// A Graph in the controller's namespace naming the controller's own SA
+	// (or whose default resolves to it) must be refused before compile/apply,
+	// or `create graphs` there escalates to the controller's privileges.
+	const controllerNS = "kro-system"
+	const controllerSA = "system:serviceaccount:kro-system:kro-controller"
+
+	cases := []struct {
+		name         string
+		graphNS      string
+		saName       string // spec.serviceAccountName ("" = namespace default)
+		controllerSA string // Reconciler.ControllerServiceAccount ("" = guard off)
+		wantRefused  bool
+	}{
+		{
+			name:         "names the controller SA in the controller namespace is refused",
+			graphNS:      controllerNS,
+			saName:       "kro-controller",
+			controllerSA: controllerSA,
+			wantRefused:  true,
+		},
+		{
+			name:         "a different SA in the controller namespace is allowed",
+			graphNS:      controllerNS,
+			saName:       "tenant-deployer",
+			controllerSA: controllerSA,
+			wantRefused:  false,
+		},
+		{
+			name:         "the controller SA name in a DIFFERENT namespace is allowed",
+			graphNS:      "team-a",
+			saName:       "kro-controller",
+			controllerSA: controllerSA,
+			wantRefused:  false,
+		},
+		{
+			name:         "guard is a no-op when ControllerServiceAccount is unset",
+			graphNS:      controllerNS,
+			saName:       "kro-controller",
+			controllerSA: "",
+			wantRefused:  false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			g := &expv1alpha1.Graph{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "g",
+					Namespace:  tc.graphNS,
+					Generation: 1,
+					Finalizers: []string{metadata.GraphFinalizer},
+				},
+				Spec: expv1alpha1.GraphSpec{
+					ServiceAccountName: tc.saName,
+					Nodes:              []expv1alpha1.Node{{ID: "n"}},
+				},
+			}
+			cl := newClient(t, g)
+			fc := &fakeCompiler{program: &compiler.Program{Nodes: map[string]*compiler.Node{"n": {}}}}
+			r := &Reconciler{
+				Client:                   cl,
+				Compiler:                 fc,
+				Registry:                 registry.New(),
+				Executor:                 &fakeExecutor{},
+				ControllerServiceAccount: tc.controllerSA,
+			}
+			req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: tc.graphNS, Name: "g"}}
+			_, err := r.Reconcile(context.Background(), req)
+			require.NoError(t, err)
+
+			got := &expv1alpha1.Graph{}
+			require.NoError(t, cl.Get(context.Background(), req.NamespacedName, got))
+			acc := findCondition(got.Status.Conditions, GraphAccepted)
+			require.NotNil(t, acc)
+			if tc.wantRefused {
+				assert.Equal(t, metav1.ConditionFalse, acc.Status, "refused Graph must be Accepted=False")
+				require.NotNil(t, acc.Reason)
+				assert.Equal(t, "InvalidGraph", *acc.Reason)
+				require.NotNil(t, acc.Message)
+				assert.Contains(t, *acc.Message, "impersonate the kro controller's own ServiceAccount")
+				assert.Equal(t, 0, fc.calls, "refused Graph must never reach compile")
+			} else {
+				assert.Equal(t, metav1.ConditionTrue, acc.Status, "allowed Graph must be Accepted=True")
+			}
+		})
+	}
+}
+
 func TestReconcile_RecoversFromCompileError(t *testing.T) {
 	// Multi-pass behavior is awkward to express in the main table because
 	// the fake compiler's state has to flip between calls. The cache means

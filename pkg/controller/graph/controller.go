@@ -84,6 +84,15 @@ type Reconciler struct {
 	// controller identity (the base Executor).
 	Impersonation *impersonationCache
 
+	// ControllerServiceAccount is the impersonation username of kro's OWN
+	// ServiceAccount ("system:serviceaccount:<ns>:<name>"), used to refuse a
+	// Graph that would impersonate the controller's own (privileged) identity
+	// — otherwise `create graphs` in the controller's namespace escalates to
+	// whatever the controller SA can do. Empty when not wired (unit tests /
+	// impersonation disabled), in which case the guard is a no-op. Any OTHER
+	// privileged SA reachable in a namespace is the operator's RBAC concern.
+	ControllerServiceAccount string
+
 	// backoff tracks per-Graph consecutive not-ready attempts so the soft
 	// ErrNotReady requeue delay grows (capped) instead of polling a
 	// never-resolving reference once per second forever. Lazily initialized
@@ -208,6 +217,20 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 func (r *Reconciler) reconcileGraph(ctx context.Context, g *expv1alpha1.Graph) error {
 	marker := NewConditionsMarkerFor(g)
 	key := client.ObjectKeyFromObject(g)
+
+	// Refuse a Graph that would impersonate the controller's OWN ServiceAccount.
+	// Because the SA is always resolved in the Graph's own namespace, this can
+	// only match a Graph in the controller's namespace naming the controller SA
+	// (or its default) — which would let `create graphs` there escalate to the
+	// controller's privileges. Reject before compile/apply and never requeue as
+	// an error: this is a permanent config problem the author must fix.
+	if r.impersonatesControllerSelf(g) {
+		marker.GraphInvalid(fmt.Sprintf(
+			"refusing to apply: Graph would impersonate the kro controller's own ServiceAccount (%q); "+
+				"choose a different serviceAccountName or move the Graph out of the controller's namespace",
+			r.ControllerServiceAccount))
+		return nil
+	}
 
 	// Declare this Graph's schema dependencies from the parsed spec before
 	// compilation. This ensures that even if Compile fails (e.g. because a
@@ -616,6 +639,16 @@ func (r *Reconciler) updateStatus(ctx context.Context, g *expv1alpha1.Graph) err
 			"managedResources", len(dc.Status.ManagedResources))
 		return r.Client.Status().Patch(ctx, dc, client.MergeFrom(current))
 	})
+}
+
+// impersonatesControllerSelf reports whether g would apply its resources under
+// the kro controller's OWN ServiceAccount identity. Guards the escalation where
+// a Graph in the controller's namespace names the controller SA (or the
+// namespace default resolves to it). A no-op when ControllerServiceAccount is
+// unset (impersonation disabled / unit tests).
+func (r *Reconciler) impersonatesControllerSelf(g *expv1alpha1.Graph) bool {
+	return r.ControllerServiceAccount != "" &&
+		serviceAccountUsername(g) == r.ControllerServiceAccount
 }
 
 // persistManagedResources flushes ONLY g.Status.ManagedResources (retry on
