@@ -71,7 +71,9 @@ type impersonationCache struct {
 func (r *Reconciler) executorFor(g *expv1alpha1.Graph) (executor.Interface, error) {
 	if r.Impersonation == nil || r.Impersonation.newExec == nil {
 		// Impersonation not wired (e.g. unit tests): fall back to the base
-		// executor and the kro controller identity.
+		// executor and the kro controller identity. Only reachable when
+		// RequireImpersonation is false — reconcileGraph refuses the Graph
+		// before this point when impersonation is required but not wired.
 		return r.Executor, nil
 	}
 

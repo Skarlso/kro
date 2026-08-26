@@ -112,6 +112,7 @@ func setupGraphController(
 		MaxConcurrentReconciles:  concurrentReconciles,
 		MaxCollectionSize:        maxCollectionSize,
 		Impersonation:            impersonation,
+		RequireImpersonation:     true,
 		ControllerServiceAccount: controllerServiceAccount,
 	}
 	if err := reconciler.SetupWithManager(mgr); err != nil {

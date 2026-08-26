@@ -26,7 +26,12 @@ import (
 	"sync"
 	"time"
 
+	rbacv1 "k8s.io/api/rbac/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
+	authorizationv1client "k8s.io/client-go/kubernetes/typed/authorization/v1"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -172,6 +177,10 @@ func New(ctx context.Context, controllerConfig ControllerConfig) (_ *Environment
 	}
 
 	// Setup and start controller
+	if err := env.grantImpersonatedServiceAccounts(); err != nil {
+		retErr = fmt.Errorf("granting impersonated service accounts: %w", err)
+		return nil, retErr
+	}
 	if err := env.setupController(); err != nil {
 		retErr = fmt.Errorf("setting up controller: %w", err)
 		return nil, retErr
@@ -254,6 +263,36 @@ func (e *Environment) initializeClients() error {
 		return fmt.Errorf("creating graph builder: %w", err)
 	}
 
+	return nil
+}
+
+// grantImpersonatedServiceAccounts binds cluster-admin to every ServiceAccount
+// (the system:serviceaccounts group) on the shared envtest control plane. That
+// control plane runs with authorization-mode=RBAC (the controller-runtime
+// default), so without this every Graph applied under its impersonated
+// ServiceAccount would be denied and every existing Graph suite would break.
+// This grant makes each impersonated SA effectively-allow — reproducing the
+// permissive behavior the suites assume WITHOUT changing the apiserver's
+// authorization mode — so the real impersonated apply/watch/teardown path is
+// exercised while Graph behavior stays unchanged. RBAC-confinement proof lives
+// in its own dedicated envtest, not here.
+func (e *Environment) grantImpersonatedServiceAccounts() error {
+	crb := &rbacv1.ClusterRoleBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: "kro-integration-impersonated-sa-admin"},
+		RoleRef: rbacv1.RoleRef{
+			APIGroup: rbacv1.GroupName,
+			Kind:     "ClusterRole",
+			Name:     "cluster-admin",
+		},
+		Subjects: []rbacv1.Subject{{
+			Kind:     rbacv1.GroupKind,
+			APIGroup: rbacv1.GroupName,
+			Name:     "system:serviceaccounts",
+		}},
+	}
+	if err := e.Client.Create(e.context, crb); err != nil && !apierrors.IsAlreadyExists(err) {
+		return err
+	}
 	return nil
 }
 
@@ -371,6 +410,32 @@ func (e *Environment) setupController() error {
 		// the same object from flip-flopping its fields.
 		exec.ConflictDetection = true
 
+		// Mirror production (cmd/controller/graphengine.go): a namespaced Graph
+		// applies its resources while impersonating a ServiceAccount in the
+		// Graph's namespace. Wiring this here exercises the real impersonated
+		// client construction, the SelfSubjectAccessReview CanWatch gate, per-SA
+		// executor caching, and teardown-under-impersonation. The shared envtest
+		// apiserver enforces RBAC (controller-runtime's default), so the
+		// impersonated SAs are granted cluster-admin up front (see
+		// grantImpersonatedServiceAccounts) — that keeps Graph behavior unchanged
+		// (the SA can do everything) while still running the impersonated path.
+		// RBAC-confinement is proven separately in a dedicated envtest.
+		baseCfg := e.CtrlManager.GetConfig()
+		mapper := e.CtrlManager.GetRESTMapper()
+		impersonation := ctrlgraph.NewImpersonation(exec, func(user string) (client.Client, error) {
+			cfg := rest.CopyConfig(baseCfg)
+			cfg.Impersonate = rest.ImpersonationConfig{UserName: user}
+			return client.New(cfg, client.Options{Mapper: mapper})
+		}, func(user string) (authorizationv1client.AuthorizationV1Interface, error) {
+			cfg := rest.CopyConfig(baseCfg)
+			cfg.Impersonate = rest.ImpersonationConfig{UserName: user}
+			cs, err := kubernetes.NewForConfig(cfg)
+			if err != nil {
+				return nil, err
+			}
+			return cs.AuthorizationV1(), nil
+		})
+
 		graphReconciler := &ctrlgraph.Reconciler{
 			Client:                  e.CtrlManager.GetClient(),
 			Compiler:                geCmp,
@@ -380,6 +445,8 @@ func (e *Environment) setupController() error {
 			SchemaWatcher:           sw,
 			MaxConcurrentReconciles: 40,
 			MaxCollectionSize:       1000,
+			Impersonation:           impersonation,
+			RequireImpersonation:    true,
 		}
 		if err := graphReconciler.SetupWithManager(e.CtrlManager); err != nil {
 			return fmt.Errorf("setting up graph reconciler: %w", err)

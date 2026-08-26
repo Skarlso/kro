@@ -84,6 +84,15 @@ type Reconciler struct {
 	// controller identity (the base Executor).
 	Impersonation *impersonationCache
 
+	// RequireImpersonation makes the Graph path fail closed: when true, a Graph
+	// reconcile MUST have a working impersonation path (Impersonation and its
+	// executor factory wired). If it is not, the Graph is refused rather than
+	// silently applied under the kro controller's own (broad) identity — a
+	// wiring regression fails safe instead of escalating. Production sets this
+	// true; unit tests that construct a Reconciler with only an Executor leave
+	// it false to keep the base-executor fallback (see executorFor).
+	RequireImpersonation bool
+
 	// ControllerServiceAccount is the impersonation username of kro's OWN
 	// ServiceAccount ("system:serviceaccount:<ns>:<name>"), used to refuse a
 	// Graph that would impersonate the controller's own (privileged) identity
@@ -229,6 +238,18 @@ func (r *Reconciler) reconcileGraph(ctx context.Context, g *expv1alpha1.Graph) e
 			"refusing to apply: Graph would impersonate the kro controller's own ServiceAccount (%q); "+
 				"choose a different serviceAccountName or move the Graph out of the controller's namespace",
 			r.ControllerServiceAccount))
+		return nil
+	}
+
+	// Fail closed: when impersonation is required (production) but not wired,
+	// refuse to apply rather than falling back to the kro controller's own
+	// (broad) identity. This turns a wiring regression into a visible, non-
+	// escalating failure. Never requeue as an error: it is a permanent
+	// controller misconfiguration an operator must fix.
+	if r.RequireImpersonation && (r.Impersonation == nil || r.Impersonation.newExec == nil) {
+		marker.ResourcesApplyFailed(
+			"refusing to apply: impersonation is required but not configured; " +
+				"the Graph controller must be wired with an impersonation path")
 		return nil
 	}
 

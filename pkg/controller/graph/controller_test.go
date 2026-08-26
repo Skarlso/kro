@@ -513,6 +513,70 @@ func TestReconcile_RefusesControllerSelfImpersonation(t *testing.T) {
 	}
 }
 
+func TestReconcile_RequireImpersonation(t *testing.T) {
+	t.Parallel()
+	// When RequireImpersonation is true but no impersonation path is wired, the
+	// Graph must be refused before compile/apply rather than silently applied
+	// under the kro controller identity (fail closed). When it is false (the
+	// unit-test default), the base Executor still applies the Graph.
+	cases := []struct {
+		name                 string
+		requireImpersonation bool
+		wantApplied          bool // did the Graph reach compile + a clean apply?
+	}{
+		{
+			name:                 "required but not wired refuses to apply",
+			requireImpersonation: true,
+			wantApplied:          false,
+		},
+		{
+			name:                 "not required falls back to the base executor",
+			requireImpersonation: false,
+			wantApplied:          true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			g := graph("g", withFinalizer)
+			cl := newClient(t, g)
+			fc := &fakeCompiler{program: &compiler.Program{Nodes: map[string]*compiler.Node{"n": {}}}}
+			r := &Reconciler{
+				Client:               cl,
+				Compiler:             fc,
+				Registry:             registry.New(),
+				Executor:             &fakeExecutor{},
+				Impersonation:        nil, // no impersonation path wired
+				RequireImpersonation: tc.requireImpersonation,
+			}
+			req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: "g"}}
+			_, err := r.Reconcile(context.Background(), req)
+			require.NoError(t, err, "a controller misconfiguration must not requeue as an error")
+
+			got := &expv1alpha1.Graph{}
+			require.NoError(t, cl.Get(context.Background(), req.NamespacedName, got))
+			ready := findCondition(got.Status.Conditions, Ready)
+			require.NotNil(t, ready)
+
+			if tc.wantApplied {
+				assert.Equal(t, metav1.ConditionTrue, ready.Status, "fallback apply must reach Ready=True")
+				assert.Equal(t, 1, fc.calls, "fallback path must compile the Graph")
+				return
+			}
+
+			assert.Equal(t, metav1.ConditionFalse, ready.Status, "refused Graph must not be Ready")
+			rc := findCondition(got.Status.Conditions, ResourcesConverged)
+			require.NotNil(t, rc)
+			assert.Equal(t, metav1.ConditionFalse, rc.Status)
+			require.NotNil(t, rc.Reason)
+			assert.Equal(t, "ApplyFailed", *rc.Reason)
+			require.NotNil(t, rc.Message)
+			assert.Contains(t, *rc.Message, "impersonation is required but not configured")
+			assert.Equal(t, 0, fc.calls, "refused Graph must never reach compile")
+		})
+	}
+}
+
 func TestReconcile_RecoversFromCompileError(t *testing.T) {
 	// Multi-pass behavior is awkward to express in the main table because
 	// the fake compiler's state has to flip between calls. The cache means
