@@ -238,7 +238,13 @@ func (c *Controller) reconcileViaGraphEngine(
 	// 2. Post-apply ApplySet prune & exact-batch shrink.
 	// Only when the desired set is fully resolved and apply had no hard error do we prune
 	// resources that left the desired set, then shrink the inventory to the exact current set.
-	fullyResolved := pruneGate(hardErr, applyResult.Unresolved)
+	//
+	// The veto set is narrowed to nodes that actually OWN managed resources
+	// (see ownedUnresolved): an ownerless node (synthesized status patch, any
+	// patch, ref, or def node) must never block pruning of resources owned by
+	// other nodes, or it would indefinitely veto a legitimate deletion.
+	owningUnresolved := ownedUnresolved(rt, applyResult.Unresolved)
+	fullyResolved := pruneGate(hardErr, owningUnresolved)
 	if invErr := c.reconcileApplySetInventory(ctx, log, inst, applier, applyResult.Applied, supersetMeta, fullyResolved); invErr != nil {
 		log.Error(invErr, "graph-engine: ApplySet inventory/prune failed")
 		if applyErr == nil {
@@ -290,6 +296,34 @@ func (c *Controller) delayedRequeue(err error) error {
 // (removing either clause is caught by TestPruneGate).
 func pruneGate(hardErr bool, unresolved []string) bool {
 	return !hardErr && len(unresolved) == 0
+}
+
+// ownedUnresolved narrows an ApplyResult.Unresolved list to the nodes that OWN
+// managed resources — template nodes (renders land in Applied) and subgraph
+// nodes (aggregate their children's Applied entries). Patch nodes (incl. the
+// synthesized status writeback), ref nodes, and def nodes own nothing, so their
+// being Unresolved must not veto pruning of other nodes' resources. This is the
+// veto set fed to pruneGate. A NodeID that can't be resolved back to a node
+// (e.g. a prefixed subgraph child ID) is conservatively treated as OWNING.
+func ownedUnresolved(rt *geruntime.Runtime, unresolved []string) []string {
+	if len(unresolved) == 0 {
+		return unresolved
+	}
+	owning := make([]string, 0, len(unresolved))
+	for _, id := range unresolved {
+		n := rt.Node(id)
+		if n == nil {
+			// Unclassifiable (e.g. a subgraph-prefixed child ID): keep it in
+			// the veto set rather than risk pruning a still-wanted resource.
+			owning = append(owning, id)
+			continue
+		}
+		switch n.Kind() {
+		case compiler.NodeKindTemplate, compiler.NodeKindGraph:
+			owning = append(owning, id)
+		}
+	}
+	return owning
 }
 
 // requeueUntilRGDSpecPopulated handles a revision entry with no RGDSpec. There
@@ -466,6 +500,17 @@ func (c *Controller) candidateMetadata(rt *geruntime.Runtime, inst *unstructured
 
 	for _, n := range rt.Nodes() {
 		if n.Kind() != compiler.NodeKindTemplate {
+			continue
+		}
+
+		// A node skipped this reconcile (includeWhen:false, or contagiously
+		// ignored) contributes no resource, so it must not seed its GroupKind
+		// into the pre-apply inventory superset — reconcileApplySetInventory
+		// would then align the inventory down and remove it every cycle, a write
+		// that re-enqueues the instance and fights the pre-apply writer forever.
+		// On an IsIgnored error we can't decide, so keep the node (holding the
+		// inventory steady is the safe direction).
+		if ignored, err := n.IsIgnored(); err == nil && ignored {
 			continue
 		}
 

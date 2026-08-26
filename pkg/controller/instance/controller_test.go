@@ -34,6 +34,8 @@ import (
 	"github.com/kubernetes-sigs/kro/api/v1alpha1"
 	"github.com/kubernetes-sigs/kro/pkg/controller/instance/applyset"
 	"github.com/kubernetes-sigs/kro/pkg/graph/revisions"
+	"github.com/kubernetes-sigs/kro/pkg/graphengine/compiler"
+	"github.com/kubernetes-sigs/kro/pkg/graphengine/rgdadapter"
 	"github.com/kubernetes-sigs/kro/pkg/metadata"
 	"github.com/kubernetes-sigs/kro/pkg/requeue"
 )
@@ -240,6 +242,92 @@ func TestPruneGate(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestOwnedUnresolved is the FINDING 2 regression: the prune gate must be
+// vetoed only by UNRESOLVED nodes that actually OWN managed resources. An
+// ownerless node — the synthesized `instance` status patch node, any other
+// patch node, a read-only ref node, or a def node — owns no cluster resource,
+// so its being Unresolved must NOT block pruning of resources owned by OTHER
+// nodes. ownedUnresolved is the filter applied to ApplyResult.Unresolved before
+// it reaches pruneGate.
+//
+// Before the fix (pruneGate fed the raw Unresolved set) an unresolved ownerless
+// node vetoes every prune and a resource removed from the RGD is never deleted;
+// after the fix ownedUnresolved drops it and pruning proceeds.
+func TestOwnedUnresolved(t *testing.T) {
+	comp := newTestRealCompiler(t)
+	inst := newInstanceObject("demo", "default")
+
+	// RGD with a template resource (owns a ConfigMap) AND a read-only
+	// externalRef resource (a ref node, which owns nothing — kro never applies
+	// or prunes it). Both target the ConfigMap kind, which the fake resolver
+	// knows, so the runtime compiles without a synthesized instance schema.
+	rgd := &v1alpha1.ResourceGraphDefinition{
+		ObjectMeta: metav1.ObjectMeta{Name: "webapp"},
+		Spec: v1alpha1.ResourceGraphDefinitionSpec{
+			Schema: &v1alpha1.Schema{
+				APIVersion: "v1alpha1",
+				Kind:       "WebApp",
+				Group:      "kro.run",
+				Spec:       apimachineryruntime.RawExtension{Raw: []byte(`{}`)},
+			},
+			Resources: []*v1alpha1.Resource{
+				{
+					ID: "cm",
+					Template: apimachineryruntime.RawExtension{
+						Raw: []byte(`{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"cm-1"}}`),
+					},
+				},
+				{
+					ID: "existing",
+					ExternalRef: &v1alpha1.ExternalRef{
+						APIVersion: "v1",
+						Kind:       "ConfigMap",
+						Metadata:   v1alpha1.ExternalRefMetadata{Name: "imported", Namespace: "default"},
+					},
+				},
+			},
+		},
+	}
+	rt, _, err := rgdadapter.BuildRuntimeForInstance(rgd, inst, comp)
+	require.NoError(t, err)
+
+	// Sanity: the runtime carries both an owning template node ("cm") and the
+	// ownerless read-only ref node ("existing").
+	cmNode := rt.Node("cm")
+	require.NotNil(t, cmNode, "template node must exist")
+	require.Equal(t, compiler.NodeKindTemplate, cmNode.Kind(), "cm is an owning template node")
+	refNode := rt.Node("existing")
+	require.NotNil(t, refNode, "externalRef node must exist")
+	require.Equal(t, compiler.NodeKindRef, refNode.Kind(), "externalRef compiles to an ownerless ref node")
+
+	t.Run("ownerless ref node is dropped from the veto set", func(t *testing.T) {
+		// Only the ownerless ref node is unresolved: prune must still be allowed.
+		owning := ownedUnresolved(rt, []string{"existing"})
+		assert.Empty(t, owning, "ownerless ref node must not veto pruning")
+		assert.True(t, pruneGate(false, owning), "prune must proceed when only ownerless nodes are unresolved")
+	})
+
+	t.Run("owning template node still vetoes", func(t *testing.T) {
+		owning := ownedUnresolved(rt, []string{"cm"})
+		assert.Equal(t, []string{"cm"}, owning, "an unresolved owning template node must remain in the veto set")
+		assert.False(t, pruneGate(false, owning), "prune must be withheld when an owning node is unresolved")
+	})
+
+	t.Run("mixed set keeps only owning nodes", func(t *testing.T) {
+		owning := ownedUnresolved(rt, []string{"existing", "cm"})
+		assert.Equal(t, []string{"cm"}, owning, "only the owning node survives the filter")
+		assert.False(t, pruneGate(false, owning))
+	})
+
+	t.Run("unknown node id is conservatively kept", func(t *testing.T) {
+		// A NodeID that cannot be resolved back to a node (e.g. a prefixed
+		// subgraph child ID) is treated as owning so pruning is never widened
+		// on an unclassifiable id.
+		owning := ownedUnresolved(rt, []string{"sub.child"})
+		assert.Equal(t, []string{"sub.child"}, owning, "unclassifiable node id must remain in the veto set")
+	})
 }
 
 // TestReconcile_EmitsInitialConditionEventsOnFirstReconcile asserts that on the

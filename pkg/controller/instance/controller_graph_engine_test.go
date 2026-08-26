@@ -1045,6 +1045,64 @@ func TestReconcileViaGraphEngine_HardErrorsAndInventory(t *testing.T) {
 		assert.Error(t, err, "orphan-cm should be deleted")
 	})
 
+	// FINDING 2 regression (end-to-end): an UNRESOLVED node that owns no managed
+	// resource must not veto pruning of resources owned by OTHER nodes. Here an
+	// externalRef (a read-only ref node) points at an absent object, so it stays
+	// unresolved every cycle. A Deployment orphan — owned by a template node no
+	// longer in the graph — must still be pruned. Before the fix (pruneGate fed
+	// the raw Unresolved set) the ownerless ref vetoes every prune and the orphan
+	// survives forever; after the fix ownedUnresolved drops it and the orphan is
+	// deleted.
+	t.Run("unresolved ownerless ref node does not veto pruning of another node's orphan", func(t *testing.T) {
+		inst := newInstanceObject("demo", "default")
+		addDeletionScope(inst, controllerTestDeployGVK, "default")
+
+		orphanDeploy := newManagedObject(newDeploymentObject("orphan-deploy", "default"), inst, "deploy", 1)
+
+		raw := newControllerTestDynamicClient(t, inst.DeepCopy(), orphanDeploy)
+		fakeRuntimeCl := newFakeRuntimeClient(t)
+
+		// Graph: one owning ConfigMap template + one externalRef to an ABSENT
+		// ConfigMap. The ref node owns nothing and stays Unresolved (target not
+		// found), while the Deployment orphan is no longer produced by any node.
+		spec := &v1alpha1.ResourceGraphDefinitionSpec{
+			Schema: &v1alpha1.Schema{
+				APIVersion: "v1alpha1",
+				Kind:       "WebApp",
+				Group:      "kro.run",
+				Spec:       apimachineryruntime.RawExtension{Raw: []byte(`{}`)},
+			},
+			Resources: []*v1alpha1.Resource{
+				{
+					ID: "cm",
+					Template: apimachineryruntime.RawExtension{
+						Raw: []byte(`{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"cm-1","namespace":"default"}}`),
+					},
+				},
+				{
+					ID: "existing",
+					ExternalRef: &v1alpha1.ExternalRef{
+						APIVersion: "v1",
+						Kind:       "ConfigMap",
+						Metadata:   v1alpha1.ExternalRefMetadata{Name: "absent-cm", Namespace: "default"},
+					},
+				},
+			},
+		}
+		c, _ := newGraphEngineControllerUnderTest(t, raw, spec, revisions.RevisionStateActive, comp, fakeRuntimeCl)
+
+		watcher := &fakeInstanceWatcher{}
+		// The absent externalRef holds the instance not-ready (soft requeue), but
+		// pruning of the unrelated orphan must proceed on this same cycle.
+		err := c.reconcileViaGraphEngine(context.Background(), inst, watcher)
+		if err != nil {
+			assert.True(t, requeue.IsRequeueError(err), "absent externalRef should only soft-requeue, got %v", err)
+		}
+
+		_, getErr := raw.Tracker().Get(controllerTestDeployGVR, "default", "orphan-deploy")
+		assert.Error(t, getErr, "orphan-deploy owned by a removed template node must be pruned despite the unresolved ownerless ref node")
+	})
+
 	t.Run("ApplySet orphan pruning with UID conflict preserves inventory", func(t *testing.T) {
 		inst := newInstanceObject("demo", "default")
 		addDeletionScope(inst, controllerTestDeployGVK, "default")
@@ -1215,6 +1273,60 @@ func TestCandidateMetadata(t *testing.T) {
 	meta := c.candidateMetadata(rt, inst)
 	assert.True(t, meta.GroupKinds.Has(schema.GroupKind{Group: "", Kind: "ConfigMap"}))
 	assert.True(t, meta.AdditionalNamespaces.Has("custom-ns"))
+}
+
+// TestCandidateMetadata_SkipsIgnoredNodes is the FINDING 1 regression: a
+// template node skipped this reconcile (includeWhen evaluates to false) must
+// NOT contribute its GroupKind to the pre-apply inventory superset. If it did,
+// reconcileApplySetInventory would align the inventory DOWN to the exact
+// applied batch (which excludes the skipped node), removing the GroupKind on
+// every cycle — a watch-event write that re-enqueues the instance and fights
+// the pre-apply writer in a permanent loop (~20 writes/sec observed).
+//
+// Before the fix (candidateMetadata not checking IsIgnored) the skipped node's
+// GroupKind is present and this test fails; after the fix it is absent.
+func TestCandidateMetadata_SkipsIgnoredNodes(t *testing.T) {
+	comp := newTestRealCompiler(t)
+	inst := newInstanceObject("demo", "default")
+
+	rgd := &v1alpha1.ResourceGraphDefinition{
+		ObjectMeta: metav1.ObjectMeta{Name: "webapp"},
+		Spec: v1alpha1.ResourceGraphDefinitionSpec{
+			Schema: &v1alpha1.Schema{
+				APIVersion: "v1alpha1",
+				Kind:       "WebApp",
+				Spec:       apimachineryruntime.RawExtension{Raw: []byte(`{}`)},
+			},
+			Resources: []*v1alpha1.Resource{
+				{
+					ID: "kept",
+					Template: apimachineryruntime.RawExtension{
+						Raw: []byte(`{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"kept-cm"}}`),
+					},
+				},
+				{
+					ID: "skipped",
+					// includeWhen is a constant false, so this node is ignored
+					// this reconcile and owns no cluster resource.
+					IncludeWhen: []string{`${1 == 2}`},
+					Template: apimachineryruntime.RawExtension{
+						Raw: []byte(`{"apiVersion":"v1","kind":"ResourceQuota","metadata":{"name":"skipped-rq"}}`),
+					},
+				},
+			},
+		},
+	}
+	rt, _, err := rgdadapter.BuildRuntimeForInstance(rgd, inst, comp)
+	require.NoError(t, err)
+
+	raw := newControllerTestDynamicClient(t, inst.DeepCopy())
+	c, _ := newGraphEngineControllerUnderTest(t, raw, testEmptyRGDSpec(), revisions.RevisionStateActive, comp, nil)
+
+	meta := c.candidateMetadata(rt, inst)
+	assert.True(t, meta.GroupKinds.Has(schema.GroupKind{Group: "", Kind: "ConfigMap"}),
+		"included node's GroupKind must be in the candidate inventory")
+	assert.False(t, meta.GroupKinds.Has(schema.GroupKind{Group: "", Kind: "ResourceQuota"}),
+		"skipped (includeWhen:false) node must NOT contribute its GroupKind to the candidate inventory")
 }
 
 func TestInventoryUpToDate(t *testing.T) {
