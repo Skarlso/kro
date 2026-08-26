@@ -119,9 +119,13 @@ func authorStatusPatchNode(rgd *v1alpha1.ResourceGraphDefinition) (v1alpha1.Node
 	if err := json.Unmarshal(raw, &statusMap); err != nil {
 		return v1alpha1.Node{}, false, fmt.Errorf("rgdadapter: unmarshal status: %w", err)
 	}
-	// Author conditions stay controller-side (ProjectInstanceConditions); only
-	// the non-condition status fields move to the node.
+	// Author conditions stay controller-side (ProjectInstanceConditions), and
+	// .status.state is projected by the controller under its own field manager
+	// (kro-instance-status); leaving either in the synthesized node's payload
+	// makes two Force:true SSA writers fight over the same field forever. Only
+	// the remaining author status fields move to the node.
 	delete(statusMap, "conditions")
+	delete(statusMap, "state")
 	if len(statusMap) == 0 {
 		return v1alpha1.Node{}, false, nil
 	}
