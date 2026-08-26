@@ -113,15 +113,17 @@ type it produces in scope — at a glance from the top-level keyword. Exactly on
 
 #### `template:`
 
-Creates and owns a Kubernetes resource via server-side apply (using field manager `kro.run/applyset`). On deletion of the Graph, the resource
-is deleted.
+Creates and owns a Kubernetes resource via server-side apply. On the RGD/instance path the shared
+field manager `kro.run/applyset` is used with force ownership; on the standalone Graph path a
+per-Graph field manager is used with conflict detection (see Application & Field Management below).
+On deletion of the Graph, the resource is deleted.
 
 #### `patch:`
 
 Contributes fields to a resource you don't own. The resource must already exist. `patch:` is authored
 exactly like `template:` — a raw partial manifest, with no wrapper around the contributed fields. The
 node applies that manifest via server-side apply under a dedicated per-node field manager
-(`kro-graphengine.patch.<hash>`). On prune, your contributed fields are released (relinquished by
+(`kro-graphengine.patch.<graph>.<node>`). On prune, your contributed fields are released (relinquished by
 applying an empty object under that manager) — the target resource itself is not deleted.
 
 A patch node's manifest declares `apiVersion`, `kind`, `metadata` (`name` required, `namespace`
@@ -288,8 +290,8 @@ Reconciliation proceeds in topological order derived from hard dependency edges:
 1. **Compilation & Cache:** Compilation is cached in an in-memory `Registry` keyed by the Graph's `(namespace, name)` and validated against an FNV-64a hash of the normalized `GraphSpec`. A `SchemaWatcher` tracks the CRD GroupKinds required by the Graph (including dynamic GVK subscriptions); when a tracked CRD changes, the cache is invalidated and the Graph is re-enqueued for compilation against fresh schemas.
 2. **Evaluation & Scope:** A node evaluates as soon as its hard dependencies are in scope — meaning they have been applied and their observed state is available from the cluster. Nodes do not wait for upstream dependencies to pass `readyWhen`.
 3. **Application & Field Management:**
-   - `template:` nodes apply their desired manifest via Server-Side Apply (SSA) using the shared field manager `kro.run/applyset` with force ownership.
-   - `patch:` nodes apply contributed fields under a dedicated per-node field manager (`kro-graphengine.patch.<hash>`). On delete or prune, releasing the contribution applies an empty object under that manager to relinquish field ownership without deleting the target object.
+   - `template:` nodes apply their desired manifest via Server-Side Apply (SSA). On the RGD/instance path the shared field manager `kro.run/applyset` is used with force ownership. On the standalone Graph path a per-Graph field manager `kro-graphengine.tmpl.<graph>.<node>` is used **without** force so the API server reports a field-level conflict: a field owned by a *peer Graph's* template manager is never stolen (the node is held soft not-ready), external drift (a human or another controller) is reclaimed with force, and a conflict with the *same* Graph's own manager (a sibling node) is exempted rather than reported as foreign.
+   - `patch:` nodes apply contributed fields under a dedicated per-node field manager (`kro-graphengine.patch.<graph>.<node>`) without force. A conflict with this Graph's own stale patch identity (a re-keyed node, or a legacy pre-segment manager) is force-reclaimed; a foreign or peer-Graph field is left as a soft conflict. On delete or prune, releasing the contribution applies an empty object under that manager to relinquish field ownership without deleting the target object.
 4. **Reconciliation Parallelism:** Within a single Graph, nodes evaluate serially in topological order; collection instances evaluate in bounded parallel (default ApplyConcurrency=20). Across Graphs, reconciliation is fully parallel via controller-runtime's work queue.
 
 _(Note: `propagateWhen` gating and `.ready()` lifecycle signals are deferred to KREP-006 and not yet implemented in the engine.)_

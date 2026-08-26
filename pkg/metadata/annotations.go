@@ -15,7 +15,11 @@
 package metadata
 
 const (
-	// ApplyOrderAnnotation persists a managed resource's reverse topological deletion wave.
+	// ApplyOrderAnnotation persists a managed resource's reverse topological
+	// deletion wave, as a one-based layer: dependency-free (leaf) resources are
+	// wave 1 and each dependent is 1 + max(dependency waves). Deletion proceeds
+	// highest-wave-first. The value is advisory (it records the computed layer);
+	// only the relative ordering is contractual.
 	ApplyOrderAnnotation = InternalKROPrefix + "apply-order"
 	// PatchContributionsAnnotation persists the inventory of patch-node
 	// field-manager contributions on a Graph, as a JSON array. It drives
