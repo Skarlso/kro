@@ -351,6 +351,13 @@ func (s *Simple) applyNodeByKind(
 			// soft condition: it may be applied separately or created
 			// later. Its identity is not ours to prune (read-only), so
 			// record it Unresolved and requeue instead of failing hard.
+			// A dynamic-GVK ref whose target CRD isn't installed yet
+			// (errSchemaNotReady, from mappingFor) is soft too: the
+			// SchemaWatcher re-enqueues the Graph when the CRD lands.
+			if errors.Is(err, errSchemaNotReady) {
+				result.Unresolved = append(result.Unresolved, n.ID())
+				return fmt.Errorf("apply %q (ref): %w (%w)", n.ID(), err, ErrNotReady), nil
+			}
 			if errors.Is(err, ErrNotReady) || isSoftRuntimeErr(err) {
 				result.Unresolved = append(result.Unresolved, n.ID())
 				return fmt.Errorf("apply %q (ref): %w", n.ID(), err), nil
@@ -996,14 +1003,24 @@ func (s *Simple) applyRef(ctx context.Context, w watchrouter.Watcher, rt *runtim
 	// Fill metadata.namespace from the Graph for namespaced kinds when the
 	// ExternalRef left it empty — matches the "defaults to the instance's
 	// namespace" contract on ExternalRefMetadata.
-	s.defaultNamespace(rt, n.Namespaced(), ref)
+	//
+	// Resolve the GVR + REST scope for the watch. Static refs use the
+	// compile-time GVR; a dynamic-GVK ref has none, so mappingFor resolves the
+	// rendered object's concrete GVK through the live REST mapper (returning
+	// errSchemaNotReady when the target CRD isn't installed yet — soft
+	// not-ready, propagated below via applyNodeByKind).
+	gvr, namespaced, err := s.mappingFor(n, ref)
+	if err != nil {
+		return nil, err
+	}
+	s.defaultNamespace(rt, namespaced, ref)
 
-	if err := s.watchObject(ctx, w, s.qualifiedPath(n.ID()), n.GVR(), ref); err != nil {
+	if err := s.watchObject(ctx, w, s.qualifiedPath(n.ID()), gvr, ref); err != nil {
 		// A failure to register the drift watch must not abort the apply: the
 		// live object is still read and published below, only drift re-enqueue
 		// is lost. Log and continue.
 		log.FromContext(ctx).Info("drift watch registration failed; reading ref without drift detection",
-			"node", s.qualifiedPath(n.ID()), "gvr", n.GVR().String(), "err", err.Error())
+			"node", s.qualifiedPath(n.ID()), "gvr", gvr.String(), "err", err.Error())
 	}
 
 	live := &unstructured.Unstructured{}
@@ -1046,12 +1063,22 @@ func (s *Simple) applyRefCollection(ctx context.Context, w watchrouter.Watcher, 
 		return nil, err
 	}
 
+	// Resolve the GVR + REST scope. Static refs use the compile-time GVR; a
+	// dynamic-GVK selector ref has none, so mappingFor resolves the rendered
+	// object's concrete GVK (from its CEL-evaluated apiVersion/kind) through the
+	// live REST mapper, returning errSchemaNotReady when the target CRD isn't
+	// installed yet (soft not-ready, propagated by applyNodeByKind).
+	gvr, namespaced, err := s.mappingFor(n, ref)
+	if err != nil {
+		return nil, err
+	}
+
 	// Namespace comes straight from the rendered ExternalRef. For a namespaced
 	// GVR an empty namespace lists across all namespaces; cluster-scoped GVRs
 	// are always list-all. No defaultNamespace: namespace normalization is
 	// intentionally skipped for external collections.
 	ns := ref.GetNamespace()
-	if !n.Namespaced() {
+	if !namespaced {
 		ns = ""
 	}
 
@@ -1061,15 +1088,15 @@ func (s *Simple) applyRefCollection(ctx context.Context, w watchrouter.Watcher, 
 	// A failure to register the watch (or a denied access review) must not
 	// abort: the collection is still listed and published below, only drift
 	// re-enqueue is lost. Log and continue.
-	if w != nil && !s.skipWatchForIdentity(ctx, n.GVR(), ns) {
+	if w != nil && !s.skipWatchForIdentity(ctx, gvr, ns) {
 		if err := w.Watch(watchrouter.WatchRequest{
 			NodeID:    s.qualifiedPath(n.ID()),
-			GVR:       n.GVR(),
+			GVR:       gvr,
 			Namespace: ns,
 			Selector:  selector,
 		}); err != nil {
 			log.FromContext(ctx).Info("external collection drift watch registration failed; reading without drift detection",
-				"node", s.qualifiedPath(n.ID()), "gvr", n.GVR().String(), "err", err.Error())
+				"node", s.qualifiedPath(n.ID()), "gvr", gvr.String(), "err", err.Error())
 		}
 	}
 
@@ -1080,7 +1107,7 @@ func (s *Simple) applyRefCollection(ctx context.Context, w watchrouter.Watcher, 
 		opts = append(opts, client.InNamespace(ns))
 	}
 	if err := s.Client.List(ctx, list, opts...); err != nil {
-		return nil, fmt.Errorf("list external collection %q (%s): %w", n.ID(), n.GVR().String(), err)
+		return nil, fmt.Errorf("list external collection %q (%s): %w", n.ID(), gvr.String(), err)
 	}
 
 	items := make([]*unstructured.Unstructured, len(list.Items))

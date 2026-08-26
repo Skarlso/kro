@@ -1045,6 +1045,67 @@ func TestCompile_DynamicGVK(t *testing.T) {
 	})
 }
 
+// TestCompile_DynamicRef covers external refs whose apiVersion or kind is a
+// CEL expression (per the graph.md "Dynamic GVKs" ref example): they compile
+// as dynamic nodes with no compile-time GVK/schema, flip Program.HasDynamicGVK,
+// and preserve the single-vs-collection distinction (metadata.name vs
+// metadata.selector) so the read path lists or gets accordingly at apply time.
+func TestCompile_DynamicRef(t *testing.T) {
+	t.Parallel()
+
+	t.Run("single dynamic ref (metadata.name) compiles, not a collection", func(t *testing.T) {
+		t.Parallel()
+		g := generator.NewGraph("g",
+			generator.WithNamespace("default"),
+			generator.WithDef("crd", map[string]any{"group": "example.com"}),
+			generator.WithRef("target", &expv1alpha1.ExternalRef{
+				APIVersion: "${crd.group}/v1",
+				Kind:       "Widget",
+				Metadata:   expv1alpha1.ExternalRefMetadata{Name: "w"},
+			}),
+		)
+		prog, err := newTestCompiler(t).Compile(g)
+		require.NoError(t, err)
+
+		n := prog.Nodes["target"]
+		require.NotNil(t, n)
+		assert.Equal(t, NodeKindRef, n.Kind)
+		assert.True(t, n.DynamicGVK, "a CEL apiVersion makes the ref dynamic")
+		assert.True(t, n.GVR.Empty(), "no compile-time GVR for a dynamic ref")
+		assert.False(t, n.Collection, "a name ref is a single object")
+		assert.True(t, prog.HasDynamicGVK)
+		_, hasSchema := prog.NodeSchemas["target"]
+		assert.False(t, hasSchema, "a dynamic ref publishes no schema (dyn)")
+		assert.Contains(t, n.HardDepIDs(), "crd", "depends on the def feeding its apiVersion")
+	})
+
+	t.Run("dynamic selector ref (metadata.selector) is a read-only collection", func(t *testing.T) {
+		t.Parallel()
+		g := generator.NewGraph("g",
+			generator.WithNamespace("default"),
+			generator.WithDef("crd", map[string]any{"kind": "Widget"}),
+			generator.WithRef("instances", &expv1alpha1.ExternalRef{
+				APIVersion: "example.com/v1",
+				Kind:       "${crd.kind}",
+				Metadata: expv1alpha1.ExternalRefMetadata{
+					Selector: &metav1.LabelSelector{},
+				},
+			}),
+		)
+		prog, err := newTestCompiler(t).Compile(g)
+		require.NoError(t, err)
+
+		n := prog.Nodes["instances"]
+		require.NotNil(t, n)
+		assert.True(t, n.DynamicGVK, "a CEL kind makes the ref dynamic")
+		assert.True(t, n.Collection, "a selector ref is a collection")
+		assert.True(t, n.GVR.Empty())
+		assert.True(t, prog.HasDynamicGVK)
+		_, hasSchema := prog.NodeSchemas["instances"]
+		assert.False(t, hasSchema)
+	})
+}
+
 func TestCompile_WithSoftDependencies(t *testing.T) {
 	t.Parallel()
 	g := generator.NewGraph("g",

@@ -19,6 +19,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	memory "k8s.io/client-go/discovery/cached/memory"
 	"k8s.io/client-go/restmapper"
 	"k8s.io/kube-openapi/pkg/validation/spec"
@@ -124,6 +125,35 @@ func TestCompilationContext_BuildNode(t *testing.T) {
 			})},
 			check: func(t *testing.T, n *Node, sch *spec.Schema) {
 				assert.True(t, n.DynamicGVK)
+				assert.Nil(t, sch)
+			},
+		},
+		{
+			name: "dynamic ref with CEL apiVersion flags the node, no GVR/schema",
+			node: &expv1alpha1.Node{ID: "dynref", Ref: &expv1alpha1.ExternalRef{
+				APIVersion: "${cfg.group}/v1", Kind: "Widget",
+				Metadata: expv1alpha1.ExternalRefMetadata{Name: "w"},
+			}},
+			check: func(t *testing.T, n *Node, sch *spec.Schema) {
+				assert.Equal(t, NodeKindRef, n.Kind)
+				assert.True(t, n.DynamicGVK, "a CEL apiVersion makes the ref dynamic")
+				assert.True(t, n.GVR.Empty(), "no compile-time GVR for a dynamic ref")
+				assert.False(t, n.Collection, "a name ref is a single object, not a collection")
+				assert.Nil(t, sch, "a dynamic ref publishes no schema")
+			},
+		},
+		{
+			name: "dynamic selector ref is a collection",
+			node: &expv1alpha1.Node{ID: "dyncoll", Ref: &expv1alpha1.ExternalRef{
+				APIVersion: "example.com/v1", Kind: "${cfg.kind}",
+				Metadata: expv1alpha1.ExternalRefMetadata{
+					Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"tier": "db"}},
+				},
+			}},
+			check: func(t *testing.T, n *Node, sch *spec.Schema) {
+				assert.Equal(t, NodeKindRef, n.Kind)
+				assert.True(t, n.DynamicGVK, "a CEL kind makes the ref dynamic")
+				assert.True(t, n.Collection, "a selector ref is a read-only collection")
 				assert.Nil(t, sch)
 			},
 		},

@@ -203,14 +203,15 @@ func (ctx *CompilationContext) buildNode(p *parser.Parser, n *expv1alpha1.Node, 
 		return ctx.buildDefNode(n, order, payload)
 	}
 
-	// A Template or Patch whose apiVersion or kind is a CEL expression has
-	// no compile-time GVK: we can't resolve a schema, a REST mapping, or
+	// A Template, Ref, or Patch whose apiVersion or kind is a CEL expression
+	// has no compile-time GVK: we can't resolve a schema, a REST mapping, or
 	// type-check the payload against a target shape. Parse it schemaless,
 	// flag it dynamic, and let the executor resolve the concrete GVK
 	// per rendered object at apply time. Cross-node references inside the
 	// payload are still type-checked later against the typed env; only the
-	// node's own field types fall back to dyn.
-	if (kind == NodeKindTemplate || kind == NodeKindPatch) && isDynamicGVK(payload) {
+	// node's own field types fall back to dyn. A dynamic Ref stays read-only
+	// (single object or selector collection) exactly like a static Ref.
+	if (kind == NodeKindTemplate || kind == NodeKindRef || kind == NodeKindPatch) && isDynamicGVK(payload) {
 		return ctx.buildDynamicNode(n, order, payload, kind)
 	}
 
@@ -452,6 +453,10 @@ func (ctx *CompilationContext) buildDynamicNode(
 		ForEach:     common.ForEach,
 		IncludeWhen: common.IncludeWhen,
 		ReadyWhen:   common.ReadyWhen,
+		// A dynamic Ref carrying metadata.selector is a read-only collection
+		// (list-by-selector), same as the static Ref path. Template/Patch are
+		// never collections here, so the guard is a no-op for them.
+		Collection: kind == NodeKindRef && hasMetadataSelector(payload),
 	}, nil, nil
 }
 
@@ -468,11 +473,12 @@ func isDynamicGVK(payload map[string]any) bool {
 	return false
 }
 
-// validateDynamicTemplateStructure checks a dynamic-GVK template or patch has
-// the minimum shape: apiVersion + kind present as non-empty strings (their
-// content is a CEL expression, resolved at runtime) and a metadata object.
-// Unlike validateKubernetesObjectStructure it does not parse apiVersion as
-// group/version or enforce the version regex.
+// validateDynamicTemplateStructure checks a dynamic-GVK template, ref, or
+// patch has the minimum shape: apiVersion + kind present as non-empty strings
+// (their content is a CEL expression, resolved at runtime) and a metadata
+// object. A dynamic ref carries metadata (name or selector), so this is the
+// right shape check for it too. Unlike validateKubernetesObjectStructure it
+// does not parse apiVersion as group/version or enforce the version regex.
 func validateDynamicTemplateStructure(obj map[string]any) error {
 	if obj == nil {
 		return fmt.Errorf("payload is empty")
