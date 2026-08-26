@@ -36,7 +36,15 @@ type CompileFunc func(*expv1alpha1.Graph) (*compiler.Program, error)
 type Registry struct {
 	mu      sync.RWMutex
 	entries map[types.NamespacedName]entry
-	epochs  map[types.NamespacedName]uint64
+	// epochs tracks, per live key, the version of the last mutation, used as a
+	// store-back guard for Compile: a concurrent Compile snapshots a key's
+	// epoch and commits only if it is unchanged afterwards. Values come from
+	// the strictly-monotonic nextEpoch counter (never a per-key reset), so a
+	// deleted-and-recreated key gets a fresh, larger epoch — an in-flight
+	// Compile from before the delete can never collide. Deleted keys are pruned
+	// (see Delete) so the map stays bounded to live keys.
+	epochs    map[types.NamespacedName]uint64
+	nextEpoch uint64
 }
 
 type entry struct {
@@ -69,16 +77,24 @@ func (r *Registry) Lookup(key types.NamespacedName, hash string) (*compiler.Prog
 func (r *Registry) Store(key types.NamespacedName, hash string, program *compiler.Program) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.epochs[key]++
+	r.nextEpoch++
+	r.epochs[key] = r.nextEpoch
 	r.entries[key] = entry{hash: hash, program: program}
 }
 
 // Delete drops the entry for key. Safe to call when no entry exists.
+//
+// The epoch is advanced before the entry is removed so a concurrent Compile
+// that snapshotted the pre-delete epoch fails its store-back guard and does not
+// resurrect a deleted Graph's program; the epoch is then pruned so the map
+// stays bounded. Because epochs are strictly monotonic, a later re-created
+// Graph gets a fresh, larger epoch, so pruning can never match a stale compile.
 func (r *Registry) Delete(key types.NamespacedName) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.epochs[key]++
+	r.nextEpoch++
 	delete(r.entries, key)
+	delete(r.epochs, key)
 }
 
 // Compile returns the cached Program if g's spec hash matches the cached
@@ -98,7 +114,12 @@ func (r *Registry) Compile(
 		return nil, false, err
 	}
 	r.mu.RLock()
-	epoch := r.epochs[key]
+	// Snapshot the epoch and whether the key currently has an entry; the
+	// store-back commits only if BOTH are unchanged. Tracking presence (not
+	// just value) is what makes pruning in Delete safe: after a delete the
+	// pruned value reads back as zero, but ok != hadEpoch still trips the
+	// guard, preventing a stale compile from resurrecting a deleted key.
+	epoch, hadEpoch := r.epochs[key]
 	if e, ok := r.entries[key]; ok && e.hash == hash {
 		r.mu.RUnlock()
 		return e.program, true, nil
@@ -111,7 +132,9 @@ func (r *Registry) Compile(
 	}
 
 	r.mu.Lock()
-	if r.epochs[key] == epoch {
+	if cur, ok := r.epochs[key]; ok == hadEpoch && cur == epoch {
+		r.nextEpoch++
+		r.epochs[key] = r.nextEpoch
 		r.entries[key] = entry{hash: hash, program: prog}
 	}
 	r.mu.Unlock()
