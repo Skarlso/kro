@@ -379,9 +379,15 @@ spec:
                       description: |-
                         UID returned by the API server when the resource was applied. Used
                         as a delete precondition so we don't remove a resource that was
-                        deleted-and-recreated out of band between apply and prune. Absent
-                        on entries that haven't been observed yet (e.g. union-state entries
-                        declared but not yet applied this cycle).
+                        deleted-and-recreated out of band between apply and prune.
+
+                        A UID-less entry is a not-yet-observed intent (e.g. a pre-apply
+                        write-ahead entry declared but not yet applied this cycle). Such an
+                        entry is intentionally SKIPPED on delete/prune: without a captured UID
+                        kro cannot prove the live object is the one it applied, and deleting by
+                        name alone could remove an object kro does not own. It is therefore
+                        effectively required for cleanup — an entry only becomes deletable once
+                        a successful apply has recorded its UID.
                       type: string
                   required:
                   - apiVersion
