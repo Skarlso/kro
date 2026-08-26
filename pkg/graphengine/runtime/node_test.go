@@ -543,7 +543,93 @@ func TestNode_TolerateDataPending(t *testing.T) {
 		assert.False(t, hasK2, "data-pending map field should be omitted")
 	})
 
-	t.Run("returns ErrDataPending for data-pending list element even when TolerateDataPending is true", func(t *testing.T) {
+	// Option A: a data-pending array element under tolerance omits the WHOLE
+	// enclosing array field (index corruption prevents omitting a single
+	// element), while every sibling field still renders and the node does NOT
+	// data-pend. Before the fix this returned ErrDataPending and dropped the
+	// whole node.
+	t.Run("omits the whole enclosing array field when one element is data-pending", func(t *testing.T) {
+		t.Parallel()
+		g := generator.NewGraph("g",
+			generator.WithDef("seed", map[string]any{"k": "v"}),
+			generator.WithDef("upstream", map[string]any{"data": "${'val'}", "enabled": "${true}"}),
+			generator.WithTemplate("vpc", map[string]any{
+				"apiVersion": "ec2.services.k8s.aws/v1alpha1",
+				"kind":       "VPC",
+				"metadata":   map[string]any{"name": "vpc-test"},
+				"spec": map[string]any{
+					// A sibling scalar that resolves fine must survive.
+					"enableDNSSupport": "${upstream.enabled}",
+					"cidrBlocks": []any{
+						// Element [0] resolves; element [1] is data-pending.
+						"${upstream.data}",
+						"${upstream.data.missing}",
+					},
+				},
+			}),
+		)
+		p, err := mustCompiler(t).CompileWithOptions(g, compiler.WithDataPendingTolerant("vpc"))
+		require.NoError(t, err)
+
+		rt := New(p, g)
+		setFirst(rt, "seed")
+		setFirst(rt, "upstream")
+
+		out, err := rt.Node("vpc").Resolve()
+		require.NoError(t, err, "a data-pending array element must not data-pend the whole node")
+		require.Len(t, out, 1)
+
+		spec, ok := out[0].Object["spec"].(map[string]any)
+		require.True(t, ok)
+		// Sibling scalar renders.
+		assert.Equal(t, true, spec["enableDNSSupport"], "sibling scalar field must still render")
+		// The whole array field is absent (not present-but-empty, not partial).
+		_, hasCidr := spec["cidrBlocks"]
+		assert.False(t, hasCidr, "enclosing array field must be absent, not empty or partial")
+	})
+
+	// Option A applies to a nested array field too: status.conditions[1] omits
+	// status.conditions, leaving the rest of status intact.
+	t.Run("omits the nested enclosing array field", func(t *testing.T) {
+		t.Parallel()
+		g := generator.NewGraph("g",
+			generator.WithDef("seed", map[string]any{"k": "v"}),
+			generator.WithDef("upstream", map[string]any{"data": "${'val'}"}),
+			generator.WithTemplate("vpc", map[string]any{
+				"apiVersion": "ec2.services.k8s.aws/v1alpha1",
+				"kind":       "VPC",
+				"metadata":   map[string]any{"name": "vpc-test"},
+				"status": map[string]any{
+					// Sibling scalar under the same parent survives.
+					"vpcID": "${upstream.data}",
+					"conditions": []any{
+						map[string]any{"type": "${upstream.data}"},
+						map[string]any{"type": "${upstream.data.missing}"},
+					},
+				},
+			}),
+		)
+		p, err := mustCompiler(t).CompileWithOptions(g, compiler.WithDataPendingTolerant("vpc"))
+		require.NoError(t, err)
+
+		rt := New(p, g)
+		setFirst(rt, "seed")
+		setFirst(rt, "upstream")
+
+		out, err := rt.Node("vpc").Resolve()
+		require.NoError(t, err)
+		require.Len(t, out, 1)
+
+		status, ok := out[0].Object["status"].(map[string]any)
+		require.True(t, ok)
+		assert.Equal(t, "val", status["vpcID"], "sibling field under the same parent must survive")
+		_, hasConditions := status["conditions"]
+		assert.False(t, hasConditions, "nested enclosing array field status.conditions must be absent")
+	})
+
+	// A non-tolerant node still data-pends the whole node on any pending field,
+	// array element included.
+	t.Run("non-tolerant node data-pends the whole node on a pending array element", func(t *testing.T) {
 		t.Parallel()
 		g := generator.NewGraph("g",
 			generator.WithDef("seed", map[string]any{"k": "v"}),
@@ -560,7 +646,8 @@ func TestNode_TolerateDataPending(t *testing.T) {
 				},
 			}),
 		)
-		p, err := mustCompiler(t).CompileWithOptions(g, compiler.WithDataPendingTolerant("vpc"))
+		// No WithDataPendingTolerant: tolerance is off.
+		p, err := mustCompiler(t).Compile(g)
 		require.NoError(t, err)
 
 		rt := New(p, g)
@@ -569,6 +656,6 @@ func TestNode_TolerateDataPending(t *testing.T) {
 
 		_, err = rt.Node("vpc").Resolve()
 		require.Error(t, err)
-		assert.True(t, errors.Is(err, ErrDataPending), "data-pending list element must return ErrDataPending to preserve indexing")
+		assert.True(t, errors.Is(err, ErrDataPending), "a non-tolerant node must data-pend the whole node")
 	})
 }

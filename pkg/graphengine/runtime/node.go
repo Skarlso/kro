@@ -361,17 +361,39 @@ func (n *Node) renderOne(bindings map[string]any) (*unstructured.Unstructured, e
 	}
 
 	data := make(map[string]any, len(n.spec.Variables))
+	// omitArrayFields collects the map-key paths of enclosing array fields whose
+	// element was data-pending under tolerance. We cannot omit a single array
+	// element (cleanOmitSentinels would drop it and shift every later index
+	// down), so we drop the whole enclosing array field after Resolve — see
+	// below.
+	var omitArrayFields [][]string
 	for _, v := range n.spec.Variables {
 		val, err := v.Expression.Eval(scope)
 		if err != nil {
 			if IsCELDataPending(err) {
-				if n.spec.TolerateDataPending && isObjectProperty(v.Path) {
-					// Omit this field and keep rendering the rest: the resolver
-					// strips the sentinel so a data-pending map field disappears
-					// rather than data-pending the whole node. Array/list elements
-					// are never omitted to preserve stable indexing (e.g. status.foo[2]).
-					data[v.Expression.Original] = sentinels.Omit{}
-					continue
+				if n.spec.TolerateDataPending {
+					if fields, ok := enclosingArrayFieldPath(v.Path); ok {
+						// The pending value lives inside an array (e.g.
+						// status.foo[2] or status.conditions[1].type). A single
+						// array element cannot be omitted without shifting later
+						// indices, so instead we omit the whole enclosing array
+						// field (status.foo / status.conditions) for this render.
+						// The array reappears complete on the next reconcile once
+						// the upstream resolves. Stash a placeholder so the resolver
+						// still sees data for this expression, then delete the
+						// enclosing field after Resolve.
+						data[v.Expression.Original] = sentinels.Omit{}
+						omitArrayFields = append(omitArrayFields, fields)
+						continue
+					}
+					// A pending map property (no array index in its path): omit just
+					// this field and keep rendering the rest. The resolver strips
+					// the sentinel so a data-pending map field disappears rather
+					// than data-pending the whole node.
+					if isObjectProperty(v.Path) {
+						data[v.Expression.Original] = sentinels.Omit{}
+						continue
+					}
 				}
 				return nil, fmt.Errorf("node %q: eval %q at %q: %w (%w)", n.spec.ID, v.Expression.UserExpression(), v.Path, err, ErrDataPending)
 			}
@@ -383,6 +405,11 @@ func (n *Node) renderOne(bindings map[string]any) (*unstructured.Unstructured, e
 	summary := resolver.NewResolver(out.Object, data).Resolve(toFieldDescriptors(n.spec.Variables))
 	if len(summary.Errors) > 0 {
 		return nil, fmt.Errorf("node %q: resolve: %w", n.spec.ID, errors.Join(summary.Errors...))
+	}
+	// Drop enclosing array fields after Resolve so the outcome is independent of
+	// what sibling elements resolved into the same array this cycle.
+	for _, fields := range omitArrayFields {
+		unstructured.RemoveNestedField(out.Object, fields...)
 	}
 	return out, nil
 }
@@ -438,6 +465,30 @@ func isObjectProperty(path string) bool {
 		return false
 	}
 	return segments[len(segments)-1].Index < 0
+}
+
+// enclosingArrayFieldPath computes, for a path that indexes into an array
+// (e.g. status.foo[2], status.bar.foo[2], status.matrix[1][2]), the map-key
+// segments naming the enclosing array field — the prefix of Name segments up
+// to (but excluding) the first array index. It returns those segment names
+// and true when path contains an array index, or nil and false when path is a
+// plain map property. Examples:
+//   - status.foo[2]       -> [status foo]
+//   - status.bar.foo[2]   -> [status bar foo]
+//   - status.matrix[1][2] -> [status matrix]
+func enclosingArrayFieldPath(path string) ([]string, bool) {
+	segments, err := fieldpath.Parse(path)
+	if err != nil {
+		return nil, false
+	}
+	var names []string
+	for _, seg := range segments {
+		if seg.Index >= 0 {
+			return names, len(names) > 0
+		}
+		names = append(names, seg.Name)
+	}
+	return nil, false
 }
 
 // toFieldDescriptors strips ResourceField wrappers down to the bare
