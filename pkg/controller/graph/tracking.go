@@ -20,7 +20,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	expv1alpha1 "github.com/kubernetes-sigs/kro/api/v1alpha1"
+	"github.com/kubernetes-sigs/kro/pkg/graphengine/compiler"
 	"github.com/kubernetes-sigs/kro/pkg/graphengine/executor"
+	krotruntime "github.com/kubernetes-sigs/kro/pkg/graphengine/runtime"
 	"github.com/kubernetes-sigs/kro/pkg/metadata"
 )
 
@@ -87,6 +89,84 @@ func diffManagedResources(
 		pruneCandidates = append(pruneCandidates, prev)
 	}
 	return newSet, pruneCandidates
+}
+
+// intendedManagedResources projects the resource identities a runtime is about
+// to apply this cycle, best-effort and without cluster writes — mirroring the
+// instance ApplySet controller's candidateMetadata. Def nodes are seeded into
+// scope first so template/subgraph nodes referencing `schema.spec...` render in
+// memory; then every cleanly-resolving template node contributes its
+// identities. It is intentionally lossy (data-pending/ignored/unresolvable
+// nodes are skipped) and UID-free: the pre-apply intent superset the reconciler
+// write-aheads so a lost status write after Apply still leaves teardown
+// something to delete. keyOf excludes UID so post-apply entries dedup against
+// their intent entry.
+func intendedManagedResources(rt *krotruntime.Runtime) []expv1alpha1.ManagedResource {
+	if rt == nil {
+		return nil
+	}
+
+	// Seed Def nodes into scope first so downstream template expressions that
+	// reference them (e.g. `schema.spec...`) can resolve in memory.
+	for _, n := range rt.Nodes() {
+		if n.Kind() != compiler.NodeKindDef {
+			continue
+		}
+		desired, err := n.Resolve()
+		if err != nil || len(desired) == 0 {
+			continue
+		}
+		n.SetObserved(desired, desired)
+		if n.IsCollection() {
+			list := make([]any, 0, len(desired))
+			for _, obj := range desired {
+				list = append(list, obj.Object)
+			}
+			rt.Set(n.ID(), list)
+		} else {
+			rt.Set(n.ID(), desired[0].Object)
+		}
+	}
+
+	var out []expv1alpha1.ManagedResource
+	seen := make(map[resourceKey]struct{})
+	for _, n := range rt.Nodes() {
+		// Only template nodes produce owned/torn-down resources (ref = read-only,
+		// patch = tracked as contributions, def = no I/O).
+		if n.Kind() != compiler.NodeKindTemplate {
+			continue
+		}
+		// A node excluded this cycle (includeWhen:false) won't be applied. An
+		// IsIgnored error means we can't decide yet — keep it out (safe: worst
+		// case its post-apply Applied entry records it instead).
+		if ignored, err := n.IsIgnored(); err == nil && ignored {
+			continue
+		}
+		desired, err := n.Resolve()
+		if err != nil {
+			continue
+		}
+		for _, obj := range desired {
+			gvk := obj.GroupVersionKind()
+			if gvk.Kind == "" || obj.GetName() == "" {
+				continue
+			}
+			mr := expv1alpha1.ManagedResource{
+				NodeID:     n.ID(),
+				APIVersion: gvk.GroupVersion().String(),
+				Kind:       gvk.Kind,
+				Namespace:  obj.GetNamespace(),
+				Name:       obj.GetName(),
+			}
+			k := keyOf(mr)
+			if _, dup := seen[k]; dup {
+				continue
+			}
+			seen[k] = struct{}{}
+			out = append(out, mr)
+		}
+	}
+	return out
 }
 
 // unionManagedResources concatenates previous and applied, deduping on

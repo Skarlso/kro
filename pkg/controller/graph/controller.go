@@ -167,9 +167,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 	reconcileErr := r.reconcileGraph(ctx, &g)
 
-	if err := r.updateStatus(ctx, &g); err != nil {
-		reconcileErr = errors.Join(reconcileErr, err)
-	}
+	// Keep the status-write error separate from the apply error: a soft
+	// ErrNotReady is a benign requeue, but a failed status write must never be
+	// swallowed (the ErrNotReady classification below is done on the apply
+	// error only, so a stale reported state can't hide behind not-ready).
+	statusErr := r.updateStatus(ctx, &g)
+
 	// A not-ready signal is a soft requeue: the spec compiled, apply
 	// succeeded, the cluster just hasn't converged on readyWhen yet (or a
 	// referenced field isn't visible). Return nil error so controller-runtime
@@ -177,13 +180,18 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	// capped exponential delay so a never-resolving reference (e.g. a typo)
 	// decays to a slow poll instead of a 1/sec hammer.
 	if errors.Is(reconcileErr, executor.ErrNotReady) {
+		// Apply is a soft requeue — but never discard a status-write failure.
+		if statusErr != nil {
+			r.backoff.reset(req.NamespacedName)
+			return ctrl.Result{}, statusErr
+		}
 		return ctrl.Result{RequeueAfter: r.backoff.next(req.NamespacedName)}, nil
 	}
 	// Any other outcome (clean converge or a hard error that will be retried
 	// with controller-runtime backoff) ends the not-ready streak, so a fixed
 	// typo returns to fast requeues on its next stall.
 	r.backoff.reset(req.NamespacedName)
-	return ctrl.Result{}, reconcileErr
+	return ctrl.Result{}, errors.Join(reconcileErr, statusErr)
 }
 
 // reconcileGraph runs the actual reconciliation body. Compilation goes
@@ -239,6 +247,21 @@ func (r *Reconciler) reconcileGraph(ctx context.Context, g *expv1alpha1.Graph) e
 		return fmt.Errorf("resolve impersonated executor: %w", err)
 	}
 
+	// Write-ahead the pre-apply intent BEFORE any cluster write. Teardown runs
+	// entirely from g.Status.ManagedResources, so a status write lost between
+	// Apply (which creates children) and the post-apply persist would orphan
+	// those children permanently. Persist the union of previous + intended
+	// identities so a crash after Apply still leaves teardown a superset to
+	// delete from (mirrors the instance ApplySet union-never-shrinks path).
+	// Intent is best-effort and UID-free; keyOf dedups post-apply entries.
+	intent := unionManagedResources(previous, intendedManagedResources(rt))
+	if len(intent) > len(previous) {
+		g.Status.ManagedResources = intent
+		if err := r.persistManagedResources(ctx, g); err != nil {
+			return fmt.Errorf("write-ahead managed-resource intent: %w", err)
+		}
+	}
+
 	result, applyErr := ex.Apply(ctx, rt, watcher)
 
 	// Commit on full success or soft ErrNotReady — the executor walks
@@ -289,10 +312,26 @@ func (r *Reconciler) reconcileGraph(ctx context.Context, g *expv1alpha1.Graph) e
 		}
 		g.Status.ManagedResources = newSet
 	} else {
-		// Soft or hard failure — keep the union so a future reconcile
-		// can still find the resources to prune or restore.
-		g.Status.ManagedResources = unionManagedResources(previous, result.Applied)
+		// Soft or hard failure — keep the union so a future reconcile can still
+		// prune or restore. Fold intent back in so the terminal updateStatus
+		// cannot shrink the server inventory below the pre-apply superset and
+		// re-open the orphan window; UID-free intent dedups against Applied via
+		// keyOf.
+		g.Status.ManagedResources = unionManagedResources(
+			unionManagedResources(previous, result.Applied), intent)
 	}
+
+	// Release contributions whose patch node was removed or whose target
+	// changed is done on the CLEAN-apply path only (below), symmetric with
+	// prune: on a soft/hard error we cannot tell a genuinely-removed patch node
+	// apart from one that is merely data-pending this cycle (its contribution
+	// is simply absent from result.Contributions either way, and Contribution
+	// carries no NodeID to correlate with result.Unresolved), so releasing here
+	// would drop fields a still-wanted patch node set — a transient flap. The
+	// field-manager-identity-change deadlock this used to guard is now fixed at
+	// the source in the executor (contributeApply force-reclaims a same-Graph
+	// stale patch identity), so a re-keyed patch node resolves and re-appears in
+	// result.Contributions rather than needing a release to break the wedge.
 
 	if applyErr != nil {
 		// Soft or hard failure — keep the union so a future reconcile can
@@ -574,6 +613,29 @@ func (r *Reconciler) updateStatus(ctx context.Context, g *expv1alpha1.Graph) err
 		logger.V(1).Info("updating graph status",
 			"conditions", len(dc.Status.Conditions),
 			"managedResources", len(dc.Status.ManagedResources))
+		return r.Client.Status().Patch(ctx, dc, client.MergeFrom(current))
+	})
+}
+
+// persistManagedResources flushes ONLY g.Status.ManagedResources (retry on
+// conflict), leaving Status.Conditions untouched. The write-ahead vehicle for
+// the pre-apply intent: unlike updateStatus it never gates on Generation and
+// unions with the live inventory, so the write can only grow the tracked set.
+func (r *Reconciler) persistManagedResources(ctx context.Context, g *expv1alpha1.Graph) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		current := &expv1alpha1.Graph{}
+		if err := r.Client.Get(ctx, client.ObjectKeyFromObject(g), current); err != nil {
+			return fmt.Errorf("refetch graph: %w", err)
+		}
+		dc := current.DeepCopy()
+		union := unionManagedResources(current.Status.ManagedResources, g.Status.ManagedResources)
+		dc.Status.ManagedResources = union
+		// Keep the in-memory Graph consistent with what we persisted so the
+		// post-apply diff/prune below reasons about the same superset.
+		g.Status.ManagedResources = union
+		if equality.Semantic.DeepEqual(current.Status, dc.Status) {
+			return nil
+		}
 		return r.Client.Status().Patch(ctx, dc, client.MergeFrom(current))
 	})
 }
