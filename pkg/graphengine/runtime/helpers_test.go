@@ -38,6 +38,14 @@ func cm(ns, name string) *unstructured.Unstructured {
 	return o
 }
 
+// idless builds an identity-less unstructured (no GVK/namespace/name),
+// mirroring a row a def-node forEach expansion produces. All such rows
+// share the constant identityKey "////", which is exactly what used to
+// collapse them in orderedIntersection.
+func idless(k, v string) *unstructured.Unstructured {
+	return &unstructured.Unstructured{Object: map[string]any{k: v}}
+}
+
 // TestOrderedIntersection pins the observed→desired alignment used so
 // collection readyWhen sees a deterministic order regardless of the
 // LIST result order.
@@ -93,6 +101,26 @@ func TestOrderedIntersection(t *testing.T) {
 			assert.Equal(t, tc.wantName, names)
 		})
 	}
+}
+
+// TestOrderedIntersection_IdentityLess is the regression for the def-node
+// forEach bug: identity-less rows all share the "////" key, so the old
+// identity-keyed alignment collapsed N distinct rows into N copies of the
+// last one. Positional fallback must now preserve every distinct row in
+// order. The def path calls SetObserved(desired, desired), so observed and
+// desired are the same slice here.
+func TestOrderedIntersection_IdentityLess(t *testing.T) {
+	t.Parallel()
+	rows := []*unstructured.Unstructured{
+		idless("v", "a"), idless("v", "b"), idless("v", "c"),
+	}
+	got := orderedIntersection(rows, rows)
+	var vals []string
+	for _, o := range got {
+		vals = append(vals, o.Object["v"].(string))
+	}
+	assert.Equal(t, []string{"a", "b", "c"}, vals,
+		"identity-less rows must stay distinct, not collapse to N copies of the last")
 }
 
 // TestValidateUniqueIdentities pins the duplicate-name guard run after
@@ -295,6 +323,30 @@ func TestSetObserved_Collection(t *testing.T) {
 			assert.Equal(t, tc.wantOrder, got)
 		})
 	}
+}
+
+// TestSetObserved_Collection_IdentityLess is the SetObserved-level
+// regression for the def-node forEach bug. The executor records a def
+// collection via SetObserved(desired, desired); when the rows carry no
+// cluster identity (a def-node expansion) they must survive as N distinct
+// rows in order, not collapse to N copies of the last. This is the exact
+// call the native Graph path makes, so it guards the whole downstream
+// scope-publish chain.
+func TestSetObserved_Collection_IdentityLess(t *testing.T) {
+	t.Parallel()
+	rows := []*unstructured.Unstructured{
+		idless("v", "a"), idless("v", "b"), idless("v", "c"),
+	}
+	spec := &compiler.Node{ID: "x", ForEach: []compiler.ForEachDimension{{Name: "n"}}}
+	n := &Node{spec: spec}
+	n.SetObserved(rows, rows)
+
+	var vals []string
+	for _, o := range n.Observed() {
+		vals = append(vals, o.Object["v"].(string))
+	}
+	assert.Equal(t, []string{"a", "b", "c"}, vals,
+		"def collection rows must stay distinct through SetObserved")
 }
 
 // TestIsIgnored_Memoized pins the cache: the second IsIgnored call returns

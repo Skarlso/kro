@@ -63,6 +63,15 @@ func validateUniqueIdentities(objs []*unstructured.Unstructured) error {
 // desired, ordered to match desired's sequence. Used for collection
 // nodes so readyWhen evaluation across instances is deterministic across
 // reconciles even though the API LIST result isn't ordered.
+//
+// Identity-keyed alignment only works when identityKey is unique per row.
+// A def node's forEach expands into rows with no cluster identity (empty
+// GVK/namespace/name), so every row shares the constant "////" key. Keying
+// on that collapses all N rows to one and re-emits N copies of the last —
+// silently feeding wrong data to downstream expressions. When keys aren't
+// unique we fall back to positional alignment: observed already comes from
+// the executor as desired verbatim (SetObserved(desired, desired)), so index
+// i lines up and each distinct row is preserved.
 func orderedIntersection(observed, desired []*unstructured.Unstructured) []*unstructured.Unstructured {
 	if len(observed) == 0 || len(desired) == 0 {
 		return observed
@@ -73,6 +82,12 @@ func orderedIntersection(observed, desired []*unstructured.Unstructured) []*unst
 			byKey[identityKey(obj)] = obj
 		}
 	}
+	// Collisions (identity-less def rows, or genuine duplicate identities)
+	// shrink the map below the row count. Identity alignment is meaningless
+	// then, so align by position instead.
+	if len(byKey) < len(observed) {
+		return positionalIntersection(observed, desired)
+	}
 	out := make([]*unstructured.Unstructured, 0, len(desired))
 	for _, want := range desired {
 		if want == nil {
@@ -81,6 +96,23 @@ func orderedIntersection(observed, desired []*unstructured.Unstructured) []*unst
 		if got, ok := byKey[identityKey(want)]; ok {
 			out = append(out, got)
 		}
+	}
+	return out
+}
+
+// positionalIntersection aligns observed to desired by index rather than
+// identity, used when identityKey can't distinguish rows (see
+// orderedIntersection). It returns the observed rows up to len(desired),
+// skipping nil entries in either slice, so each distinct expanded row is
+// preserved in order instead of collapsing to one.
+func positionalIntersection(observed, desired []*unstructured.Unstructured) []*unstructured.Unstructured {
+	n := min(len(observed), len(desired))
+	out := make([]*unstructured.Unstructured, 0, n)
+	for i := 0; i < n; i++ {
+		if desired[i] == nil || observed[i] == nil {
+			continue
+		}
+		out = append(out, observed[i])
 	}
 	return out
 }
