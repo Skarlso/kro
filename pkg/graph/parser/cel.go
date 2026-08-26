@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+// Package parser extracts and validates CEL expressions embedded in resource
+// templates.
 package parser
 
 import (
@@ -25,7 +27,8 @@ const (
 	exprEnd   = "}"
 )
 
-// Allow nested expressions, but only if they are escaped with quotes ${outer("${inner}")} is allowed, but ${outer(${inner})} is not
+// ErrNestedExpression is returned for a nested expression that is not escaped
+// with quotes: ${outer("${inner}")} is allowed, but ${outer(${inner})} is not.
 var ErrNestedExpression = errors.New("nested expressions are not allowed unless inside string literals")
 
 // exprMatch holds a parsed CEL expression and its position in the original string.

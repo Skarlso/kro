@@ -143,6 +143,9 @@ type CRDMetadata struct {
 	Annotations map[string]string `json:"annotations,omitempty"`
 }
 
+// ExternalRefMetadata identifies the external resource a ref targets: exactly
+// one of name (single object) or selector (collection) must be set.
+//
 // +kubebuilder:validation:XValidation:rule="(has(self.name) && !has(self.selector)) || (!has(self.name) && has(self.selector))",message="exactly one of name or selector must be provided"
 type ExternalRefMetadata struct {
 	// Name is the name of the external resource to reference.

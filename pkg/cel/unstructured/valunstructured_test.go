@@ -854,13 +854,13 @@ func TestUnstructuredList_ConvertToNative(t *testing.T) {
 	val := UnstructuredToVal([]any{"hello", "world"}, s)
 
 	t.Run("string list to []string", func(t *testing.T) {
-		native, err := val.(ref.Val).ConvertToNative(reflect.TypeFor[[]string]())
+		native, err := val.ConvertToNative(reflect.TypeFor[[]string]())
 		require.NoError(t, err)
 		assert.Equal(t, []string{"hello", "world"}, native)
 	})
 
 	t.Run("unsupported target type", func(t *testing.T) {
-		_, err := val.(ref.Val).ConvertToNative(reflect.TypeFor[int]())
+		_, err := val.ConvertToNative(reflect.TypeFor[int]())
 		assert.Error(t, err)
 	})
 }

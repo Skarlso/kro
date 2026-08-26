@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Package crdcompat provides functionality for comparing Kubernetes CustomResourceDefinition
+// Package compat provides functionality for comparing Kubernetes CustomResourceDefinition
 // schemas and identifying breaking and non-breaking changes.
 //
 // The package analyzes OpenAPI v3 schemas from CRDs and generates detailed reports about

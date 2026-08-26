@@ -107,7 +107,7 @@ func (r *Report) HasChanges() bool {
 
 const maxBreakingChangesSummary = 3
 
-// SummarizeBreakingChanges returns a user-friendly summary of breaking changes
+// String returns a user-friendly summary of breaking changes.
 func (r *Report) String() string {
 	if !r.HasBreakingChanges() {
 		return "no breaking changes"

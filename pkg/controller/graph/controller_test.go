@@ -367,7 +367,7 @@ func TestReconcile(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			cl := newClient(t, tc.initial)
-			var clientForReconciler client.Client = cl
+			var clientForReconciler = cl
 			if tc.wrapClient != nil {
 				clientForReconciler = tc.wrapClient(cl)
 			}

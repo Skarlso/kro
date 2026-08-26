@@ -24,7 +24,7 @@ import (
 	"k8s.io/kube-openapi/pkg/validation/spec"
 )
 
-// ObjectMeta holds the k8s ObjectMeta schema, populated once at startup.
+// ObjectMetaSchema holds the k8s ObjectMeta schema, populated once at startup.
 var ObjectMetaSchema spec.Schema
 
 // NamespacelessObjectMetaSchema is ObjectMeta without metadata.namespace.

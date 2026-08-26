@@ -229,8 +229,8 @@ func compareEnumValues(path string, oldSchema, newSchema *v1.JSONSchemaProps, re
 		return
 	}
 
-	oldEnumSet := toJsonValueSet(oldSchema.Enum)
-	newEnumSet := toJsonValueSet(newSchema.Enum)
+	oldEnumSet := toJSONValueSet(oldSchema.Enum)
+	newEnumSet := toJSONValueSet(newSchema.Enum)
 
 	// Check for removed enum values (breaking)
 	for val := range oldEnumSet {
@@ -290,8 +290,8 @@ func toStringSet(slice []string) map[string]bool {
 	return set
 }
 
-// toJsonValueSet converts JSON values to strings for comparison
-func toJsonValueSet(values []v1.JSON) map[string]bool {
+// toJSONValueSet converts JSON values to strings for comparison
+func toJSONValueSet(values []v1.JSON) map[string]bool {
 	set := make(map[string]bool, len(values))
 	for _, val := range values {
 		set[string(val.Raw)] = true

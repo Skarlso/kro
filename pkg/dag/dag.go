@@ -39,7 +39,7 @@ func (v Vertex[T]) String() string {
 	var builder strings.Builder
 	builder.Grow(len(v.DependsOn))
 	for i, s := range slices.Collect(maps.Keys(v.DependsOn)) {
-		builder.WriteString(fmt.Sprintf("%v", s))
+		fmt.Fprintf(&builder, "%v", s)
 		if i < len(v.DependsOn)-1 {
 			builder.WriteString(",")
 		}
@@ -189,7 +189,7 @@ func formatCycle[T cmp.Ordered](cycle []T) string {
 	var builder strings.Builder
 	builder.Grow(len(cycle))
 	for i, s := range cycle {
-		builder.WriteString(fmt.Sprintf("%v", s))
+		fmt.Fprintf(&builder, "%v", s)
 		if i < len(cycle)-1 {
 			builder.WriteString(" -> ")
 		}
