@@ -623,6 +623,14 @@ func (s *Simple) applyScalarTemplate(ctx context.Context, w watchrouter.Watcher,
 		if err := applySetConflict(current, obj); err != nil {
 			return applied, err
 		}
+		// Cross-engine guard (RGD/instance path only): a live object owned by a
+		// standalone Graph's template manager must not be force-adopted under the
+		// shared field manager. Surfaced soft not-ready, matching the Graph path's
+		// peer-conflict treatment so the reconcile backs off instead of flapping.
+		if !s.ConflictDetection && ownedByGraphTemplate(current) {
+			return applied, fmt.Errorf("template %s %q owned by a foreign kro Graph: %w (%w)",
+				obj.GetKind(), client.ObjectKeyFromObject(obj), ErrFieldManagerConflict, ErrNotReady)
+		}
 		if err := s.applyTemplateObject(ctx, current, obj, rt.Graph().GetUID(), s.qualifiedPath(n.ID())); err != nil {
 			// A peer-Graph field conflict is soft not-ready (wrapped with
 			// ErrNotReady) so the node gates its dependents and the reconcile
@@ -835,6 +843,15 @@ func (s *Simple) applyCollectionItem(ctx context.Context, rt *runtime.Runtime, n
 	}
 	if err := applySetConflict(current, obj); err != nil {
 		st.recordHardError(i, err)
+		return nil
+	}
+	// Cross-engine guard (RGD/instance path only): a live object owned by a
+	// standalone Graph's template manager must not be force-adopted under the
+	// shared field manager. Held soft not-ready via recordFailure, matching the
+	// Graph path's peer-conflict treatment.
+	if !s.ConflictDetection && ownedByGraphTemplate(current) {
+		st.recordFailure(i, fmt.Errorf("item %s/%s owned by a foreign kro Graph: %w",
+			obj.GetNamespace(), obj.GetName(), ErrFieldManagerConflict))
 		return nil
 	}
 
@@ -1584,6 +1601,28 @@ func ownedByForeignGraphTemplate(current *unstructured.Unstructured, self string
 			continue
 		}
 		return true
+	}
+	return false
+}
+
+// ownedByGraphTemplate reports whether current carries ANY kro Graph template
+// manager (templateFieldManagerPrefix). It is the RGD/instance path's
+// cross-engine ownership guard: on that path (ConflictDetection off) the
+// executor NEVER writes a template manager, so any such manager on the live
+// object is definitionally a foreign Graph's field. The RGD path must refuse
+// it rather than force-adopting it under the shared field manager, mirroring
+// the Graph path's peer-conflict refusal (the two engines' detection would
+// otherwise be asymmetric — the Graph never stamps the applyset part-of label
+// the RGD guard keys on, so the RGD path would silently steal a Graph's field).
+// A nil current (absent object) is never Graph-owned.
+func ownedByGraphTemplate(current *unstructured.Unstructured) bool {
+	if current == nil {
+		return false
+	}
+	for _, mf := range current.GetManagedFields() {
+		if strings.HasPrefix(mf.Manager, templateFieldManagerPrefix) {
+			return true
+		}
 	}
 	return false
 }
