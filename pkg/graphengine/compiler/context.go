@@ -157,44 +157,50 @@ func (ctx *CompilationContext) ancestorIDs() []string {
 // buildNode produces a single compiled Node from its API form, parses CEL
 // fragments out of the payload, and returns the OpenAPI schema the node
 // publishes to scope (nil for Def and dynamic-GVK templates).
+// buildDefNode builds a Def node from its literal payload. Def nodes have no
+// target GVK, but we infer an OpenAPI schema from the payload so the typed CEL
+// env can narrow def-sourced expressions; fields whose value is a CEL fragment
+// stay dyn (see inferDefSchema). Literal def nodes (e.g. instance schema nodes)
+// skip expression parsing.
+func (ctx *CompilationContext) buildDefNode(n *expv1alpha1.Node, order int, payload map[string]any) (*Node, *spec.Schema, error) {
+	var descriptors []variable.FieldDescriptor
+	if _, isLiteral := ctx.literalNodes[n.ID]; !isLiteral {
+		var err error
+		descriptors, _, err = parser.ParseSchemalessResource(payload)
+		if err != nil {
+			return nil, nil, fmt.Errorf("parse def payload: %w", err)
+		}
+	}
+	common, err := parseNodeCommon(n, descriptors)
+	if err != nil {
+		return nil, nil, err
+	}
+	node := &Node{
+		ID:          n.ID,
+		Index:       order,
+		Kind:        NodeKindDef,
+		Object:      &unstructured.Unstructured{Object: payload},
+		Variables:   common.Variables,
+		ForEach:     common.ForEach,
+		IncludeWhen: common.IncludeWhen,
+		ReadyWhen:   common.ReadyWhen,
+	}
+	if override, ok := ctx.nodeSchemaOverrides[n.ID]; ok {
+		return node, override, nil
+	}
+	return node, inferDefSchema(payload), nil
+}
+
 func (ctx *CompilationContext) buildNode(p *parser.Parser, n *expv1alpha1.Node, order int) (*Node, *spec.Schema, error) {
 	kind, payload, err := projectPayload(n)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	// Def nodes have no target GVK, but we still infer an OpenAPI
-	// schema from the literal payload so the typed CEL env can narrow
-	// def-sourced expressions. Fields whose literal value is a CEL
-	// fragment (e.g. `${other.x}`) stay dyn — see inferDefSchema.
-	// Literal def nodes (e.g. instance schema nodes) skip expression parsing.
+	// Def nodes have no target GVK; they are built entirely from the literal
+	// payload (see buildDefNode).
 	if kind == NodeKindDef {
-		var descriptors []variable.FieldDescriptor
-		if _, isLiteral := ctx.literalNodes[n.ID]; !isLiteral {
-			var err error
-			descriptors, _, err = parser.ParseSchemalessResource(payload)
-			if err != nil {
-				return nil, nil, fmt.Errorf("parse def payload: %w", err)
-			}
-		}
-		common, err := parseNodeCommon(n, descriptors)
-		if err != nil {
-			return nil, nil, err
-		}
-		node := &Node{
-			ID:          n.ID,
-			Index:       order,
-			Kind:        kind,
-			Object:      &unstructured.Unstructured{Object: payload},
-			Variables:   common.Variables,
-			ForEach:     common.ForEach,
-			IncludeWhen: common.IncludeWhen,
-			ReadyWhen:   common.ReadyWhen,
-		}
-		if override, ok := ctx.nodeSchemaOverrides[n.ID]; ok {
-			return node, override, nil
-		}
-		return node, inferDefSchema(payload), nil
+		return ctx.buildDefNode(n, order, payload)
 	}
 
 	// A Template or Patch whose apiVersion or kind is a CEL expression has
@@ -217,6 +223,11 @@ func (ctx *CompilationContext) buildNode(p *parser.Parser, n *expv1alpha1.Node, 
 	authoredManifest := kind == NodeKindTemplate || kind == NodeKindPatch
 	if err := validateKubernetesObjectStructure(payload, authoredManifest); err != nil {
 		return nil, nil, err
+	}
+	if kind == NodeKindPatch {
+		if err := validatePatchPayload(payload); err != nil {
+			return nil, nil, err
+		}
 	}
 	gvk, err := extractGVKFromUnstructured(payload)
 	if err != nil {
@@ -375,6 +386,35 @@ func derivePatchEndpoint(payload map[string]any) (string, error) {
 	}
 }
 
+// validatePatchPayload rejects fields a patch node must never contribute,
+// independent of target GVK (so it runs for literal- and dynamic-GVK patches):
+//
+//   - Legacy shape: top-level `body`/`subresource`. A literal GVK's schema
+//     type-check already rejects these, but a dynamic-GVK patch is schemaless
+//     and would otherwise route to the main resource and silently drop the
+//     contribution — this closes that bypass.
+//   - Identity/lifecycle metadata: metadata.ownerReferences, finalizers,
+//     deletionTimestamp, uid. A patch contributes fields without owning the
+//     target; these could make the GC delete or terminate a target the patch
+//     does not own, breaking the CRD's "never deletes its target" guarantee.
+func validatePatchPayload(payload map[string]any) error {
+	for _, key := range []string{"body", "subresource"} {
+		if _, ok := payload[key]; ok {
+			return fmt.Errorf("patch node has a legacy top-level %q field: patch nodes are raw partial manifests — author the contributed fields directly (a top-level status routes to the status subresource, everything else to the main resource) instead of wrapping them in body/subresource", key)
+		}
+	}
+	md, ok := payload["metadata"].(map[string]any)
+	if !ok {
+		return nil
+	}
+	for _, key := range []string{"ownerReferences", "finalizers", "deletionTimestamp", "uid"} {
+		if _, ok := md[key]; ok {
+			return fmt.Errorf("patch node payload must not set metadata.%s: a patch contributes fields under a dedicated field manager without owning the target and must never delete it, so identity/lifecycle metadata (ownerReferences, finalizers, deletionTimestamp, uid) is rejected", key)
+		}
+	}
+	return nil
+}
+
 // buildDynamicNode compiles a Template or Patch whose apiVersion or kind is
 // a CEL expression. There is no compile-time GVK, so we skip schema
 // resolution and REST mapping, parse the payload schemaless, and mark the
@@ -402,6 +442,9 @@ func (ctx *CompilationContext) buildDynamicNode(
 	}
 	var subresource string
 	if kind == NodeKindPatch {
+		if err := validatePatchPayload(payload); err != nil {
+			return nil, nil, err
+		}
 		subresource, err = derivePatchEndpoint(payload)
 		if err != nil {
 			return nil, nil, err

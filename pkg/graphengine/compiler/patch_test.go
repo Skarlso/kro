@@ -244,3 +244,151 @@ func TestCompilePatch_MetadataNameIsTheTarget(t *testing.T) {
 	assert.Equal(t, NodeKindPatch, n.Kind)
 	assert.Equal(t, "configmaps", n.GVR.Resource)
 }
+
+// TestCompilePatch_DynamicGVK_LegacyBodyRejected is a regression test for the
+// dynamic-GVK bypass: a dynamic-GVK patch node is parsed schemaless, so a
+// legacy-shaped payload carrying top-level body:/subresource: fields used to
+// compile cleanly and route to the main resource — silently treating body and
+// subresource as literal fields and dropping the intended status contribution.
+// It must now be rejected exactly as a literal-GVK patch is.
+func TestCompilePatch_DynamicGVK_LegacyBodyRejected(t *testing.T) {
+	t.Parallel()
+
+	g := generator.NewGraph("g",
+		generator.WithDef("cfg", map[string]any{"group": "v1"}),
+		generator.WithPatchManifest("p", map[string]any{
+			"apiVersion":  "${cfg.group}",
+			"kind":        "ConfigMap",
+			"metadata":    map[string]any{"name": "existing"},
+			"subresource": "status",
+			"body":        map[string]any{"status": map[string]any{"phase": "Running"}},
+		}),
+	)
+
+	_, err := newTestCompiler(t).Compile(g)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "legacy top-level")
+}
+
+// TestCompilePatch_LegacyBodyRejected verifies a literal-GVK patch node with a
+// legacy top-level body: field is rejected with the same clear error.
+func TestCompilePatch_LegacyBodyRejected(t *testing.T) {
+	t.Parallel()
+
+	g := generator.NewGraph("g",
+		generator.WithPatchManifest("p", map[string]any{
+			"apiVersion":  "v1",
+			"kind":        "ConfigMap",
+			"metadata":    map[string]any{"name": "existing"},
+			"subresource": "status",
+			"body":        map[string]any{"data": map[string]any{"k": "v"}},
+		}),
+	)
+
+	_, err := newTestCompiler(t).Compile(g)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "legacy top-level")
+}
+
+// TestCompilePatch_RejectsOwnerReferences is a regression test for the
+// documented guarantee that a patch never deletes its target: a patch that
+// stamps metadata.ownerReferences onto a target it does not own could make the
+// garbage collector delete that target, so it must be rejected at compile time.
+func TestCompilePatch_RejectsOwnerReferences(t *testing.T) {
+	t.Parallel()
+
+	g := generator.NewGraph("g",
+		generator.WithPatchManifest("p", map[string]any{
+			"apiVersion": "v1",
+			"kind":       "ConfigMap",
+			"metadata": map[string]any{
+				"name": "existing",
+				"ownerReferences": []any{map[string]any{
+					"apiVersion": "v1",
+					"kind":       "ConfigMap",
+					"name":       "owner",
+					"uid":        "abc",
+				}},
+			},
+			"data": map[string]any{"k": "v"},
+		}),
+	)
+
+	_, err := newTestCompiler(t).Compile(g)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "metadata.ownerReferences")
+}
+
+// TestCompilePatch_RejectsFinalizers verifies a patch payload carrying
+// metadata.finalizers is rejected — finalizers are lifecycle metadata a patch
+// must not contribute.
+func TestCompilePatch_RejectsFinalizers(t *testing.T) {
+	t.Parallel()
+
+	g := generator.NewGraph("g",
+		generator.WithPatchManifest("p", map[string]any{
+			"apiVersion": "v1",
+			"kind":       "ConfigMap",
+			"metadata": map[string]any{
+				"name":       "existing",
+				"finalizers": []any{"example.com/hold"},
+			},
+			"data": map[string]any{"k": "v"},
+		}),
+	)
+
+	_, err := newTestCompiler(t).Compile(g)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "metadata.finalizers")
+}
+
+// TestCompilePatch_RejectsDeletionTimestamp verifies a patch payload carrying
+// metadata.deletionTimestamp is rejected — it would drive termination of the
+// target, breaking the never-deletes guarantee.
+func TestCompilePatch_RejectsDeletionTimestamp(t *testing.T) {
+	t.Parallel()
+
+	g := generator.NewGraph("g",
+		generator.WithPatchManifest("p", map[string]any{
+			"apiVersion": "v1",
+			"kind":       "ConfigMap",
+			"metadata": map[string]any{
+				"name":              "existing",
+				"deletionTimestamp": "2026-01-01T00:00:00Z",
+			},
+			"data": map[string]any{"k": "v"},
+		}),
+	)
+
+	_, err := newTestCompiler(t).Compile(g)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "metadata.deletionTimestamp")
+}
+
+// TestCompilePatch_DynamicGVK_RejectsOwnerReferences verifies the
+// identity/lifecycle metadata guard also runs on the dynamic-GVK path.
+func TestCompilePatch_DynamicGVK_RejectsOwnerReferences(t *testing.T) {
+	t.Parallel()
+
+	g := generator.NewGraph("g",
+		generator.WithDef("cfg", map[string]any{"group": "v1"}),
+		generator.WithPatchManifest("p", map[string]any{
+			"apiVersion": "${cfg.group}",
+			"kind":       "ConfigMap",
+			"metadata": map[string]any{
+				"name": "existing",
+				"ownerReferences": []any{map[string]any{
+					"apiVersion": "v1",
+					"kind":       "ConfigMap",
+					"name":       "owner",
+					"uid":        "abc",
+				}},
+			},
+			"data": map[string]any{"k": "v"},
+		}),
+	)
+
+	_, err := newTestCompiler(t).Compile(g)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "metadata.ownerReferences")
+}
