@@ -211,6 +211,12 @@ func TestSimple_ApplyTemplate_CollectionApplyTolerance(t *testing.T) {
 
 		require.NoError(t, err,
 			"a tolerated update conflict on objects that exist must not hold the node not-ready")
+		// The per-item error is dropped by design (see recordUpdateRejected): a
+		// tolerated update-rejection is silent — the object is present, so the
+		// node converges and the underlying conflict is NOT surfaced as any
+		// returned error. (This pins the corrected comment: the rejection is not
+		// escalated to a hard error, and — the RGD path having no per-node
+		// condition message for a converged node — it is not surfaced at all.)
 		names := make([]string, 0, len(res.Applied))
 		for _, a := range res.Applied {
 			names = append(names, a.Name)
@@ -264,6 +270,48 @@ func TestSimple_ApplyTemplate_CollectionApplyTolerance(t *testing.T) {
 		assert.Empty(t, res.Applied,
 			"nothing landed, so nothing may be advertised as applied")
 	})
+}
+
+// TestCollectionApplyState_UpdateRejectedIsSilent pins the corrected contract
+// behind the FINDING-1 comment fix: recordUpdateRejected records the live
+// identity (so the item lands in Applied) but records NO item failure and NO
+// hard error — the tolerated update-rejection is intentionally silent and is
+// NOT surfaced as any returned error. The old comment claimed the per-item
+// error was "surfaced in the node's condition message", which was false; this
+// test guards against that false claim creeping back in as behavior (e.g. a
+// well-meaning change that starts returning the dropped error).
+func TestCollectionApplyState_UpdateRejectedIsSilent(t *testing.T) {
+	t.Parallel()
+
+	st := &collectionApplyState{
+		results:      make([]*expv1alpha1.ManagedResource, 2),
+		hardErrors:   make([]error, 2),
+		itemFailures: make([]error, 2),
+	}
+
+	current := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "v1", "kind": "ConfigMap",
+		"metadata": map[string]any{"name": "cm-alpha", "namespace": "default"},
+	}}
+	desired := []*unstructured.Unstructured{{}, {}}
+
+	st.recordUpdateRejected(0, expv1alpha1.ManagedResource{Name: "cm-alpha", Namespace: "default"}, desired, current)
+
+	// Identity is tracked — the item converges into Applied.
+	applied := st.appliedResources()
+	require.Len(t, applied, 1, "the rejected-but-present item keeps its tracked identity")
+	assert.Equal(t, "cm-alpha", applied[0].Name)
+
+	// The desired slot is replaced with the live object so downstream scope
+	// sees what actually landed.
+	assert.Same(t, current, desired[0], "the desired slot is replaced with the live object")
+
+	// The tolerated rejection is silent: neither a soft item failure nor a
+	// hard error is recorded, so nothing is surfaced up the walk.
+	assert.NoError(t, st.softError("node"),
+		"a tolerated update-rejection must not be surfaced as a soft not-ready error")
+	assert.NoError(t, st.hardError(),
+		"a tolerated update-rejection must not be surfaced as a hard error")
 }
 
 type concurrencyTrackingClient struct {

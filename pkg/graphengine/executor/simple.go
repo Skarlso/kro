@@ -748,7 +748,7 @@ func (s *Simple) applyCollectionTemplate(ctx context.Context, w watchrouter.Watc
 	// namespaced watch is cheaper than an all-namespaces one, so this avoids
 	// the broad watch for the common single-namespace case.
 	ns := s.collectionWatchNamespace(rt, desired, mappings)
-	if err := s.watchCollection(w, n, mappings[0].gvr, desired[0], ns); err != nil {
+	if err := s.watchCollection(w, rt, n, mappings[0].gvr, desired[0], ns); err != nil {
 		return []expv1alpha1.ManagedResource{}, fmt.Errorf("register collection watch: %w", err)
 	}
 
@@ -837,9 +837,12 @@ func (s *Simple) applyCollectionItem(ctx context.Context, rt *runtime.Runtime, n
 			// change fields ...`): the object is present in the cluster, so record
 			// the live identity and let the collection converge rather than block
 			// the node forever on an unfixable update. (Integration coverage:
-			// collection_test.go deep-chaining scale up/down relies on this.) The
-			// per-item error is surfaced in the node's condition message, not
-			// escalated to a walk-aborting hard error.
+			// collection_test.go deep-chaining scale up/down relies on this.)
+			// The per-item error is intentionally NOT surfaced: the object is
+			// present, so the node converges (this item is recorded in Applied)
+			// and the failure is neither escalated to a walk-aborting hard error
+			// nor returned as a soft not-ready. recordUpdateRejected therefore
+			// drops the error by design.
 			st.recordUpdateRejected(i, managedResourceFrom(n, current), desired, current)
 			return nil
 		}
@@ -1213,9 +1216,11 @@ func (s *Simple) collectionWatchNamespace(rt *runtime.Runtime, desired []*unstru
 // the value stampKROMeta writes into the kro.run/node-id label — so two sibling
 // subgraphs that reuse the same local node ID get distinct tokens
 // ("subA.res" vs "subB.res") and no longer cross-match each other's items. The
-// instance-id label is stamped by the LabelInjector (invoked here so it is
-// present before the selector is built, idempotent with the apply-time call);
-// if it is absent the selector falls back to node-id only.
+// instance-id label scopes the watch to THIS Graph: the RGD/instance path
+// stamps it via LabelInjector; the standalone Graph path (no LabelInjector)
+// falls back to the Graph's own UID. Without it, two Graphs whose collection
+// nodes share a node id would register byte-identical watches and wake each
+// other on every event.
 //
 // ns is the watch namespace computed by collectionWatchNamespace: a single
 // namespace when the whole collection lands there, or "" (all-namespaces) when
@@ -1223,7 +1228,7 @@ func (s *Simple) collectionWatchNamespace(rt *runtime.Runtime, desired []*unstru
 // cheaper watch than the all-namespaces one; the broad watch is used only when
 // the collection genuinely needs it (see the "corrects drift ... in every
 // namespace the collection spans" integration test).
-func (s *Simple) watchCollection(w watchrouter.Watcher, n *runtime.Node, gvr schema.GroupVersionResource, sample *unstructured.Unstructured, ns string) error {
+func (s *Simple) watchCollection(w watchrouter.Watcher, rt *runtime.Runtime, n *runtime.Node, gvr schema.GroupVersionResource, sample *unstructured.Unstructured, ns string) error {
 	if w == nil {
 		return nil
 	}
@@ -1231,7 +1236,13 @@ func (s *Simple) watchCollection(w watchrouter.Watcher, n *runtime.Node, gvr sch
 		s.LabelInjector(sample)
 	}
 	set := labels.Set{metadata.NodeIDLabel: s.nodeIDToken(n.ID())}
-	if uid := sample.GetLabels()[metadata.InstanceIDLabel]; uid != "" {
+	// Scope to this Graph: fall back to the Graph UID when no LabelInjector
+	// stamped an instance-id (standalone Graph path).
+	uid := sample.GetLabels()[metadata.InstanceIDLabel]
+	if uid == "" {
+		uid = string(rt.Graph().GetUID())
+	}
+	if uid != "" {
 		set[metadata.InstanceIDLabel] = uid
 	}
 	return w.Watch(watchrouter.WatchRequest{
@@ -1310,7 +1321,7 @@ func (s *Simple) applyPatch(ctx context.Context, rt *runtime.Runtime, w watchrou
 
 	fieldManager := patchFieldManager(rt.Graph().GetUID(), s.qualifiedPath(n.ID()))
 	subresource := n.Subresource()
-	if err := s.contributeApply(ctx, obj, fieldManager, subresource); err != nil {
+	if err := s.contributeApply(ctx, current, obj, fieldManager, subresource); err != nil {
 		if apierrors.IsConflict(err) {
 			return Contribution{}, fmt.Errorf("patch field conflict on %s %q: %w (%w)",
 				obj.GetKind(), client.ObjectKeyFromObject(obj), err, ErrNotReady)
@@ -1329,17 +1340,29 @@ func (s *Simple) applyPatch(ctx context.Context, rt *runtime.Runtime, w watchrou
 	}, nil
 }
 
-// contributeApply server-side applies obj under fieldManager without taking
-// ownership of the whole object (no ForceOwnership) for non-status patches,
-// so it claims only the fields it sets. A status-subresource patch is routed
-// through the status endpoint with ForceOwnership so status writeback reclaims
-// fields previously owned by a legacy Update manager; everything else applies
-// to the main resource via ssaApply without force.
-func (s *Simple) contributeApply(ctx context.Context, obj *unstructured.Unstructured, fieldManager, subresource string) error {
+// contributeApply server-side applies obj under fieldManager. A status patch
+// forces ownership so status writeback reclaims fields from a legacy Update
+// manager. A non-status patch applies unforced so the API server reports a
+// field-level 409 rather than silently stealing a field owned by a human,
+// another controller, or a peer Graph — the caller surfaces that as soft
+// not-ready. The exception is a conflict with this Graph's OWN stale patch
+// identity (see hasReclaimableStalePatchManager): unforced it would deadlock
+// forever, so we re-apply with force, which SSA scopes to only the fields this
+// manager sets. current is the live object read just before this call.
+func (s *Simple) contributeApply(ctx context.Context, current, obj *unstructured.Unstructured, fieldManager, subresource string) error {
 	if subresource == "status" {
 		return s.Client.Status().Patch(ctx, obj, client.Apply, client.FieldOwner(fieldManager), client.ForceOwnership)
 	}
-	return s.ssaApply(ctx, obj, fieldManager, false)
+	err := s.ssaApply(ctx, obj, fieldManager, false)
+	if err == nil || !apierrors.IsConflict(err) {
+		return err
+	}
+	// Force-reclaim only our own stale identity; leave a foreign/peer conflict
+	// for the caller to surface as soft not-ready.
+	if hasReclaimableStalePatchManager(current, fieldManager) {
+		return s.ssaApply(ctx, obj, fieldManager, true)
+	}
+	return err
 }
 
 // Release relinquishes the fields each contribution's field manager owns by
@@ -1371,28 +1394,77 @@ func (s *Simple) Release(ctx context.Context, contributions []Contribution) erro
 	return nil
 }
 
-// patchFieldManager derives a stable, unique field-manager identity for a
-// patch node: the first 12 hex characters of sha256(parentUID + "/" + nodeID),
-// prefixed so it reads as a kro-owned patch manager and stays under the
-// 128-character SSA limit. nodeID is the node's fully-qualified path
-// (e.g. "subA/res"), so two sibling subgraphs that reuse the same local id get
-// distinct field managers — without qualification their patch nodes would share
-// one manager and release-on-prune could drop the other subgraph's fields.
-// Stability across reconciles is what lets release-on-prune drop exactly the
-// fields a given patch node contributed.
+// patchFieldManagerPrefix marks a field manager as a kro Graph patch writer.
+const patchFieldManagerPrefix = "kro-graphengine.patch."
+
+// patchFieldManager derives a stable per-Graph patch identity formatted as
+// "<prefix><graphSeg>.<nodeSeg>": graphSeg is sha256(parentUID)[:12], nodeSeg
+// is sha256(parentUID+"/"+nodeID)[:12]. Qualifying by nodeID keeps sibling
+// subgraphs that reuse a local id distinct; embedding graphSeg lets the
+// conflict classifier recognize two managers of the same Graph as our own
+// (vs a peer). nodeID is the node's fully-qualified path (e.g. "subA/res").
 func patchFieldManager(parentUID types.UID, nodeID string) string {
 	h := sha256.New()
 	h.Write([]byte(parentUID))
 	h.Write([]byte("/"))
 	h.Write([]byte(nodeID))
 	sum := h.Sum(nil)
-	return "kro-graphengine.patch." + hex.EncodeToString(sum[:6])
+	return patchFieldManagerPrefix + graphManagerSegment(parentUID) + "." + hex.EncodeToString(sum[:6])
+}
+
+// patchManagerGraphSegment returns the per-Graph segment of a patch manager
+// ("<prefix><graphSeg>.<nodeSeg>"), or "" for a non-patch manager or a legacy
+// pre-segment manager ("<prefix><hash>", no dot).
+func patchManagerGraphSegment(manager string) string {
+	if !strings.HasPrefix(manager, patchFieldManagerPrefix) {
+		return ""
+	}
+	rest := manager[len(patchFieldManagerPrefix):]
+	if dot := strings.IndexByte(rest, '.'); dot >= 0 {
+		return rest[:dot]
+	}
+	return ""
+}
+
+// hasReclaimableStalePatchManager reports whether current carries a patch
+// manager (other than self) that is this Graph's own stale identity — safe to
+// force-reclaim. That is a manager sharing self's per-Graph segment, or a
+// legacy pre-segment manager (only an older kro build produced those). A peer
+// Graph's patch manager (different segment) and any non-kro manager are never
+// reclaimable. A nil current is never reclaimable.
+func hasReclaimableStalePatchManager(current *unstructured.Unstructured, self string) bool {
+	if current == nil {
+		return false
+	}
+	selfGraph := patchManagerGraphSegment(self)
+	for _, mf := range current.GetManagedFields() {
+		if mf.Manager == self || !strings.HasPrefix(mf.Manager, patchFieldManagerPrefix) {
+			continue
+		}
+		seg := patchManagerGraphSegment(mf.Manager)
+		if seg == "" || (selfGraph != "" && seg == selfGraph) {
+			return true
+		}
+	}
+	return false
 }
 
 // templateFieldManagerPrefix marks a field manager as a kro Graph template
 // writer. The classifier keys on this prefix to tell a peer Graph's ownership
 // (reject) apart from external drift (force-reclaim).
 const templateFieldManagerPrefix = "kro-graphengine.tmpl."
+
+// graphManagerSegment derives the per-Graph segment embedded in a template
+// field manager: the first 12 hex characters of sha256(parentUID). Two nodes
+// in the SAME Graph share this segment even though their full managers differ
+// by nodeID, so the conflict classifier can tell a self-conflict (same Graph,
+// different node) apart from a peer-Graph conflict (different Graph).
+func graphManagerSegment(parentUID types.UID) string {
+	h := sha256.New()
+	h.Write([]byte(parentUID))
+	sum := h.Sum(nil)
+	return hex.EncodeToString(sum[:6])
+}
 
 // ErrFieldManagerConflict is the sentinel returned when a Template object's
 // field is already owned by a DIFFERENT kro Graph's template field manager.
@@ -1403,41 +1475,71 @@ const templateFieldManagerPrefix = "kro-graphengine.tmpl."
 var ErrFieldManagerConflict = errors.New("executor: field owned by a foreign field manager")
 
 // templateFieldManager derives a stable, per-Graph field-manager identity for a
-// Template node, mirroring patchFieldManager: the first 12 hex characters of
-// sha256(parentUID + "/" + nodeID), under the tmpl prefix so the conflict
-// classifier recognizes it as a kro Graph template writer. Keyed on the Graph
-// UID, two distinct Graphs that template the same object get distinct managers,
-// so SSA reports a field-level conflict instead of silently reassigning
-// ownership; keyed on the qualified nodeID, sibling subgraph nodes that reuse a
-// local id stay distinct.
+// Template node. The manager is formatted as
+// "<prefix><graphSegment>.<nodeSegment>" where graphSegment is the first 12 hex
+// characters of sha256(parentUID) and nodeSegment is the first 12 hex
+// characters of sha256(parentUID + "/" + nodeID). Keyed on the Graph UID, two
+// distinct Graphs that template the same object get distinct managers, so SSA
+// reports a field-level conflict instead of silently reassigning ownership;
+// keyed on the qualified nodeID, sibling subgraph nodes that reuse a local id
+// stay distinct. Embedding the Graph segment explicitly lets the conflict
+// classifier recognize two managers from the SAME Graph as non-foreign even
+// though their full strings differ.
 func templateFieldManager(parentUID types.UID, nodeID string) string {
 	h := sha256.New()
 	h.Write([]byte(parentUID))
 	h.Write([]byte("/"))
 	h.Write([]byte(nodeID))
 	sum := h.Sum(nil)
-	return templateFieldManagerPrefix + hex.EncodeToString(sum[:6])
+	return templateFieldManagerPrefix + graphManagerSegment(parentUID) + "." + hex.EncodeToString(sum[:6])
 }
 
 // ownedByForeignGraphTemplate reports whether current carries a managedFields
-// entry under a kro Graph template manager (templateFieldManagerPrefix) OTHER
-// than self. It is how a template apply tells a peer Graph's ownership (which
-// must not be stolen) apart from external drift by a human or another
-// controller (which a forced re-apply legitimately reclaims). A nil current
-// (absent object) is never foreign-owned.
+// entry under a kro Graph template manager (templateFieldManagerPrefix) that
+// belongs to a DIFFERENT Graph than self. It is how a template apply tells a
+// peer Graph's ownership (which must not be stolen) apart from (a) external
+// drift by a human or another controller (which a forced re-apply legitimately
+// reclaims) and (b) a self-conflict with a SIBLING node of the same Graph
+// (regression from commit 7dd5dbc0: two nodes of one Graph touching the same
+// field must not deadlock blaming a "foreign" manager that is actually us). A
+// manager sharing self's per-Graph segment is the same Graph and is exempt; a
+// nil current (absent object) is never foreign-owned.
 func ownedByForeignGraphTemplate(current *unstructured.Unstructured, self string) bool {
 	if current == nil {
 		return false
 	}
+	selfGraph := templateManagerGraphSegment(self)
 	for _, mf := range current.GetManagedFields() {
 		if mf.Manager == self {
 			continue
 		}
-		if strings.HasPrefix(mf.Manager, templateFieldManagerPrefix) {
-			return true
+		if !strings.HasPrefix(mf.Manager, templateFieldManagerPrefix) {
+			continue
 		}
+		// Same Graph, different node: a self-conflict, not a peer Graph.
+		// Exempt it so a single Graph whose nodes touch the same field does
+		// not deadlock reporting itself as foreign.
+		if selfGraph != "" && templateManagerGraphSegment(mf.Manager) == selfGraph {
+			continue
+		}
+		return true
 	}
 	return false
+}
+
+// templateManagerGraphSegment extracts the per-Graph segment from a template
+// field manager formatted by templateFieldManager
+// ("<prefix><graphSegment>.<nodeSegment>"). Returns "" for a manager that does
+// not carry the tmpl prefix or is otherwise malformed.
+func templateManagerGraphSegment(manager string) string {
+	if !strings.HasPrefix(manager, templateFieldManagerPrefix) {
+		return ""
+	}
+	rest := manager[len(templateFieldManagerPrefix):]
+	if dot := strings.IndexByte(rest, '.'); dot >= 0 {
+		return rest[:dot]
+	}
+	return ""
 }
 
 // applyTemplateObject SSA-applies a resolved Template object, choosing the

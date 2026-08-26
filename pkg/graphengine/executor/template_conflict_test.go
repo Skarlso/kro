@@ -83,6 +83,48 @@ func TestOwnedByForeignGraphTemplate(t *testing.T) {
 		"a peer Graph among other managers is still foreign-owned")
 }
 
+// TestOwnedByForeignGraphTemplate_SameGraphSiblingNotForeign is the regression
+// test for the self-conflict introduced by commit 7dd5dbc0: two Template nodes
+// of the SAME Graph (same parentUID, different nodeID) get distinct field
+// managers, but a field owned by one must NOT be reported as "foreign" to the
+// other — they are the same Graph, so a forced re-apply is legitimate and the
+// Graph must not deadlock blaming itself. Before the fix this returned true
+// (self reported as foreign); after the fix a shared per-Graph segment exempts
+// it.
+func TestOwnedByForeignGraphTemplate_SameGraphSiblingNotForeign(t *testing.T) {
+	t.Parallel()
+
+	// Same Graph UID, two different node ids — e.g. two nodes that template
+	// (and contend over) the same object within one Graph.
+	self := templateFieldManager(types.UID("same-graph"), "nodeA")
+	sibling := templateFieldManager(types.UID("same-graph"), "nodeB")
+	require.NotEqual(t, self, sibling, "sibling nodes get distinct managers")
+
+	withManagers := func(names ...string) *unstructured.Unstructured {
+		o := &unstructured.Unstructured{Object: map[string]any{
+			"apiVersion": "v1", "kind": "ConfigMap",
+			"metadata": map[string]any{"name": "cm", "namespace": "default"},
+		}}
+		mf := make([]metav1.ManagedFieldsEntry, 0, len(names))
+		for _, n := range names {
+			mf = append(mf, metav1.ManagedFieldsEntry{Manager: n, Operation: metav1.ManagedFieldsOperationApply})
+		}
+		o.SetManagedFields(mf)
+		return o
+	}
+
+	assert.False(t, ownedByForeignGraphTemplate(withManagers(sibling), self),
+		"a sibling node of the SAME Graph is a self-conflict, not foreign")
+	assert.False(t, ownedByForeignGraphTemplate(withManagers("kubectl", sibling), self),
+		"a same-Graph sibling among other managers is still not foreign")
+
+	// A genuine peer Graph (different UID) must still be foreign even when a
+	// same-Graph sibling is also present.
+	peer := templateFieldManager(types.UID("other-graph"), "nodeA")
+	assert.True(t, ownedByForeignGraphTemplate(withManagers(sibling, peer), self),
+		"a real peer Graph is still foreign even alongside a same-Graph sibling")
+}
+
 // contestedGraph builds and compiles a Graph that templates a single ConfigMap
 // named "contested" in ns with data.owner=owner — Skarlso's repro shape.
 func contestedGraph(t *testing.T, name, owner, ns string) *krotruntime.Runtime {
