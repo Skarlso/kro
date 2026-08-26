@@ -144,7 +144,7 @@ rules:
   - patch
   - delete
 # kro impersonates a ServiceAccount in the instance's namespace when applying a
-# graph's child resources (see ResourceGraphDefinitionSpec.serviceAccountName),
+# graph's child resources (see GraphSpec.serviceAccountName),
 # confining child-resource access to that ServiceAccount's RBAC by default. The
 # controller therefore needs the "impersonate" verb on serviceaccounts.
 - apiGroups:

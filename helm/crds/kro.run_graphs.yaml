@@ -277,7 +277,7 @@ spec:
                   The kro controller ServiceAccount must be granted the "impersonate" verb
                   on serviceaccounts for this to take effect.
                 maxLength: 253
-                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
                 type: string
             required:
             - nodes

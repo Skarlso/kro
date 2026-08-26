@@ -55,7 +55,7 @@ type GraphSpec struct {
 	// on serviceaccounts for this to take effect.
 	//
 	// +kubebuilder:validation:Optional
-	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?$`
+	// +kubebuilder:validation:Pattern=`^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$`
 	// +kubebuilder:validation:MaxLength=253
 	ServiceAccountName string `json:"serviceAccountName,omitempty"`
 }
