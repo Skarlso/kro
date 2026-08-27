@@ -220,7 +220,7 @@ where the target resource type isn't known at author time:
 Node modifiers provide conditional logic, health checking, and repetition. In the implementation, modifiers are strictly validated per node type:
 
 - `forEach`: Supported on `template` and `def` nodes. Stamps one instance per element (or cartesian product across multiple dimensions). Explicitly rejected on `graph`, `patch`, and `ref` nodes.
-- `includeWhen`: Supported on `template`, `ref`, `def`, and `patch` nodes. When false, the node is skipped (and template resources are pruned). Rejected on `graph` nodes.
+- `includeWhen`: Supported on `template`, `ref`, `def`, and `patch` nodes. When false, the node is skipped (and template resources are pruned). The skip is contagious — nodes depending on a skipped node are skipped too, rather than erroring on the missing reference. Rejected on `graph` nodes.
 - `readyWhen`: Supported on `template`, `ref`, `def`, and `patch` nodes. Evaluated against scope to determine whether the node is ready. Rejected on `graph` nodes.
 - `propagateWhen`: Planned / Not yet implemented (deferred to KREP-006).
 
@@ -405,7 +405,7 @@ ServiceAccount. For this to take effect the **kro controller ServiceAccount must
 Where impersonation is not wired (e.g. unit tests), the executor falls back to the controller
 identity.
 
-**Controller self-impersonation guard.** The one identity the namespace confinement does *not*
+**Controller self-impersonation guard.** The one identity the namespace confinement does _not_
 naturally protect against is the kro controller's **own** ServiceAccount: a Graph created in the
 controller's namespace could name the controller SA (or its `default` could resolve to it) and thereby
 apply resources under the controller's own broad identity — turning `create graphs` in that namespace
@@ -413,7 +413,7 @@ into an escalation to the controller's privileges. The controller therefore know
 (via `--controller-namespace`/`--controller-service-account`, wired from the downward API and the
 ServiceAccount name in the Helm chart) and **refuses** any Graph whose resolved impersonation username
 equals it, marking the Graph `Accepted=False` (reason `InvalidGraph`) before compile or apply. This
-guard covers only the controller's *own* SA; any *other* privileged ServiceAccount reachable in a
+guard covers only the controller's _own_ SA; any _other_ privileged ServiceAccount reachable in a
 namespace remains the operator's responsibility to scope via RBAC (and, if desired, by restricting the
 controller's `impersonate` grant with `resourceNames`).
 

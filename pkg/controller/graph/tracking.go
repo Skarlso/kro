@@ -179,32 +179,43 @@ func intendedManagedResources(rt *krotruntime.Runtime) []expv1alpha1.ManagedReso
 	return out
 }
 
-// unionManagedResources concatenates previous and applied, deduping on
-// identity. Used when an Apply hit a soft or hard error — we don't
-// trust the diff result enough to prune, so we widen status to cover
-// everything we know about. Order preserves previous first, then
-// newly-applied entries that previous didn't already have.
+// unionManagedResources merges previous and applied, deduping on identity.
+// Used after a soft or hard Apply error, where the diff isn't trustworthy
+// enough to prune, so status is widened to cover everything we know about.
+// Order keeps previous first, then applied entries previous didn't have.
+//
+// Dedup is UID-aware. keyOf excludes UID (so a UID-free write-ahead intent
+// entry dedups against its applied counterpart), but on a key collision the
+// surviving entry keeps whichever side's UID is set. This matters because
+// every caller passes the UID-free previous/intent set first: plain first-wins
+// would let it mask the real UID from the SSA response, leaving the resource
+// stranded in status with no UID — which Simple.Delete then refuses to delete,
+// leaking it on teardown. A later UID also overrides an earlier one, so a
+// delete+recreate picks up the fresh UID.
 func unionManagedResources(
 	previous []expv1alpha1.ManagedResource,
 	applied []expv1alpha1.ManagedResource,
 ) []expv1alpha1.ManagedResource {
-	seen := make(map[resourceKey]struct{}, len(previous)+len(applied))
+	idx := make(map[resourceKey]int, len(previous)+len(applied))
 	out := make([]expv1alpha1.ManagedResource, 0, len(previous)+len(applied))
-	for _, r := range previous {
+	add := func(r expv1alpha1.ManagedResource) {
 		k := keyOf(r)
-		if _, dup := seen[k]; dup {
-			continue
+		if i, dup := idx[k]; dup {
+			// Already tracked. Take this entry's UID when set, so a UID-free
+			// entry adopts a real UID and a later UID wins on recreate.
+			if r.UID != "" {
+				out[i].UID = r.UID
+			}
+			return
 		}
-		seen[k] = struct{}{}
+		idx[k] = len(out)
 		out = append(out, r)
 	}
+	for _, r := range previous {
+		add(r)
+	}
 	for _, r := range applied {
-		k := keyOf(r)
-		if _, dup := seen[k]; dup {
-			continue
-		}
-		seen[k] = struct{}{}
-		out = append(out, r)
+		add(r)
 	}
 	return out
 }

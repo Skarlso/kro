@@ -37,6 +37,13 @@ func r(nodeID, kind, name string) expv1alpha1.ManagedResource {
 	}
 }
 
+// rUID is r with an explicit UID, for the write-ahead/SSA merge cases.
+func rUID(nodeID, kind, name, uid string) expv1alpha1.ManagedResource {
+	mr := r(nodeID, kind, name)
+	mr.UID = uid
+	return mr
+}
+
 // TestDiffManagedResources walks the key shapes the reconciler relies
 // on. The contract: newSet = Applied ∪ entries preserved from previous
 // because their NodeID is Unresolved; pruneCandidates = previous \ that.
@@ -196,6 +203,46 @@ func TestUnionManagedResources(t *testing.T) {
 			name:    "empty previous returns applied",
 			applied: []expv1alpha1.ManagedResource{r("n1", "ConfigMap", "a")},
 			want:    []expv1alpha1.ManagedResource{r("n1", "ConfigMap", "a")},
+		},
+		{
+			// Regression: the UID-free intent comes first but must not mask the
+			// real UID from the applied set, else Simple.Delete leaks it.
+			name: "UID-free intent adopts UID from applied entry",
+			previous: []expv1alpha1.ManagedResource{
+				r("n1", "ConfigMap", "a"),
+			},
+			applied: []expv1alpha1.ManagedResource{
+				rUID("n1", "ConfigMap", "a", "uid-1"),
+			},
+			want: []expv1alpha1.ManagedResource{
+				rUID("n1", "ConfigMap", "a", "uid-1"),
+			},
+		},
+		{
+			// A UID known in previous survives a UID-free applied entry.
+			name: "known UID survives UID-free applied entry",
+			previous: []expv1alpha1.ManagedResource{
+				rUID("n1", "ConfigMap", "a", "uid-1"),
+			},
+			applied: []expv1alpha1.ManagedResource{
+				r("n1", "ConfigMap", "a"),
+			},
+			want: []expv1alpha1.ManagedResource{
+				rUID("n1", "ConfigMap", "a", "uid-1"),
+			},
+		},
+		{
+			// delete+recreate: the later (applied) UID is fresher and wins.
+			name: "later UID refreshes an earlier UID on recreate",
+			previous: []expv1alpha1.ManagedResource{
+				rUID("n1", "ConfigMap", "a", "uid-old"),
+			},
+			applied: []expv1alpha1.ManagedResource{
+				rUID("n1", "ConfigMap", "a", "uid-new"),
+			},
+			want: []expv1alpha1.ManagedResource{
+				rUID("n1", "ConfigMap", "a", "uid-new"),
+			},
 		},
 	}
 	for _, tc := range tests {

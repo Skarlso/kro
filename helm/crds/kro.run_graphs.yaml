@@ -110,10 +110,11 @@ spec:
                       description: |-
                         IncludeWhen is a list of CEL expressions that must all evaluate to
                         true for this node to be applied. Evaluated against scope before
-                        apply, so expressions may reference upstream nodes. When any
-                        returns false the node is skipped entirely: it does not apply, it
-                        does not publish to scope, and dependent expressions that try to
-                        read it will error.
+                        apply, so expressions may reference upstream nodes. When any is
+                        false the node is skipped entirely — no resolve, no apply, no scope
+                        publication. The skip is contagious: nodes depending on a skipped
+                        node are themselves skipped (not evaluated, no error), so a disabled
+                        branch prunes cleanly instead of breaking its dependents.
                       items:
                         type: string
                       type: array
