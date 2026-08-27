@@ -398,6 +398,18 @@ ServiceAccount resolved in the Graph's **own namespace**
   escalate beyond the RBAC granted to a ServiceAccount a caller in that namespace could already use.
   A Graph author cannot name a ServiceAccount in another namespace.
 
+**Trust model: equivalent to `create pod`.** The consequence is that permission to create or update a
+`Graph` in a namespace is permission to act as **any ServiceAccount in that namespace kro is allowed to
+impersonate** (delete included — teardown runs under the same identity). This is deliberately the same
+trust boundary Kubernetes already has for Pods: anyone who can create a Pod (directly or via a
+Deployment/Job) can set `spec.serviceAccountName` to any SA in the namespace and run as it. `Graph`
+is therefore no more privileged than existing `create pod` access — the namespace is the boundary.
+Operators narrow it further with kro's **own** RBAC: granting the `impersonate` verb per-namespace and
+with `resourceNames` restricts which SAs a Graph can ever use (a Graph naming a non-impersonable SA
+fails to apply rather than escalating). This parity, and the recommendation to treat Graph mutation as
+a privileged grant, is documented for users on the kro website's Access Control page
+(`website/docs/docs/advanced/01-access-control.md`).
+
 Mechanically, the controller derives a per-identity controller-runtime client from the manager's REST
 config with `rest.ImpersonationConfig` set to the resolved username, cached one entry per distinct
 ServiceAccount. For this to take effect the **kro controller ServiceAccount must be granted the
