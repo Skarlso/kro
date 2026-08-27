@@ -249,6 +249,13 @@ func (c *Controller) reconcileViaGraphEngine(
 	if invErr := c.reconcileApplySetInventory(ctx, log, inst, applier, applyResult.Applied, supersetMeta, fullyResolved); invErr != nil {
 		log.Error(invErr, "graph-engine: ApplySet inventory/prune failed")
 		if applyErr == nil {
+			// Apply itself was clean (ResourcesReady set above), but a
+			// resource the spec no longer wants could not be pruned (e.g.
+			// the impersonated ServiceAccount lacks delete RBAC on the
+			// target). The instance has NOT converged — flip the condition
+			// so the failure surfaces in status instead of reporting Ready
+			// with the error only in the log.
+			mark.ResourcesNotReady("prune of retired resources failed: %v", invErr)
 			applyErr = invErr
 		}
 	}

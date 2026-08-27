@@ -295,6 +295,34 @@ func TestReconcile(t *testing.T) {
 			wantErr: "executor delete",
 		},
 		{
+			// A clean apply that drops a previously-tracked resource makes
+			// that resource a prune candidate. If the prune Delete fails
+			// (e.g. the impersonated SA lacks delete RBAC), the Graph has
+			// NOT converged: the retired resource still lives in the
+			// cluster. The failure must surface in status
+			// (ResourcesConverged=False, reason PruneFailed) rather than
+			// reporting Ready=True with the error only in the log.
+			name:    "prune failure on a clean apply flips ResourcesConverged/Ready to False",
+			initial: graph("g", withFinalizer, withManagedResource),
+			compile: &fakeCompiler{program: prog(1)},
+			// Empty applyResult => the tracked "cm" is not in Applied =>
+			// it is a prune candidate; deleteErr makes the prune fail.
+			exec:    &fakeExecutor{deleteErr: errors.New("cannot delete resource \"configmaps\"")},
+			wantErr: "prune",
+			after: func(t *testing.T, g *expv1alpha1.Graph) {
+				rc := findCondition(g.Status.Conditions, ResourcesConverged)
+				require.NotNil(t, rc)
+				assert.Equal(t, metav1.ConditionFalse, rc.Status)
+				require.NotNil(t, rc.Reason)
+				assert.Equal(t, "PruneFailed", *rc.Reason)
+				require.NotNil(t, rc.Message)
+				assert.Contains(t, *rc.Message, "configmaps")
+				ready := findCondition(g.Status.Conditions, Ready)
+				require.NotNil(t, ready)
+				assert.Equal(t, metav1.ConditionFalse, ready.Status)
+			},
+		},
+		{
 			// Delete no longer consults the compiler — identities come
 			// from Status.ManagedResources. So a Graph with no tracking
 			// (e.g. one that never had a successful apply) just drops

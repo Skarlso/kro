@@ -365,7 +365,15 @@ func (r *Reconciler) reconcileGraph(ctx context.Context, g *expv1alpha1.Graph) e
 				// retries with the same diff. But we shouldn't shrink
 				// status to newSet if some prune candidates are still
 				// in the cluster, so keep the union.
+				//
+				// Apply itself was clean, so ResourcesConverged was set
+				// True above — but a resource the spec no longer wants is
+				// still in the cluster (e.g. the impersonated SA lacks
+				// delete RBAC), so the Graph has NOT converged. Flip the
+				// condition to surface the failure in status instead of
+				// reporting Ready=True with the error only in the log.
 				log.FromContext(ctx).Error(err, "prune failed; keeping union in status")
+				marker.ResourcesPruneFailed(err.Error())
 				g.Status.ManagedResources = unionManagedResources(previous, result.Applied)
 				return fmt.Errorf("prune: %w", err)
 			}
@@ -805,4 +813,14 @@ func (m *ConditionsMarker) ResourcesDataPending(msg string) {
 // "ApplyFailed" when the executor returned a hard error.
 func (m *ConditionsMarker) ResourcesApplyFailed(msg string) {
 	m.cs.SetFalse(ResourcesConverged, "ApplyFailed", msg)
+}
+
+// ResourcesPruneFailed marks ResourcesConverged=False with reason
+// "PruneFailed" when the apply was clean but a retired resource could not
+// be deleted (e.g. the impersonated ServiceAccount lacks delete RBAC on the
+// target). The resource the spec no longer wants still lives in the cluster,
+// so the Graph has not converged — surfacing this keeps Ready from reporting
+// True while an orphan lingers.
+func (m *ConditionsMarker) ResourcesPruneFailed(msg string) {
+	m.cs.SetFalse(ResourcesConverged, "PruneFailed", msg)
 }
