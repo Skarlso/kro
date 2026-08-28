@@ -21,9 +21,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	expv1alpha1 "github.com/kubernetes-sigs/kro/api/v1alpha1"
-	"github.com/kubernetes-sigs/kro/pkg/cel"
+	"github.com/kubernetes-sigs/kro/pkg/dag"
 	"github.com/kubernetes-sigs/kro/pkg/graph"
-	"github.com/kubernetes-sigs/kro/pkg/graph/variable"
 )
 
 func TestValidateNodeID(t *testing.T) {
@@ -177,34 +176,52 @@ func TestValidateGraph(t *testing.T) {
 	}
 }
 
-func TestRequireInputNode(t *testing.T) {
+func TestRequireResolvableRoot(t *testing.T) {
 	t.Parallel()
-	exprVar := &variable.ResourceField{
-		FieldDescriptor: variable.FieldDescriptor{Path: "x", Expression: cel.NewUncompiled("1")},
-	}
 	cases := []struct {
 		name    string
-		nodes   map[string]*Node
-		wantErr bool
+		build   func() *dag.DirectedAcyclicGraph[string]
+		wantErr string
 	}{
-		{name: "present", nodes: map[string]*Node{
-			"a": {ID: "a"},
-			"b": {ID: "b", Variables: []*variable.ResourceField{exprVar}},
-		}},
-		{name: "every node has variables", nodes: map[string]*Node{
-			"a": {ID: "a", Variables: []*variable.ResourceField{exprVar}},
-		}, wantErr: true},
-		{name: "forEach counts as CEL content", nodes: map[string]*Node{
-			"a": {ID: "a", ForEach: []ForEachDimension{{Name: "r", Expression: cel.NewUncompiled("[1]")}}},
-		}, wantErr: true},
+		{
+			name: "acyclic graph with a root",
+			build: func() *dag.DirectedAcyclicGraph[string] {
+				g := dag.NewDirectedAcyclicGraph[string]()
+				_ = g.AddVertex("a", 0)
+				_ = g.AddVertex("b", 1)
+				_ = g.AddDependencies("b", []string{"a"})
+				return g
+			},
+		},
+		{
+			name: "all nodes carry CEL but graph is acyclic",
+			// b depends on a, a depends on nothing: a is a resolvable root
+			// even though every node might carry CEL expressions.
+			build: func() *dag.DirectedAcyclicGraph[string] {
+				g := dag.NewDirectedAcyclicGraph[string]()
+				_ = g.AddVertex("a", 0)
+				_ = g.AddVertex("b", 1)
+				_ = g.AddVertex("c", 2)
+				_ = g.AddDependencies("b", []string{"a"})
+				_ = g.AddDependencies("c", []string{"b"})
+				return g
+			},
+		},
+		{
+			name: "empty graph",
+			build: func() *dag.DirectedAcyclicGraph[string] {
+				return dag.NewDirectedAcyclicGraph[string]()
+			},
+			wantErr: "at least one node",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			err := requireInputNode(tc.nodes)
-			if tc.wantErr {
+			err := requireResolvableRoot(tc.build())
+			if tc.wantErr != "" {
 				require.Error(t, err)
-				assert.Contains(t, err.Error(), "no CEL expressions")
+				assert.Contains(t, err.Error(), tc.wantErr)
 				return
 			}
 			require.NoError(t, err)
