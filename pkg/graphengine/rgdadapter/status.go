@@ -324,7 +324,7 @@ func buildStatusEnvForNodes(rt *runtime.Runtime, includeRuntime bool) (*cel.Env,
 // getAtPath removed with ProjectInstanceStatus (author status is now written
 // by the synthesized status-patch node); see git history.
 
-
+// compileCEL parses, type-checks, and programs a plain CEL expression (no
 // ${…} wrapper) against env, wrapping each stage's error with expr context.
 // costLimit (0 = disabled) bounds evaluation cost so author status/condition
 // expressions share the same execution bound as graph expressions rather than
@@ -428,4 +428,3 @@ func unwrapExpr(s string) string {
 	}
 	return s
 }
-
