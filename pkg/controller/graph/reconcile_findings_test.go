@@ -230,6 +230,55 @@ func TestReconcile_NoReleaseOnSoftNotReady(t *testing.T) {
 	assert.Empty(t, exec.releaseCalls, "release must not fire on soft not-ready (would flap a data-pending patch's fields)")
 }
 
+// TestReconcile_SoftNotReadyStillPrunesRetiredNode pins finding 357: a node
+// that is soft not-ready this cycle must NOT veto pruning of an UNRELATED
+// resource whose owning node was removed from the spec. Previously all pruning
+// was gated on a fully clean apply, so one never-ready node leaked every
+// retired resource until it resolved. diffManagedResources keeps unresolved
+// nodes' entries, so a prune candidate on a soft cycle is genuinely retired and
+// safe to delete.
+func TestReconcile_SoftNotReadyStillPrunesRetiredNode(t *testing.T) {
+	t.Parallel()
+	key := types.NamespacedName{Namespace: "default", Name: "g"}
+
+	// Previously-tracked resource owned by node "gone", which is no longer in
+	// the graph. A separate node "widget" is not-ready this cycle.
+	g := graph("g", withFinalizer, func(g *expv1alpha1.Graph) {
+		g.Status.ManagedResources = []expv1alpha1.ManagedResource{{
+			NodeID:     "gone",
+			APIVersion: "v1",
+			Kind:       "ConfigMap",
+			Namespace:  "default",
+			Name:       "retired-cm",
+			UID:        "uid-retired",
+		}}
+	})
+	cl := newClient(t, g)
+
+	// Apply: soft not-ready, node "widget" Unresolved, nothing applied. The
+	// "gone" resource is neither Applied nor Unresolved -> a prune candidate.
+	exec := &fakeExecutor{
+		applyErr:    fmt.Errorf("apply %q: %w", "widget", executor.ErrNotReady),
+		applyResult: executor.ApplyResult{Unresolved: []string{"widget"}},
+	}
+	r := &Reconciler{Client: cl, Compiler: &fakeCompiler{program: emptyNodeProgram("widget")}, Registry: registry.New(), Executor: exec}
+
+	_, _ = r.Reconcile(context.Background(), ctrl.Request{NamespacedName: key})
+
+	// The retired resource must have been pruned despite the soft not-ready.
+	require.Len(t, exec.deleteCalls, 1, "prune must run on a soft not-ready cycle for a retired node")
+	require.Len(t, exec.deleteCalls[0], 1)
+	assert.Equal(t, "retired-cm", exec.deleteCalls[0][0].Name,
+		"the retired node's resource is the prune candidate")
+
+	// Persisted status must no longer track the pruned resource.
+	got := &expv1alpha1.Graph{}
+	require.NoError(t, cl.Get(context.Background(), key, got))
+	for _, mr := range got.Status.ManagedResources {
+		assert.NotEqual(t, "retired-cm", mr.Name, "a successfully pruned resource must drop from status")
+	}
+}
+
 // TestReconcile_ErrorPathKeepsIntentSuperset guards the Finding A hardening:
 // on a soft apply error the in-memory status (which the terminal updateStatus
 // overwrites onto the server) must not shrink below the written-ahead intent,

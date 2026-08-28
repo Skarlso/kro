@@ -354,37 +354,49 @@ func (r *Reconciler) reconcileGraph(ctx context.Context, g *expv1alpha1.Graph) e
 	// shrunk, includeWhen flipped, or rename.
 	newSet, pruneCandidates := diffManagedResources(previous, result)
 
-	if applyErr == nil {
-		// Only prune on a fully clean Apply. If we have any soft errors
-		// (Unresolved is non-empty) or hard errors, keep the union of
-		// previous and applied to protect resources we couldn't observe
-		// this cycle.
+	// Prune retired resources whenever the executor walk was not interrupted by
+	// a HARD error. diffManagedResources already keeps any entry whose owning
+	// node is Unresolved this cycle (in newSet), so pruneCandidates are exactly
+	// the resources whose owning node is genuinely gone or resolved — safe to
+	// delete even while OTHER nodes are still soft not-ready. Previously all
+	// pruning was gated on a fully clean apply, so a single never-ready node
+	// vetoed pruning of every unrelated retired node (this is the Graph-path twin
+	// of the instance ownedUnresolved/pruneGate narrowing).
+	hardErr := applyErr != nil && !errors.Is(applyErr, executor.ErrNotReady)
+	if !hardErr {
 		if len(pruneCandidates) > 0 {
 			if err := ex.Delete(ctx, pruneCandidates); err != nil {
-				// Prune failure isn't catastrophic — next reconcile
-				// retries with the same diff. But we shouldn't shrink
-				// status to newSet if some prune candidates are still
-				// in the cluster, so keep the union.
-				//
-				// Apply itself was clean, so ResourcesConverged was set
-				// True above — but a resource the spec no longer wants is
-				// still in the cluster (e.g. the impersonated SA lacks
-				// delete RBAC), so the Graph has NOT converged. Flip the
-				// condition to surface the failure in status instead of
-				// reporting Ready=True with the error only in the log.
+				// A retired resource could not be deleted (e.g. the impersonated
+				// SA lacks delete RBAC). The Graph has NOT converged; surface it
+				// and keep the union so teardown still sees the un-deleted entry.
+				// (On a soft not-ready cycle this overrides the not-ready marker
+				// set above — an un-prunable orphan is the more actionable signal.)
 				log.FromContext(ctx).Error(err, "prune failed; keeping union in status")
 				marker.ResourcesPruneFailed(err.Error())
-				g.Status.ManagedResources = unionManagedResources(previous, result.Applied)
+				g.Status.ManagedResources = unionManagedResources(
+					unionManagedResources(previous, result.Applied), intent)
 				return fmt.Errorf("prune: %w", err)
 			}
 		}
-		g.Status.ManagedResources = newSet
+		if applyErr == nil {
+			// Fully clean: status is exactly the applied set.
+			g.Status.ManagedResources = newSet
+		} else {
+			// Soft not-ready: the safe prune candidates were just deleted, so
+			// they are correctly absent now. Keep applied + still-unresolved-kept
+			// entries (newSet) and fold in THIS cycle's write-ahead intent — NOT
+			// the previous-based union, which would re-introduce the just-pruned
+			// entries — so a crash after Apply still leaves teardown a superset.
+			// A removed-from-spec or includeWhen-false node is absent from rt's
+			// intent, so it is not re-introduced.
+			g.Status.ManagedResources = unionManagedResources(newSet, intendedManagedResources(rt))
+		}
 	} else {
-		// Soft or hard failure — keep the union so a future reconcile can still
-		// prune or restore. Fold intent back in so the terminal updateStatus
-		// cannot shrink the server inventory below the pre-apply superset and
-		// re-open the orphan window; UID-free intent dedups against Applied via
-		// keyOf.
+		// Hard failure — the walk's node outcomes are uncertain, so keep the full
+		// union so a future reconcile can still prune or restore. Fold intent back
+		// in so the terminal updateStatus cannot shrink the server inventory below
+		// the pre-apply superset and re-open the orphan window; UID-free intent
+		// dedups against Applied via keyOf.
 		g.Status.ManagedResources = unionManagedResources(
 			unionManagedResources(previous, result.Applied), intent)
 	}
