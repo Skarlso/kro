@@ -560,9 +560,14 @@ func TestPatch_FieldManagerConflictSoftRequeue(t *testing.T) {
 	assert.Equal(t, "v", data["k"])
 }
 
-// TestPatch_NonConflictErrorIsHardAbort verifies that non-conflict errors on patch nodes
-// (e.g. schema/validation errors from the API server) abort the topological walk immediately.
-func TestPatch_NonConflictErrorIsHardAbort(t *testing.T) {
+// TestPatch_NonConflictErrorIsHardButWalkContinues verifies that a non-conflict
+// error on a patch node (e.g. a schema/validation 422 Invalid from the API
+// server) is classified HARD (not soft ErrNotReady), but per the reviewer
+// finding fixed in the executor, a hard node error no longer aborts the whole
+// walk: independent downstream nodes still apply. The failing node is simply
+// never marked ready, so its OWN dependents stay gated. The aggregate hard
+// error still dominates so the caller treats the cycle as degraded (not soft).
+func TestPatch_NonConflictErrorIsHardButWalkContinues(t *testing.T) {
 	cl := patchEnvClient(t)
 	ns := "default"
 	targetName := "pod-target"
@@ -597,12 +602,20 @@ func TestPatch_NonConflictErrorIsHardAbort(t *testing.T) {
 	require.Error(t, err)
 	assert.False(t, errors.Is(err, ErrNotReady), "non-conflict patch error must NOT be soft ErrNotReady, got: %v", err)
 	assert.True(t, apierrors.IsInvalid(err), "expected 422 Invalid error from API server, got: %v", err)
-	assert.Empty(t, res.Applied, "walk must abort immediately without applying downstream nodes")
+
+	// The hard error on 'p' must NOT abort the walk: the independent downstream
+	// node still applies (a failed node only gates its OWN dependents, and
+	// 'downstream' does not depend on 'p'). This is the reviewer-approved
+	// don't-strand-independent-nodes behavior.
+	require.Len(t, res.Applied, 1, "independent downstream node must still be applied despite the hard patch error")
+	assert.Equal(t, "downstream-cm-aborted", res.Applied[0].Name)
 
 	downstreamCM := &unstructured.Unstructured{}
 	downstreamCM.SetGroupVersionKind(configMapGVK)
 	err = cl.Get(context.Background(), types.NamespacedName{Namespace: ns, Name: "downstream-cm-aborted"}, downstreamCM)
-	assert.True(t, apierrors.IsNotFound(err), "downstream resource must not have been created")
+	assert.NoError(t, err, "independent downstream resource must have been created")
+	data, _, _ := unstructured.NestedStringMap(downstreamCM.Object, "data")
+	assert.Equal(t, "v", data["k"])
 }
 
 func compileAndBuildEnv(t *testing.T, cfg *rest.Config, g *expv1alpha1.Graph) *krotruntime.Runtime {
