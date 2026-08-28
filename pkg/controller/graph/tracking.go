@@ -19,6 +19,7 @@ import (
 	"fmt"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 
 	expv1alpha1 "github.com/kubernetes-sigs/kro/api/v1alpha1"
 	"github.com/kubernetes-sigs/kro/pkg/graphengine/compiler"
@@ -30,19 +31,33 @@ import (
 // resourceKey is the identity tuple used to dedup ManagedResource
 // entries. UID is excluded because pre-apply entries (write-ahead)
 // and post-apply entries (with UID) describe the same resource.
+//
+// Identity keys on GROUP + Kind, not the full apiVersion: a CRD's multiple
+// served versions all address the SAME stored object, so a version-only
+// template change (e.g. apps/v1 -> apps/v2 for the same Kind/namespace/name)
+// must NOT make the old-version entry look like a different resource. If it
+// did, the old entry would become a prune candidate and Delete — which keys on
+// the stable object UID — would delete the very object just applied under the
+// new version (a destructive apply-then-prune churn on one object). Keying on
+// Group+Kind makes the two versions dedup to one identity.
 type resourceKey struct {
-	APIVersion string
-	Kind       string
-	Namespace  string
-	Name       string
+	Group     string
+	Kind      string
+	Namespace string
+	Name      string
 }
 
 func keyOf(r expv1alpha1.ManagedResource) resourceKey {
+	// APIVersion is "group/version" (or just "version" for core); take the group
+	// so the version segment does not participate in identity. A parse error
+	// (malformed apiVersion) falls back to an empty group, which still yields a
+	// stable key for that (malformed) entry.
+	group := schema.FromAPIVersionAndKind(r.APIVersion, r.Kind).Group
 	return resourceKey{
-		APIVersion: r.APIVersion,
-		Kind:       r.Kind,
-		Namespace:  r.Namespace,
-		Name:       r.Name,
+		Group:     group,
+		Kind:      r.Kind,
+		Namespace: r.Namespace,
+		Name:      r.Name,
 	}
 }
 
