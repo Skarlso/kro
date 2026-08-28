@@ -773,7 +773,7 @@ func TestReconcileDeletion_ReleasesPatchContributionsBeforeRemovingFinalizer(t *
 			Kind:         "ConfigMap",
 			Namespace:    "default",
 			Name:         "target-cm",
-			FieldManager: "fm-test",
+			FieldManager: executor.PatchFieldManager("graph-uid", "patch-node"),
 		},
 	}
 	rawJSON, err := controllergraph.MarshalContributions(contribs)
@@ -803,7 +803,7 @@ func TestReconcileDeletion_ReleaseFailure_RetainsFinalizer(t *testing.T) {
 			Kind:         "ConfigMap",
 			Namespace:    "default",
 			Name:         "target-cm",
-			FieldManager: "fm-test",
+			FieldManager: executor.PatchFieldManager("graph-uid", "patch-node"),
 		},
 	}
 	rawJSON, err := controllergraph.MarshalContributions(contribs)
@@ -835,4 +835,56 @@ func TestReconcileDeletion_ReleaseFailure_RetainsFinalizer(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "executor release")
 	assert.True(t, metadata.HasInstanceFinalizer(dcx.Instance), "finalizer must be retained when release fails")
+}
+
+// TestReconcileDeletion_RefusesForgedNonKroFieldManager pins the deletion.go
+// forgery guard: the patch-contribution inventory is a client-editable
+// annotation, so a principal with patch rights on the instance could forge an
+// entry naming a NON-kro field manager (here "kubectl") on a target, trying to
+// weaponize kro's privileged finalizer to strip that manager's fields. The
+// finalizer must refuse to release any non-kro patch manager. Here the SSA
+// client is wired to FAIL every patch: if the guard were absent the forged
+// release would be attempted and error out; because it IS refused, Release is
+// never called, so deletion proceeds cleanly and the finalizer is removed.
+func TestReconcileDeletion_RefusesForgedNonKroFieldManager(t *testing.T) {
+	instance := newInstanceObject("demo", "default")
+	metadata.SetInstanceFinalizer(instance)
+	addEmptyDeletionScope(instance)
+	contribs := []executor.Contribution{
+		{
+			APIVersion:   "v1",
+			Kind:         "ConfigMap",
+			Namespace:    "default",
+			Name:         "victim-cm",
+			// A forged, non-kro field manager. Only kro-graphengine.patch.* managers
+			// are ever legitimately recorded; this must be refused, not released.
+			FieldManager: "kubectl",
+		},
+	}
+	rawJSON, err := controllergraph.MarshalContributions(contribs)
+	require.NoError(t, err)
+	anns := instance.GetAnnotations()
+	anns[metadata.PatchContributionsAnnotation] = rawJSON
+	instance.SetAnnotations(anns)
+
+	// Every patch fails: if the guard let the forged entry through, Release would
+	// be attempted and this would surface an "executor release" error.
+	fakeRuntimeCl := &errorClient{
+		Client: newFakeRuntimeClient(t, &unstructured.Unstructured{Object: map[string]any{
+			"apiVersion": "v1",
+			"kind":       "ConfigMap",
+			"metadata": map[string]any{
+				"name":      "victim-cm",
+				"namespace": "default",
+			},
+		}}),
+		patchErr: errors.New("SSA patch failure"),
+	}
+
+	controller, dcx, _ := newControllerAndDeletionContext(t, instance, newTestGraph())
+	controller.graphEngineExecutor = executor.NewSimple(fakeRuntimeCl)
+
+	err = controller.reconcileDeletion(dcx)
+	require.NoError(t, err, "a forged non-kro field manager must be refused, not released — so deletion proceeds without a release error")
+	assert.False(t, metadata.HasInstanceFinalizer(dcx.Instance), "finalizer is removed once the (refused) release is skipped")
 }

@@ -1650,6 +1650,23 @@ func PatchFieldManager(parentUID types.UID, nodeID string) string {
 	return patchFieldManagerPrefix + graphManagerSegment(parentUID) + "." + hex.EncodeToString(sum[:6])
 }
 
+// IsPatchFieldManager reports whether manager is one of kro's dedicated patch
+// server-side-apply field managers (prefix "kro-graphengine.patch."). The
+// finalizer's Release path uses this to refuse relinquishing a NON-kro manager:
+// on the instance path the patch-contribution inventory is a client-editable
+// annotation (the instance is a dynamic RGD-generated CR whose status cannot
+// carry an internal kro field), so a principal with patch rights on the
+// instance could forge a contribution naming an arbitrary field manager (e.g.
+// "kubectl" or another controller's) on some target and weaponize kro's
+// privileged finalizer to strip that manager's fields off the object. Only a
+// kro patch manager is ever legitimately recorded, so releasing anything else
+// is refused. (Release is already non-destructive — it relinquishes field
+// ownership, never deletes — and GET-first; this closes the cross-manager
+// escalation the annotation would otherwise allow.)
+func IsPatchFieldManager(manager string) bool {
+	return strings.HasPrefix(manager, patchFieldManagerPrefix)
+}
+
 // patchManagerGraphSegment returns the per-Graph segment of a patch manager
 // ("<prefix><graphSeg>.<nodeSeg>"), or "" for a non-patch manager or a legacy
 // pre-segment manager ("<prefix><hash>", no dot).
