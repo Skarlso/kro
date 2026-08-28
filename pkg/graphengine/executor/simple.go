@@ -199,6 +199,13 @@ func (s *Simple) Apply(ctx context.Context, rt *runtime.Runtime, w watchrouter.W
 			firstSoft = err
 		}
 	}
+	// hardErrs collects per-node HARD failures. A hard error on one node must
+	// NOT abort the whole walk: independent nodes and the trailing synthesized
+	// author-status patch node still need to run. The failing node is never
+	// marked ready, so its dependents stay gated (GateReadiness); the aggregate
+	// hard error is returned after the walk and dominates any soft signal.
+	var hardErrs []error
+	recordHard := func(err error) { hardErrs = append(hardErrs, err) }
 
 	// ready tracks which nodes reached a terminal ready state this cycle, so
 	// dependents can be gated until their dependencies converge.
@@ -216,7 +223,8 @@ func (s *Simple) Apply(ctx context.Context, rt *runtime.Runtime, w watchrouter.W
 				recordSoft(fmt.Errorf("apply %q: includeWhen: %w (%w)", n.ID(), err, ErrNotReady))
 				continue
 			}
-			return result, fmt.Errorf("apply %q: %w", n.ID(), err)
+			recordHard(fmt.Errorf("apply %q: %w", n.ID(), err))
+			continue
 		}
 		if ignored {
 			// Intentionally skipped — not Unresolved. The caller
@@ -251,7 +259,8 @@ func (s *Simple) Apply(ctx context.Context, rt *runtime.Runtime, w watchrouter.W
 					recordSoft(fmt.Errorf("apply %q (subgraph): %w", n.ID(), err))
 					continue
 				}
-				return result, fmt.Errorf("apply %q (subgraph): %w", n.ID(), err)
+				recordHard(fmt.Errorf("apply %q (subgraph): %w", n.ID(), err))
+				continue
 			}
 			ready[n.ID()] = true
 			continue
@@ -264,12 +273,14 @@ func (s *Simple) Apply(ctx context.Context, rt *runtime.Runtime, w watchrouter.W
 				recordSoft(fmt.Errorf("apply %q: resolve: %w (%w)", n.ID(), err, ErrNotReady))
 				continue
 			}
-			return result, fmt.Errorf("apply %q: resolve: %w", n.ID(), err)
+			recordHard(fmt.Errorf("apply %q: resolve: %w", n.ID(), err))
+			continue
 		}
 
 		softErr, err := s.applyNodeByKind(ctx, rt, w, n, desired, &result)
 		if err != nil {
-			return result, err
+			recordHard(err)
+			continue
 		}
 		if softErr != nil {
 			recordSoft(softErr)
@@ -278,16 +289,23 @@ func (s *Simple) Apply(ctx context.Context, rt *runtime.Runtime, w watchrouter.W
 
 		// readyWhen is checked after observed state is recorded.
 		// Soft → ErrNotReady (already tracked in Applied); continue
-		// so downstream watches still register. Hard → abort.
+		// so downstream watches still register. Hard → aggregate.
 		if err := n.CheckReadiness(); err != nil {
 			if isSoftRuntimeErr(err) {
 				recordSoft(fmt.Errorf("apply %q: %w (%w)", n.ID(), err, ErrNotReady))
 				continue
 			}
-			return result, fmt.Errorf("apply %q: %w", n.ID(), err)
+			recordHard(fmt.Errorf("apply %q: %w", n.ID(), err))
+			continue
 		}
 		// Node reached a terminal ready state — unblock its dependents.
 		ready[n.ID()] = true
+	}
+	// A hard error dominates any soft signal — errors.Join preserves errors.Is
+	// for each joined error, and none of the hard errors carry ErrNotReady, so
+	// the caller classifies the result as hard (degraded) rather than requeue.
+	if len(hardErrs) > 0 {
+		return result, errors.Join(hardErrs...)
 	}
 	return result, firstSoft
 }
@@ -459,6 +477,7 @@ func publishScope(rt *runtime.Runtime, n *runtime.Node, objs []*unstructured.Uns
 // prune vector where a user-forged status entry could delete arbitrary resources.
 // NotFound and "already deleted by something else" are tolerated.
 func (s *Simple) Delete(ctx context.Context, resources []expv1alpha1.ManagedResource) error {
+	var errs []error
 	for _, r := range slices.Backward(resources) {
 
 		// Legitimate managed resources always carry a UID captured from SSA.
@@ -490,10 +509,14 @@ func (s *Simple) Delete(ctx context.Context, resources []expv1alpha1.ManagedReso
 			if apierrors.IsConflict(err) {
 				continue
 			}
-			return fmt.Errorf("delete %s/%s %s: %w", r.APIVersion, r.Kind, refName(r), err)
+			// Accumulate and keep going: one denied/failed delete (e.g. an
+			// impersonated SA lacking delete RBAC on a single target) must not
+			// strand every remaining managed resource in the inventory. The
+			// aggregate error is returned after the whole inventory is visited.
+			errs = append(errs, fmt.Errorf("delete %s/%s %s: %w", r.APIVersion, r.Kind, refName(r), err))
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 func refName(r expv1alpha1.ManagedResource) string {
@@ -878,17 +901,32 @@ func (s *Simple) applyCollectionItem(ctx context.Context, rt *runtime.Runtime, n
 			// the live identity and let the collection converge rather than block
 			// the node forever on an unfixable update. (Integration coverage:
 			// collection_test.go deep-chaining scale up/down relies on this.)
-			// The per-item error is intentionally NOT surfaced: the object is
-			// present, so the node converges (this item is recorded in Applied)
-			// and the failure is neither escalated to a walk-aborting hard error
-			// nor returned as a soft not-ready. recordUpdateRejected therefore
-			// drops the error by design.
+			//
+			// The rejection is NOT escalated to a hard error or a soft not-ready
+			// (that would wedge the node on an unfixable update), but it must not
+			// be fully SILENT either: a desired change did not land while the node
+			// still converges, so emit a warning to the controller log — the
+			// accepted operator-visible channel — with the object identity and the
+			// rejection cause, so a stale live object is diagnosable rather than
+			// invisible.
+			log.FromContext(ctx).Info("collection item update rejected; keeping live object and converging (desired change did not land)",
+				"node", s.qualifiedPath(n.ID()),
+				"object", obj.GetNamespace()+"/"+obj.GetName(),
+				"gvk", obj.GroupVersionKind().String(),
+				"cause", err.Error())
 			st.recordUpdateRejected(i, managedResourceFrom(n, current), desired, current)
 			return nil
 		}
-		// The object does not exist and CREATE failed: record the error
-		// and continue so siblings still apply; the node is held soft
-		// not-ready by the caller.
+		// The object does not exist and CREATE failed. A genuinely malformed
+		// object (Invalid / BadRequest) can never succeed — surface it as a hard
+		// error so the node fails fast instead of requeuing forever on an
+		// unfixable create. Transient/again-later causes (quota, throttling,
+		// RBAC being provisioned, generic errors) stay soft not-ready so the
+		// reconcile retries. Siblings still apply either way.
+		if apierrors.IsInvalid(err) || apierrors.IsBadRequest(err) {
+			st.recordHardError(i, fmt.Errorf("item %s/%s: %w", obj.GetNamespace(), obj.GetName(), err))
+			return nil
+		}
 		st.recordFailure(i, fmt.Errorf("item %s/%s: %w", obj.GetNamespace(), obj.GetName(), err))
 		return nil
 	}

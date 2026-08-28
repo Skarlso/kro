@@ -281,6 +281,25 @@ func TestSimple_ApplyTemplate_CollectionApplyTolerance(t *testing.T) {
 		assert.Empty(t, res.Applied,
 			"nothing landed, so nothing may be advertised as applied")
 	})
+
+	t.Run("a malformed create (Invalid) fails hard instead of requeuing forever", func(t *testing.T) {
+		t.Parallel()
+		// Neither member exists, so every SSA is a create. A create rejected as
+		// Invalid can never succeed (the rendered object is malformed), so it
+		// must surface as a HARD error — the node fails fast rather than holding
+		// soft not-ready and requeuing an unfixable create forever.
+		base := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
+		cl := &patchFailClient{Client: base, err: apierrors.NewInvalid(schema.GroupKind{Kind: "ConfigMap"}, "cm-alpha", nil)}
+
+		res, err := NewSimple(cl).Apply(context.Background(),
+			compileAndBuild(t, collectionCMGraph()), watchrouter.NoopWatcher{})
+
+		require.Error(t, err)
+		assert.False(t, errors.Is(err, ErrNotReady),
+			"a malformed (Invalid) create must be a hard error, not a soft requeue, got %v", err)
+		assert.Empty(t, res.Applied,
+			"nothing landed, so nothing may be advertised as applied")
+	})
 }
 
 // TestCollectionApplyState_UpdateRejectedIsSilent pins the corrected contract
