@@ -291,7 +291,12 @@ func schemaCompileOpts(rgd *v1alpha1.ResourceGraphDefinition, g *v1alpha1.Graph)
 		if g.Spec.Nodes[i].ID == StatusPatchNodeID && g.Spec.Nodes[i].Patch != nil {
 			opts = append(opts,
 				compiler.WithSoftDependencies(StatusPatchNodeID),
-				compiler.WithDataPendingTolerant(StatusPatchNodeID))
+				compiler.WithDataPendingTolerant(StatusPatchNodeID),
+				// The status writeback targets the instance's OWN status
+				// subresource; a drift watch on it would re-enqueue the instance
+				// on its own status write (not generation-guarded on the drift
+				// path). The instance's parent informer already drives reconcile.
+				compiler.WithSelfWatchExempt(StatusPatchNodeID))
 			break
 		}
 	}

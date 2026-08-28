@@ -110,6 +110,13 @@ func (n *Node) DynamicGVK() bool { return n.spec.DynamicGVK }
 // ("status" or ""). Empty for every other kind.
 func (n *Node) Subresource() string { return n.spec.Subresource }
 
+// SelfWatchExempt reports whether drift-watch registration should be skipped
+// for this node's target (compiler.Node.SelfWatchExempt). True for the RGD
+// adapter's synthesized author-status writeback node, which targets the
+// reconciled instance's own status subresource — watching it would
+// self-retrigger the instance's reconcile.
+func (n *Node) SelfWatchExempt() bool { return n.spec.SelfWatchExempt }
+
 // IsCollection reports whether the node expands into a collection,
 // delegating to compiler.Node.IsCollection.
 func (n *Node) IsCollection() bool { return n.spec.IsCollection() }

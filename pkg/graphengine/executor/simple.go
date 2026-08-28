@@ -919,12 +919,21 @@ func (s *Simple) applyCollectionTemplate(ctx context.Context, w watchrouter.Watc
 	// namespaced watch is cheaper than an all-namespaces one, so this avoids
 	// the broad watch for the common single-namespace case.
 	ns := s.collectionWatchNamespace(rt, desired, mappings)
-	if err := s.watchCollection(ctx, w, rt, n, mappings[0].gvr, desired[0], ns); err != nil {
-		// A failure to register the collection drift watch must not abort the
-		// apply: the collection is still applied, only drift re-enqueue is lost
-		// for it. Log and continue.
-		log.FromContext(ctx).Info("collection drift watch registration failed; applying without drift detection for this node",
-			"node", s.qualifiedPath(n.ID()), "gvr", mappings[0].gvr.String(), "err", err.Error())
+	// Register one selector watch per DISTINCT GVR in the collection. A static
+	// collection has a single GVR (mappings all equal), but a dynamic-GVK
+	// collection can render items across several GVRs — registering only
+	// mappings[0] would leave every other rendered type without drift detection.
+	// The coordinator keys watch state by (NodeID, GVR), so one selector watch
+	// per GVR under the same node is correct and non-colliding; a representative
+	// sample object per GVR carries the labels the selector matches.
+	for _, wm := range distinctWatchMappings(desired, mappings) {
+		if err := s.watchCollection(ctx, w, rt, n, wm.gvr, wm.sample, ns); err != nil {
+			// A failure to register a collection drift watch must not abort the
+			// apply: the collection is still applied, only drift re-enqueue is lost
+			// for that GVR. Log and continue.
+			log.FromContext(ctx).Info("collection drift watch registration failed; applying without drift detection for this GVR",
+				"node", s.qualifiedPath(n.ID()), "gvr", wm.gvr.String(), "err", err.Error())
+		}
 	}
 
 	bound := defaultApplyConcurrency
@@ -1146,6 +1155,24 @@ func (s *Simple) stampKROMeta(rt *runtime.Runtime, n *runtime.Node, obj *unstruc
 	if n.IsCollection() {
 		labels[metadata.CollectionIndexLabel] = strconv.Itoa(index)
 		labels[metadata.CollectionSizeLabel] = strconv.Itoa(size)
+		// A COLLECTION node's drift watch is a selector watch keyed on
+		// {node-id, instance-id} (watchCollection). On the RGD/instance path the
+		// LabelInjector stamps instance-id (the instance UID); on the standalone
+		// Graph path there is no injector, so stamp the Graph's own UID here so
+		// the applied items match the selector — otherwise drift/deletion events
+		// never match and go unobserved. Only for collections: a SCALAR template
+		// uses a name-based watch (watchObject) that needs no instance-id, and
+		// stamping it there would make two Graphs legitimately sharing a scalar
+		// object (writing disjoint fields) conflict on the instance-id label.
+		// Only set the fallback when no injector will supply it, and never clobber
+		// an injector-provided value.
+		if s.LabelInjector == nil {
+			if _, ok := labels[metadata.InstanceIDLabel]; !ok {
+				if uid := string(rt.Graph().GetUID()); uid != "" {
+					labels[metadata.InstanceIDLabel] = uid
+				}
+			}
+		}
 	}
 	obj.SetLabels(labels)
 
@@ -1482,6 +1509,32 @@ func (s *Simple) collectionWatchNamespace(rt *runtime.Runtime, desired []*unstru
 	return seen
 }
 
+// watchMapping pairs a distinct collection GVR with a representative rendered
+// object of that GVR, used to register one selector drift watch per GVR.
+type watchMapping struct {
+	gvr    schema.GroupVersionResource
+	sample *unstructured.Unstructured
+}
+
+// distinctWatchMappings returns one (gvr, sample) pair per DISTINCT GVR across a
+// collection's items, preserving first-seen order. A static collection collapses
+// to a single entry; a dynamic-GVK collection that renders several GVRs yields
+// one entry each so every rendered type gets a drift watch. desired and mappings
+// are index-aligned (buildMappings guarantees len(mappings)==len(desired)).
+func distinctWatchMappings(desired []*unstructured.Unstructured, mappings []applyMapping) []watchMapping {
+	out := make([]watchMapping, 0, 1)
+	seen := make(map[schema.GroupVersionResource]struct{}, 1)
+	for i := range desired {
+		gvr := mappings[i].gvr
+		if _, dup := seen[gvr]; dup {
+			continue
+		}
+		seen[gvr] = struct{}{}
+		out = append(out, watchMapping{gvr: gvr, sample: desired[i]})
+	}
+	return out
+}
+
 // watchCollection registers a single selector-based watch for a collection
 // node. The coordinator keys watch state by NodeID, so N per-item scalar
 // watches would collapse to only the last item and drift on the others would
@@ -1580,13 +1633,21 @@ func (s *Simple) applyPatch(ctx context.Context, rt *runtime.Runtime, w watchrou
 	s.defaultNamespace(rt, namespaced, obj)
 
 	// Register the watch before the read so a change to the target (including
-	// its creation) re-enqueues the Graph.
-	if err := s.watchObject(ctx, w, s.qualifiedPath(n.ID()), gvr, obj); err != nil {
-		// A failure to register the drift watch must not abort the apply: the
-		// patch contribution below still lands, only drift re-enqueue is lost.
-		// Log and continue.
-		log.FromContext(ctx).Info("drift watch registration failed; applying patch without drift detection",
-			"node", s.qualifiedPath(n.ID()), "gvr", gvr.String(), "err", err.Error())
+	// its creation) re-enqueues the Graph. Skipped for a self-watch-exempt node
+	// (the synthesized author-status writeback): its target is the reconciled
+	// instance's own status subresource, so watching it would re-enqueue the
+	// instance on its own status write — a self-perpetuating loop, since the
+	// drift-watch enqueue path is not generation-guarded and a status write
+	// doesn't bump generation. The instance's parent informer already drives its
+	// reconciliation, so the watch is redundant as well as harmful.
+	if !n.SelfWatchExempt() {
+		if err := s.watchObject(ctx, w, s.qualifiedPath(n.ID()), gvr, obj); err != nil {
+			// A failure to register the drift watch must not abort the apply: the
+			// patch contribution below still lands, only drift re-enqueue is lost.
+			// Log and continue.
+			log.FromContext(ctx).Info("drift watch registration failed; applying patch without drift detection",
+				"node", s.qualifiedPath(n.ID()), "gvr", gvr.String(), "err", err.Error())
+		}
 	}
 
 	current, err := s.getLive(ctx, obj)

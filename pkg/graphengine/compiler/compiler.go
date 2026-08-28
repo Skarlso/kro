@@ -122,6 +122,7 @@ type compileOptions struct {
 	literalNodes        map[string]struct{}
 	softDepNodes        map[string]struct{}
 	dataPendingTolerant map[string]struct{}
+	selfWatchExempt     map[string]struct{}
 }
 
 // WithLiteralNode marks a node (such as a Def node) as pure literal data,
@@ -180,6 +181,23 @@ func WithDataPendingTolerant(nodeID string) CompileOption {
 	}
 }
 
+// WithSelfWatchExempt marks a node so the executor does NOT register a drift
+// watch on its target. Used for the synthesized author-status writeback patch
+// node, which targets the reconciled instance's own status subresource: a
+// status write bumps resourceVersion (not generation), and the drift-watch
+// enqueue path is not generation-guarded, so watching the instance the node
+// writes would re-enqueue the instance on its own status write — a
+// self-perpetuating reconcile loop. The instance's own parent informer already
+// drives reconciliation, so the self-watch is redundant as well as harmful.
+func WithSelfWatchExempt(nodeID string) CompileOption {
+	return func(o *compileOptions) {
+		if o.selfWatchExempt == nil {
+			o.selfWatchExempt = make(map[string]struct{})
+		}
+		o.selfWatchExempt[nodeID] = struct{}{}
+	}
+}
+
 // Compile validates the Graph, parses every node's CEL expressions against
 // the target schemas, builds the dependency DAG, and returns the compiled
 // Program. Nested subgraphs are compiled recursively, each in its own lexical
@@ -203,6 +221,7 @@ func (c *Compiler) CompileWithOptions(g *expv1alpha1.Graph, opts ...CompileOptio
 	ctx.literalNodes = co.literalNodes
 	ctx.softDepNodes = co.softDepNodes
 	ctx.dataPendingTolerant = co.dataPendingTolerant
+	ctx.selfWatchExempt = co.selfWatchExempt
 	prog, _, err := ctx.compileFrame(graph.Spec.Nodes, true)
 	if err != nil {
 		return nil, err
@@ -256,6 +275,9 @@ func (ctx *CompilationContext) compileFrame(apiNodes []expv1alpha1.Node, isRoot 
 		}
 		if _, ok := ctx.dataPendingTolerant[built.ID]; ok {
 			built.TolerateDataPending = true
+		}
+		if _, ok := ctx.selfWatchExempt[built.ID]; ok {
+			built.SelfWatchExempt = true
 		}
 		nodes[built.ID] = built
 		if sch != nil {

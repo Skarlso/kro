@@ -103,6 +103,16 @@ type Node struct {
 	// author-status writeback node so status fields project progressively.
 	TolerateDataPending bool
 
+	// SelfWatchExempt suppresses drift-watch registration for this node's
+	// target. Set via WithSelfWatchExempt for the RGD adapter's author-status
+	// writeback patch node, which targets the reconciled instance's own status
+	// subresource: watching it would re-enqueue the instance on its own status
+	// write (a status write bumps resourceVersion, not generation, and the
+	// drift-watch enqueue path is not generation-guarded) — a self-perpetuating
+	// reconcile loop. The instance's parent informer already drives its
+	// reconciliation, so the self-watch is redundant.
+	SelfWatchExempt bool
+
 	// Object is the parsed payload as an unstructured object:
 	//   Template: the user-authored manifest
 	//   Ref:            the ExternalRef projected as {apiVersion, kind, metadata}

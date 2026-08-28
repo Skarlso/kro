@@ -88,6 +88,7 @@ type CompilationContext struct {
 	// author-status writeback node, but sharing keeps the semantics uniform.
 	softDepNodes        map[string]struct{}
 	dataPendingTolerant map[string]struct{}
+	selfWatchExempt     map[string]struct{}
 
 	costLimit uint64
 }
@@ -124,6 +125,7 @@ func (ctx *CompilationContext) child() *CompilationContext {
 		literalNodes:        ctx.literalNodes,
 		softDepNodes:        ctx.softDepNodes,
 		dataPendingTolerant: ctx.dataPendingTolerant,
+		selfWatchExempt:     ctx.selfWatchExempt,
 		costLimit:           ctx.costLimit,
 	}
 }

@@ -406,6 +406,15 @@ spec:
                   is persisted after reconciliation: on a fully-successful apply and
                   prune, it reflects the currently-applied set; on errors, it preserves
                   the union of previously-known and newly-applied resources.
+
+                  MaxItems bounds the inventory so a runaway forEach expansion cannot push
+                  the Graph object past etcd's object-size limit (~1.5Mi) — which would fail
+                  the status write and, because teardown reads this list, jeopardize cleanup.
+                  The practical limiter is the per-node forEach cap
+                  (runtime.DefaultMaxCollectionSize, default 1000); this ceiling is set well
+                  above any realistic aggregate (each entry is a few short strings + a UID,
+                  so 5000 entries stays comfortably under the etcd limit even during the
+                  write-ahead phase, which transiently holds previous ∪ next).
                 items:
                   description: |-
                     ManagedResource is a lightweight pointer to a cluster resource the Graph
@@ -453,6 +462,7 @@ spec:
                   - name
                   - nodeID
                   type: object
+                maxItems: 5000
                 type: array
             type: object
         required:

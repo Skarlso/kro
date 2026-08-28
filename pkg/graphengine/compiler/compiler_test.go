@@ -1197,6 +1197,28 @@ func TestCompile_WithSoftDependencies(t *testing.T) {
 	assert.Empty(t, prog.DAG.Vertices["cm"].DependsOn, "soft dependencies do not add DAG edges")
 }
 
+// TestCompile_WithSelfWatchExempt verifies the flag that suppresses drift-watch
+// registration for a node's target is threaded onto the compiled node. Used for
+// the RGD adapter's author-status writeback patch node, which targets the
+// reconciled instance's own status subresource (self-watch would loop).
+func TestCompile_WithSelfWatchExempt(t *testing.T) {
+	t.Parallel()
+	g := generator.NewGraph("g",
+		generator.WithTemplate("cm", map[string]any{
+			"apiVersion": "v1", "kind": "ConfigMap",
+			"metadata": map[string]any{"name": "cfg"},
+		}),
+		generator.WithPatch("p", "v1", "ConfigMap", "cfg", map[string]any{
+			"data": map[string]any{"touched": "yes"},
+		}),
+	)
+	prog, err := newTestCompiler(t).CompileWithOptions(g, WithSelfWatchExempt("p"))
+	require.NoError(t, err)
+	require.NotNil(t, prog.Nodes["p"])
+	assert.True(t, prog.Nodes["p"].SelfWatchExempt, "WithSelfWatchExempt must set SelfWatchExempt on the node")
+	assert.False(t, prog.Nodes["cm"].SelfWatchExempt, "other nodes must not be exempted")
+}
+
 func TestCompile_WithCostLimit(t *testing.T) {
 	t.Parallel()
 

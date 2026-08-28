@@ -54,7 +54,6 @@ replies are posted and left for the author/reviewer to click *Resolve*; only
 - ⚪ `graph/controller.go:306` managedResources double-write — PARTIAL (growth-gated
   write-ahead already limits churn); reply.
 
-
 ## Commits (chronological, by batch)
 
 - **Batch 1** `b3f3e0a7` — cache TOCTOU (cached.go:128), forEach data-pending (node.go:448),
