@@ -451,7 +451,11 @@ func (s *Simple) applyNodeByKind(
 		}
 		publishScope(rt, n, n.Observed())
 	case compiler.NodeKindPatch:
-		contribution, err := s.applyPatch(ctx, rt, w, n, desired)
+		contributions, err := s.applyPatch(ctx, rt, w, n, desired)
+		// Record whatever landed before any error so tracking never loses a
+		// contribution that actually reached the cluster (a forEach patch may
+		// fail partway through).
+		result.Contributions = append(result.Contributions, contributions...)
 		if err != nil {
 			// A dynamic-GVK patch whose target CRD isn't installed yet,
 			// an absent target, a terminating target, or a field-manager conflict
@@ -462,7 +466,6 @@ func (s *Simple) applyNodeByKind(
 			}
 			return nil, fmt.Errorf("apply %q (patch): %w", n.ID(), err)
 		}
-		result.Contributions = append(result.Contributions, contribution)
 		// A patch publishes no value into scope; record observed so an
 		// optional readyWhen can still evaluate against the node.
 		n.SetObserved(desired, desired)
@@ -1618,14 +1621,33 @@ func (s *Simple) ssaApply(ctx context.Context, obj *unstructured.Unstructured, f
 // manager without ForceOwnership, so it claims only the fields it sets; a
 // status-subresource patch is routed through the status endpoint. Returns the
 // recorded Contribution so the reconciler can release it on prune.
-func (s *Simple) applyPatch(ctx context.Context, rt *runtime.Runtime, w watchrouter.Watcher, n *runtime.Node, desired []*unstructured.Unstructured) (Contribution, error) {
-	// forEach is rejected on patch nodes at compile time, so Resolve produced
-	// exactly one object.
-	if len(desired) != 1 {
-		return Contribution{}, fmt.Errorf("patch node resolved to %d objects, want 1", len(desired))
+func (s *Simple) applyPatch(ctx context.Context, rt *runtime.Runtime, w watchrouter.Watcher, n *runtime.Node, desired []*unstructured.Unstructured) ([]Contribution, error) {
+	// A patch node may be a singleton (one target) or a forEach collection (the
+	// same contribution fanned out across every rendered target, e.g. a status
+	// writeback to each claimant CR). An empty desired set (forEach over an empty
+	// list) is a no-op, not an error. Each target is patched independently; the
+	// first hard error aborts and returns whatever contributions already landed
+	// so the reconciler can still release them.
+	collection := n.IsCollection()
+	contributions := make([]Contribution, 0, len(desired))
+	for _, obj := range desired {
+		contribution, err := s.applyPatchOne(ctx, rt, w, n, obj, collection)
+		if err != nil {
+			return contributions, err
+		}
+		contributions = append(contributions, contribution)
 	}
-	obj := desired[0]
+	return contributions, nil
+}
 
+// applyPatchOne contributes a single rendered patch object to its target. When
+// collection is true (the node is a forEach patch) the per-object drift watch
+// is skipped: the forEach source is either a watched ref node (drift on a
+// target re-enqueues the Graph there) or a static def (which can't drift
+// without a spec change), and registering N per-object watches under one nodeID
+// would collide in the coordinator's per-node watch state. A singleton patch
+// keeps its drift watch exactly as before.
+func (s *Simple) applyPatchOne(ctx context.Context, rt *runtime.Runtime, w watchrouter.Watcher, n *runtime.Node, obj *unstructured.Unstructured, collection bool) (Contribution, error) {
 	gvr, namespaced, err := s.mappingFor(n, obj)
 	if err != nil {
 		return Contribution{}, err
@@ -1639,8 +1661,9 @@ func (s *Simple) applyPatch(ctx context.Context, rt *runtime.Runtime, w watchrou
 	// instance on its own status write — a self-perpetuating loop, since the
 	// drift-watch enqueue path is not generation-guarded and a status write
 	// doesn't bump generation. The instance's parent informer already drives its
-	// reconciliation, so the watch is redundant as well as harmful.
-	if !n.SelfWatchExempt() {
+	// reconciliation, so the watch is redundant as well as harmful. Also skipped
+	// for a collection (forEach) patch — see applyPatchOne's doc.
+	if !n.SelfWatchExempt() && !collection {
 		if err := s.watchObject(ctx, w, s.qualifiedPath(n.ID()), gvr, obj); err != nil {
 			// A failure to register the drift watch must not abort the apply: the
 			// patch contribution below still lands, only drift re-enqueue is lost.

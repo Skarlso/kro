@@ -13,11 +13,10 @@
 # If the winner is deleted, the next-highest claimant takes over with zero
 # downtime — the resource UID never changes.
 #
-# STATUS / FUTURE WORK: the status-writeback shown below patches only the
-# first claimant (claims[0]), so other claimants receive no status and the
-# empty-claim-list case is not handled. A complete fan-out status design (one
-# status write per claim, plus the empty case) is tracked follow-up work; the
-# example is kept to illustrate the priority-resolution pattern.
+# STATUS: the status-writeback node below uses a forEach patch to fan status
+# out to EVERY claimant (not just the first), and an empty claim list is a
+# no-op — each Singleton CR gets its own active/claim status reflecting whether
+# it is the current winner for its target identity.
 # ---------------------------------------------------------------------------
 
 # Team A claims webapp-dashboard with priority 100
@@ -185,17 +184,23 @@ spec:
           namespace: ${c.template.metadata.namespace}
         data: ${c.template.data}
 
-    # Status writeback — patch Singleton CR with active + claim.
+    # Status writeback — fan out to EVERY claimant via a forEach patch. Each
+    # Singleton CR receives its own status: active=true only for the winner of
+    # its target identity, claim=<the contested identity>. An empty claim list
+    # renders zero patches (no-op). The patch targets each claimant's own CR by
+    # name, so drift re-enqueues via the `singletons` ref node above.
     - id: singletonStatus
+      forEach:
+        - c: ${claims}
       patch:
         apiVersion: kro.run/v1alpha1
         kind: Singleton
         metadata:
-          name: ${claims[0].name}
-          namespace: ${claims[0].namespace}
+          name: ${c.name}
+          namespace: ${c.namespace}
         status:
           active: >-
-            ${claims[0].key == claims.filter(x, x.identity == claims[0].identity)
+            ${c.key == claims.filter(x, x.identity == c.identity)
               .sortBy(x, x.creationTimestamp)
               .sortBy(x, -x.priority)[0].key}
-          claim: "${claims[0].identity}"
+          claim: "${c.identity}"

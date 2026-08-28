@@ -623,8 +623,9 @@ func (ctx *CompilationContext) analyzeVariables(n *Node, nodes map[string]*Node,
 	}
 	// Every forEach iterator must appear in an identity field so each rendered
 	// instance has a unique GVK+name(+namespace); otherwise SSA apply rejects
-	// later instances. kro catches it at compile time.
-	if len(iteratorNames) > 0 && n.Kind == NodeKindTemplate {
+	// later instances (template) or the patch lands on one target N times
+	// (patch). kro catches it at compile time.
+	if len(iteratorNames) > 0 && (n.Kind == NodeKindTemplate || n.Kind == NodeKindPatch) {
 		var missing []string
 		for _, it := range iteratorNames {
 			if _, ok := identityIterators[it]; !ok {

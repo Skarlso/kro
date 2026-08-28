@@ -243,6 +243,73 @@ func TestPatch_MetadataNameIsTheTarget(t *testing.T) {
 // TestPatch_TargetAbsentSoftRequeue verifies that a patch whose target does
 // not exist is a soft requeue: ErrNotReady, the node is Unresolved, and no
 // contribution is recorded.
+// TestPatch_ForEachFansOutToEveryTarget verifies a forEach patch node applies
+// the same contribution to every rendered target (fan-out status writeback).
+// Regression/feature test for forEach on patch nodes.
+func TestPatch_ForEachFansOutToEveryTarget(t *testing.T) {
+	cl := patchEnvClient(t)
+	ns := "default"
+	mustCreateConfigMap(t, cl, ns, "claim-a", map[string]any{"orig": "a"})
+	mustCreateConfigMap(t, cl, ns, "claim-b", map[string]any{"orig": "b"})
+	mustCreateConfigMap(t, cl, ns, "claim-c", map[string]any{"orig": "c"})
+
+	g := generator.NewGraph("g",
+		generator.WithNamespace(ns),
+		generator.WithDef("src", map[string]any{"names": []any{"claim-a", "claim-b", "claim-c"}}),
+		generator.WithPatchManifest("p", map[string]any{
+			"apiVersion": "v1",
+			"kind":       "ConfigMap",
+			"metadata":   map[string]any{"name": "${n}"},
+			"data":       map[string]any{"patched": "yes"},
+		}),
+	)
+	g.Spec.Nodes[len(g.Spec.Nodes)-1].ForEach = []expv1alpha1.ForEachDimension{{"n": "${src.names}"}}
+	g.SetUID("uid-foreach-fanout")
+
+	rt := compileAndBuild(t, g)
+	res, err := NewSimple(cl).Apply(context.Background(), rt, watchrouter.NoopWatcher{})
+	require.NoError(t, err)
+
+	assert.Empty(t, res.Applied, "patch must not be recorded as an owned resource")
+	require.Len(t, res.Contributions, 3, "one contribution per rendered target")
+	names := []string{res.Contributions[0].Name, res.Contributions[1].Name, res.Contributions[2].Name}
+	assert.ElementsMatch(t, []string{"claim-a", "claim-b", "claim-c"}, names)
+
+	for _, name := range []string{"claim-a", "claim-b", "claim-c"} {
+		cm := getConfigMap(t, cl, ns, name)
+		data, _, _ := unstructured.NestedStringMap(cm.Object, "data")
+		assert.Equal(t, "yes", data["patched"], "every target %q got the fanned-out contribution", name)
+		assert.Equal(t, name[len(name)-1:], data["orig"], "pre-existing field on %q survives", name)
+	}
+}
+
+// TestPatch_ForEachEmptyListIsNoOp verifies a forEach patch over an empty list
+// applies nothing and does not error — the reviewer's empty-claim-list case.
+func TestPatch_ForEachEmptyListIsNoOp(t *testing.T) {
+	cl := patchEnvClient(t)
+	ns := "default"
+
+	g := generator.NewGraph("g",
+		generator.WithNamespace(ns),
+		generator.WithDef("src", map[string]any{"names": []any{}}),
+		generator.WithPatchManifest("p", map[string]any{
+			"apiVersion": "v1",
+			"kind":       "ConfigMap",
+			"metadata":   map[string]any{"name": "${n}"},
+			"data":       map[string]any{"patched": "yes"},
+		}),
+	)
+	g.Spec.Nodes[len(g.Spec.Nodes)-1].ForEach = []expv1alpha1.ForEachDimension{{"n": "${src.names}"}}
+	g.SetUID("uid-foreach-empty")
+
+	rt := compileAndBuild(t, g)
+	res, err := NewSimple(cl).Apply(context.Background(), rt, watchrouter.NoopWatcher{})
+	require.NoError(t, err, "an empty forEach patch is a no-op, not an error")
+	assert.Empty(t, res.Contributions)
+	assert.Empty(t, res.Applied)
+	assert.NotContains(t, res.Unresolved, "p")
+}
+
 func TestPatch_TargetAbsentSoftRequeue(t *testing.T) {
 	cl := patchEnvClient(t)
 
