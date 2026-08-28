@@ -16,6 +16,7 @@ package graph
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -252,4 +253,36 @@ func TestNewImpersonation_CanWatchBoundToIdentity(t *testing.T) {
 		schema.GroupVersionResource{Group: "rbac.authorization.k8s.io", Version: "v1", Resource: "clusterrolebindings"}, "")
 	require.NoError(t, err)
 	assert.False(t, allowed, "watching a GVR the SA cannot read must be denied")
+}
+
+// TestExecutorFor_CacheIsBounded verifies the impersonated-executor cache does
+// not grow without limit as distinct (user-controlled) ServiceAccount
+// identities churn through it: building more than maxImpersonationCacheEntries
+// distinct identities keeps the cache at its bound, and an evicted identity is
+// transparently rebuilt on the next lookup.
+func TestExecutorFor_CacheIsBounded(t *testing.T) {
+	base := executor.NewSimple(fake.NewClientBuilder().Build())
+	builds := 0
+	r := &Reconciler{
+		Executor: base,
+		Impersonation: NewImpersonation(base, func(string) (client.Client, error) {
+			builds++
+			return fake.NewClientBuilder().Build(), nil
+		}, nil),
+	}
+
+	// Churn more distinct identities than the cache can hold.
+	n := maxImpersonationCacheEntries + 50
+	for i := range n {
+		_, err := r.executorFor(graphWithSA(fmt.Sprintf("ns-%d", i), "deployer"))
+		require.NoError(t, err)
+	}
+	require.Equal(t, n, builds, "each distinct identity builds once on first use")
+	assert.Equal(t, maxImpersonationCacheEntries, r.Impersonation.byUser.Len(),
+		"the cache must stay bounded at maxImpersonationCacheEntries")
+
+	// The first identity was evicted (LRU), so looking it up again rebuilds it.
+	_, err := r.executorFor(graphWithSA("ns-0", "deployer"))
+	require.NoError(t, err)
+	assert.Equal(t, n+1, builds, "an evicted identity is transparently rebuilt on next use")
 }
