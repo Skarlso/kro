@@ -78,16 +78,20 @@ Skipped context.go:237/256 (deferred-schema / CRD-CEL — product decision, not 
 - ⬜ `parser.go:285` unterminated ${ silently literal. Fix: parser error.
 - ⬜ `context.go:237/256` static custom-Kind resolved before CRD applies (deferred-schema unimplemented).
 
-## Batch 6 — Runtime / watch / status (OPEN)
+## Batch 6 — Runtime / watch / status / cache (IN PROGRESS — agent)
 
-- ⬜ `status.go:205` schema-wrapper lost on condition overlay → typed CEL breaks. (High)
-- ⬜ `schemawatcher/watcher.go:457` schema events silently dropped. (High) Fix: lossless coalescing.
-- ⬜ `runtime.go:108` child runtime leaks ancestor value under shadowed local ID.
-- ⬜ `runtime.go:178` soft-dep collections seeded as {} not list.
-- ⬜ `runtime.go:203` apply-order not version-stable.
-- ⬜ `status.go:66` dead ProjectInstanceStatus projector — remove or wire.
-- ⬜ `cached.go:91` epoch map unbounded growth.
-- ⬜ `cached.go:104` cache metrics never updated.
+Dispatched to an agent (scoped: runtime/runtime.go, schemawatcher/watcher.go, rgdadapter/status.go,
+graph/schema/resolver/cached.go). LEFT OUT (needs decision): `runtime.go:203` apply-order
+version stability (fix-numbering vs document-only).
+
+- 🔵 `status.go:205` schema-wrapper lost on condition overlay → typed CEL breaks. (High)
+- 🔵 `schemawatcher/watcher.go:457` schema events silently dropped. (High) lossless coalescing.
+- 🔵 `runtime.go:108` child runtime leaks ancestor value under shadowed local ID.
+- 🔵 `runtime.go:178` soft-dep collections seeded as {} not list.
+- 🔵 `status.go:66` dead ProjectInstanceStatus projector — verify-dead then remove (+ its now-unused helpers).
+- 🔵 `cached.go:91` epoch map unbounded growth → GC.
+- 🔵 `cached.go:104` cache metrics never updated → instrument.
+- ⬜ `runtime.go:203` apply-order not version-stable — LEFT OUT (decision).
 
 ## Batch 7 — API / docs / examples / helm / cleanup (OPEN)
 
