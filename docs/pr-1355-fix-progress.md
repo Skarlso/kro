@@ -57,8 +57,8 @@ File: `pkg/graphengine/executor/simple.go` unless noted.
 - ✅ `controller_graph_engine.go:663` prune UID-conflict now soft-requeues (was: clean success, no retry). `65d14946`
 - ✅ `graph/controller.go:421` release failure flips ResourcesConverged=False (ReleaseFailed). `0ee2b54b`/earlier
 - ✅ `graph/controller.go:357` prune retired nodes on soft not-ready, not only clean apply (E2 twin). `0ee2b54b`
-- 🔵 `simple.go:1489` SSA contribution release can recreate deleted target — NEXT.
-- 🔵 `simple.go:1492` release fails when target CRD GVK unmaps — NEXT.
+- ✅ `simple.go:1489` SSA contribution release GET-first guard — no longer recreates a deleted target. `7a3ffb47`
+- ✅ `simple.go:1492` release tolerates removed CRD (NoMatch=already-released), retries transient discovery. `7a3ffb47`
 - ⬜ `controller_graph_engine.go:207` / `simple.go:1627` duplicate identity detected post-apply (pre-write check) — pending.
 - ⬜ `graph/controller.go:314` contribution write-ahead — pending.
 - ⬜ `graph/controller.go:344` + `tracking.go:137,161` mixed-identity / write-ahead subgraph / dynamic-ns dedup — pending.
