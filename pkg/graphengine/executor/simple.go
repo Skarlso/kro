@@ -1570,7 +1570,19 @@ const patchFieldManagerPrefix = "kro-graphengine.patch."
 // subgraphs that reuse a local id distinct; embedding graphSeg lets the
 // conflict classifier recognize two managers of the same Graph as our own
 // (vs a peer). nodeID is the node's fully-qualified path (e.g. "subA/res").
+//
+// Exported as PatchFieldManager so the graph controller's contribution
+// write-ahead projects the SAME field-manager identity the executor will apply
+// under — the two must not drift, or a write-ahead ledger entry would fail to
+// correlate with the contribution Release later looks for.
 func patchFieldManager(parentUID types.UID, nodeID string) string {
+	return PatchFieldManager(parentUID, nodeID)
+}
+
+// PatchFieldManager is the exported, drift-proof derivation of a patch node's
+// field-manager identity. See patchFieldManager. parentUID is the Graph UID;
+// nodeID is the node's fully-qualified path.
+func PatchFieldManager(parentUID types.UID, nodeID string) string {
 	h := sha256.New()
 	h.Write([]byte(parentUID))
 	h.Write([]byte("/"))

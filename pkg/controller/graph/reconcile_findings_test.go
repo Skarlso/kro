@@ -197,6 +197,47 @@ func TestIntendedManagedResources_SkipsDynamicGVKWithoutNamespace(t *testing.T) 
 	})
 }
 
+// TestIntendedContributions_MatchesExecutorFieldManager pins the contribution
+// write-ahead (graph/controller.go:314): the projected FieldManager MUST equal
+// what the executor applies under, or the write-ahead ledger entry would never
+// correlate with the contribution Release later looks for. Both derive it from
+// the single shared executor.PatchFieldManager(graphUID, nodeID), so this
+// asserts the projection reproduces that exact identity for a patch node.
+func TestIntendedContributions_MatchesExecutorFieldManager(t *testing.T) {
+	t.Parallel()
+	g := graph("g") // namespace "default"
+	g.SetUID(types.UID("graph-uid-123"))
+
+	patchObj := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "v1",
+		"kind":       "ConfigMap",
+		"metadata":   map[string]any{"name": "target", "namespace": "default"},
+		"data":       map[string]any{"k": "v"},
+	}}
+	patchNode := &compiler.Node{
+		ID:         "p",
+		Kind:       compiler.NodeKindPatch,
+		Namespaced: true,
+		Object:     patchObj,
+	}
+	prog := &compiler.Program{
+		Nodes:            map[string]*compiler.Node{"p": patchNode},
+		TopologicalOrder: []string{"p"},
+	}
+	rt := krotruntime.New(prog, g)
+
+	got := intendedContributions(rt)
+	require.Len(t, got, 1, "the patch node's contribution must be projected")
+	c := got[0]
+	assert.Equal(t, "v1", c.APIVersion)
+	assert.Equal(t, "ConfigMap", c.Kind)
+	assert.Equal(t, "default", c.Namespace)
+	assert.Equal(t, "target", c.Name)
+	// The crux: the projected field manager is byte-identical to the executor's.
+	assert.Equal(t, executor.PatchFieldManager("graph-uid-123", "p"), c.FieldManager,
+		"write-ahead FieldManager must match the executor's, or Release cannot correlate the ledger entry")
+}
+
 // lostStatusWriteClient drops the FIRST N status Patch calls (returning nil so
 // the reconciler believes they succeeded) then delegates. It simulates a lost
 // status write — the exact crash window Finding A guards.

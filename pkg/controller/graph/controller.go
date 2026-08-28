@@ -311,6 +311,26 @@ func (r *Reconciler) reconcileGraph(ctx context.Context, g *expv1alpha1.Graph) e
 		}
 	}
 
+	// Write-ahead the pre-apply patch-contribution intent, symmetric with the
+	// managed-resource write-ahead above. Apply mutates a patch target's fields
+	// under a per-node field manager; persistContributions records the release
+	// inventory only AFTER Apply. A crash in that window would leave a
+	// contributed field on its target with no ledger entry, so Release/teardown
+	// could never relinquish it. Persisting the union of prior + intended
+	// contributions first guarantees teardown a superset. The intent's
+	// FieldManager is derived from the same executor.PatchFieldManager the
+	// executor applies under, so a write-ahead entry correlates exactly with the
+	// contribution Release later looks for (a stale/ghost entry is a tolerated
+	// no-op: Release GETs the target first and treats absent as already-released).
+	// Only write when the union grows, mirroring the managed-resource guard, so a
+	// steady state does not rewrite the annotation every cycle.
+	intentContribs := UnionContributions(priorContribs, intendedContributions(rt))
+	if len(intentContribs) > len(priorContribs) {
+		if err := r.persistContributions(ctx, g, intentContribs); err != nil {
+			return fmt.Errorf("write-ahead patch-contribution intent: %w", err)
+		}
+	}
+
 	result, applyErr := ex.Apply(ctx, rt, watcher)
 
 	// Commit on full success or soft ErrNotReady — the executor walks

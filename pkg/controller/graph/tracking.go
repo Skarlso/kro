@@ -206,6 +206,100 @@ func intendedManagedResources(rt *krotruntime.Runtime) []expv1alpha1.ManagedReso
 	return out
 }
 
+// intendedContributions projects the patch-contribution identities a runtime is
+// about to apply this cycle, best-effort and without cluster writes — the patch
+// twin of intendedManagedResources. The graph reconciler write-aheads this so a
+// crash between Apply (which mutates a patch target) and persistContributions
+// (which records the release inventory) still leaves teardown/Release a
+// superset to release from, instead of a contributed field stranded on its
+// target with no ledger entry.
+//
+// The projected FieldManager MUST equal what the executor will apply under, or
+// the write-ahead entry would never correlate with the contribution Release
+// later looks for. Both derive it from executor.PatchFieldManager(graphUID,
+// nodeID) — a single shared, pure helper — so they cannot drift. nodeID here is
+// the top-level node ID; the executor qualifies with the subgraph frame prefix
+// (qualifiedPath), which for a top-level node is the bare ID, matching this
+// projection (which, like intendedManagedResources, does not recurse subgraphs).
+//
+// It is intentionally lossy: a patch node whose target can't be resolved in
+// memory yet (references an not-yet-applied resource), is ignored
+// (includeWhen:false), or is a dynamic-GVK target with no explicit namespace is
+// skipped — its post-apply Contribution records it correctly.
+func intendedContributions(rt *krotruntime.Runtime) []executor.Contribution {
+	if rt == nil {
+		return nil
+	}
+
+	// Seed Def nodes into scope so patch targets referencing them (e.g.
+	// `schema.spec...`) resolve in memory. Idempotent with any prior seeding.
+	for _, n := range rt.Nodes() {
+		if n.Kind() != compiler.NodeKindDef {
+			continue
+		}
+		desired, err := n.Resolve()
+		if err != nil || len(desired) == 0 {
+			continue
+		}
+		n.SetObserved(desired, desired)
+		if n.IsCollection() {
+			list := make([]any, 0, len(desired))
+			for _, obj := range desired {
+				list = append(list, obj.Object)
+			}
+			rt.Set(n.ID(), list)
+		} else {
+			rt.Set(n.ID(), desired[0].Object)
+		}
+	}
+
+	graphUID := rt.Graph().GetUID()
+	var out []executor.Contribution
+	seen := make(map[contribKey]struct{})
+	for _, n := range rt.Nodes() {
+		if n.Kind() != compiler.NodeKindPatch {
+			continue
+		}
+		if ignored, err := n.IsIgnored(); err == nil && ignored {
+			continue
+		}
+		desired, err := n.Resolve()
+		if err != nil || len(desired) != 1 {
+			continue
+		}
+		obj := desired[0]
+		gvk := obj.GroupVersionKind()
+		if gvk.Kind == "" || obj.GetName() == "" {
+			continue
+		}
+		ns := obj.GetNamespace()
+		if ns == "" && n.Namespaced() {
+			ns = rt.Graph().GetNamespace()
+		}
+		// Same dynamic-GVK-no-namespace ambiguity as intendedManagedResources:
+		// the scope isn't known until apply resolves it from the RESTMapper, so a
+		// ns="" entry would never correlate. Skip it.
+		if ns == "" && n.DynamicGVK() {
+			continue
+		}
+		c := executor.Contribution{
+			APIVersion:   gvk.GroupVersion().String(),
+			Kind:         gvk.Kind,
+			Namespace:    ns,
+			Name:         obj.GetName(),
+			Subresource:  n.Subresource(),
+			FieldManager: executor.PatchFieldManager(graphUID, n.ID()),
+		}
+		k := contribKeyOf(c)
+		if _, dup := seen[k]; dup {
+			continue
+		}
+		seen[k] = struct{}{}
+		out = append(out, c)
+	}
+	return out
+}
+
 // unionManagedResources merges previous and applied, deduping on identity.
 // Used after a soft or hard Apply error, where the diff isn't trustworthy
 // enough to prune, so status is widened to cover everything we know about.
