@@ -214,6 +214,17 @@ func New(prog *compiler.Program, g *expv1alpha1.Graph, opts ...Option) *Runtime 
 	// Def nodes (e.g. the synthetic `schema`/instance node) are excluded from
 	// the depth calculation and never stamped: apply orders cover only real
 	// resource nodes.
+	//
+	// These absolute layer values are REVISION-LOCAL, not a stable identifier:
+	// they depend on the graph's shape this revision, so an equivalent resource
+	// can carry a different number across revisions (e.g. after an unrelated node
+	// is added/removed). Only the RELATIVE ordering within one apply is
+	// contractual (a dependent is always a higher wave than its dependency); the
+	// number itself is advisory. The deletion path treats the annotation
+	// accordingly — it groups by descending wave and tolerates mixed/absent
+	// values (unparseable or non-positive fall back to wave 0), so objects
+	// stamped by different revisions still delete safely (see
+	// controller/instance/deletion.go highestDeletionWave).
 	rt.applyOrders = make(map[string]int, len(rt.nodes))
 	for _, n := range rt.nodes {
 		if n.Kind() == compiler.NodeKindDef {
