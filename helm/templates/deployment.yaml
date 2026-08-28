@@ -77,6 +77,8 @@ spec:
               value: {{ .Values.config.resourceGraphDefinitionConcurrentReconciles | quote }}
             - name: KRO_GRAPH_REVISION_CONCURRENT_RECONCILES
               value: {{ .Values.config.graphRevisionConcurrentReconciles | quote }}
+            - name: KRO_GRAPH_CONCURRENT_RECONCILES
+              value: {{ .Values.config.graphConcurrentReconciles | quote }}
             - name: KRO_DYNAMIC_CONTROLLER_CONCURRENT_RECONCILES
               value: {{ .Values.config.dynamicControllerConcurrentReconciles | quote }}
             - name: KRO_LOG_LEVEL
@@ -144,6 +146,8 @@ spec:
             - "$(KRO_RESOURCE_GROUP_CONCURRENT_RECONCILES)"
             - --graph-revision-concurrent-reconciles
             - "$(KRO_GRAPH_REVISION_CONCURRENT_RECONCILES)"
+            - --graph-concurrent-reconciles
+            - "$(KRO_GRAPH_CONCURRENT_RECONCILES)"
             - --dynamic-controller-concurrent-reconciles
             - "$(KRO_DYNAMIC_CONTROLLER_CONCURRENT_RECONCILES)"
             - --zap-log-level
