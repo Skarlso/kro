@@ -224,6 +224,47 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 // the new watch set (clearing any nodes that were removed in this
 // revision); on error abort, keeping the previously committed set
 // authoritative so drift detection survives transient failures.
+// writeAheadIntent persists the pre-apply intent (managed resources + patch
+// contributions) BEFORE any cluster write, and returns the managed-resource
+// intent for reuse by the caller's failure branches.
+//
+// Teardown runs entirely from g.Status.ManagedResources, so a status write lost
+// between Apply (which creates children / mutates patch targets) and the
+// post-apply persist would orphan those children or leave a contributed field
+// with no release-ledger entry. Persisting the union of previous + intended
+// identities first guarantees teardown a superset even across a crash in that
+// window (mirrors the instance ApplySet union-never-shrinks path). Intent is
+// best-effort and UID-free; keyOf dedups post-apply entries. The contribution
+// intent's FieldManager is derived from the same executor.PatchFieldManager the
+// executor applies under, so a write-ahead entry correlates exactly with the
+// contribution Release later looks for (a stale/ghost entry is a tolerated
+// no-op: Release GETs the target first and treats absent as already-released).
+// Each side only writes when its union grows, so a steady state does not rewrite
+// status every cycle.
+func (r *Reconciler) writeAheadIntent(
+	ctx context.Context,
+	g *expv1alpha1.Graph,
+	rt *krotruntime.Runtime,
+	previous []expv1alpha1.ManagedResource,
+	priorContribs []executor.Contribution,
+) ([]expv1alpha1.ManagedResource, error) {
+	intent := unionManagedResources(previous, intendedManagedResources(rt))
+	if len(intent) > len(previous) {
+		g.Status.ManagedResources = intent
+		if err := r.persistManagedResources(ctx, g); err != nil {
+			return nil, fmt.Errorf("write-ahead managed-resource intent: %w", err)
+		}
+	}
+
+	intentContribs := UnionContributions(priorContribs, intendedContributions(rt))
+	if len(intentContribs) > len(priorContribs) {
+		if err := r.persistContributions(ctx, g, intentContribs); err != nil {
+			return nil, fmt.Errorf("write-ahead patch-contribution intent: %w", err)
+		}
+	}
+	return intent, nil
+}
+
 func (r *Reconciler) reconcileGraph(ctx context.Context, g *expv1alpha1.Graph) error {
 	marker := NewConditionsMarkerFor(g)
 	key := client.ObjectKeyFromObject(g)
@@ -290,39 +331,14 @@ func (r *Reconciler) reconcileGraph(ctx context.Context, g *expv1alpha1.Graph) e
 		return fmt.Errorf("resolve impersonated executor: %w", err)
 	}
 
-	// Write-ahead the pre-apply intent BEFORE any cluster write. Teardown runs
-	// entirely from g.Status.ManagedResources, so a status write lost between
-	// Apply (which creates children) and the post-apply persist would orphan
-	// those children permanently. Persist the union of previous + intended
-	// identities so a crash after Apply still leaves teardown a superset to
-	// delete from (mirrors the instance ApplySet union-never-shrinks path).
-	// Intent is best-effort and UID-free; keyOf dedups post-apply entries.
-	intent := unionManagedResources(previous, intendedManagedResources(rt))
-	if len(intent) > len(previous) {
-		g.Status.ManagedResources = intent
-		if err := r.persistManagedResources(ctx, g); err != nil {
-			return fmt.Errorf("write-ahead managed-resource intent: %w", err)
-		}
-	}
-
-	// Write-ahead the pre-apply patch-contribution intent, symmetric with the
-	// managed-resource write-ahead above. Apply mutates a patch target's fields
-	// under a per-node field manager; persistContributions records the release
-	// inventory only AFTER Apply. A crash in that window would leave a
-	// contributed field on its target with no ledger entry, so Release/teardown
-	// could never relinquish it. Persisting the union of prior + intended
-	// contributions first guarantees teardown a superset. The intent's
-	// FieldManager is derived from the same executor.PatchFieldManager the
-	// executor applies under, so a write-ahead entry correlates exactly with the
-	// contribution Release later looks for (a stale/ghost entry is a tolerated
-	// no-op: Release GETs the target first and treats absent as already-released).
-	// Only write when the union grows, mirroring the managed-resource guard, so a
-	// steady state does not rewrite the annotation every cycle.
-	intentContribs := UnionContributions(priorContribs, intendedContributions(rt))
-	if len(intentContribs) > len(priorContribs) {
-		if err := r.persistContributions(ctx, g, intentContribs); err != nil {
-			return fmt.Errorf("write-ahead patch-contribution intent: %w", err)
-		}
+	// Write-ahead the pre-apply intent (managed resources + patch contributions)
+	// BEFORE any cluster write, so a crash between Apply and the post-apply
+	// persist still leaves teardown a superset to work from. Returns the
+	// managed-resource intent, reused below when a hard/prune failure must keep
+	// the inventory from shrinking below the pre-apply superset.
+	intent, err := r.writeAheadIntent(ctx, g, rt, previous, priorContribs)
+	if err != nil {
+		return err
 	}
 
 	result, applyErr := ex.Apply(ctx, rt, watcher)

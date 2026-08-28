@@ -599,7 +599,7 @@ func (ctx *CompilationContext) analyzeVariables(n *Node, nodes map[string]*Node,
 	identityIterators := make(map[string]struct{}, len(iteratorNames))
 	var captured []string
 	for _, v := range n.Variables {
-		analysis, err := ctx.extractDependencies(inspector, v.Expression, iteratorNames, nodes)
+		analysis, err := ctx.extractDependencies(inspector, v.Expression, iteratorNames)
 		if err != nil {
 			return nil, fmt.Errorf("variable at %q: %w", v.Path, err)
 		}
@@ -647,7 +647,7 @@ func (ctx *CompilationContext) analyzeForEach(n *Node, nodes map[string]*Node, i
 	iteratorNames := nodeIteratorNames(n)
 	var captured []string
 	for _, dim := range n.ForEach {
-		analysis, err := ctx.extractDependencies(inspector, dim.Expression, iteratorNames, nodes)
+		analysis, err := ctx.extractDependencies(inspector, dim.Expression, iteratorNames)
 		if err != nil {
 			return nil, fmt.Errorf("forEach %q: %w", dim.Name, err)
 		}
@@ -672,7 +672,7 @@ func (ctx *CompilationContext) analyzeForEach(n *Node, nodes map[string]*Node, i
 func (ctx *CompilationContext) analyzeIncludeWhen(n *Node, nodes map[string]*Node, inspector *ast.Inspector) ([]string, error) {
 	var captured []string
 	for i, expr := range n.IncludeWhen {
-		analysis, err := ctx.extractDependencies(inspector, expr, nil, nodes)
+		analysis, err := ctx.extractDependencies(inspector, expr, nil)
 		if err != nil {
 			return nil, fmt.Errorf("includeWhen[%d]: %w", i, err)
 		}
@@ -695,7 +695,7 @@ func (ctx *CompilationContext) analyzeIncludeWhen(n *Node, nodes map[string]*Nod
 // implicit ordering ambiguity.
 func (ctx *CompilationContext) analyzeReadyWhen(n *Node, nodes map[string]*Node, inspector *ast.Inspector) ([]string, error) {
 	for i, expr := range n.ReadyWhen {
-		analysis, err := ctx.extractDependencies(inspector, expr, nil, nodes)
+		analysis, err := ctx.extractDependencies(inspector, expr, nil)
 		if err != nil {
 			return nil, fmt.Errorf("readyWhen[%d]: %w", i, err)
 		}
@@ -740,7 +740,6 @@ func (ctx *CompilationContext) extractDependencies(
 	inspector *ast.Inspector,
 	expr *krocel.Expression,
 	iteratorNames []string,
-	nodes map[string]*Node,
 ) (dependencyAnalysis, error) {
 	result, err := inspector.Inspect(expr.Original)
 	if err != nil {
