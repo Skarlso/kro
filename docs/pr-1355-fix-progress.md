@@ -10,6 +10,7 @@ Verification detail lives in `pr-1355-unresolved-full-verification.md`; this doc
 
 - `b3f3e0a7` — batch 1: cache TOCTOU, forEach data-pending, coordinator labels, cost-limit threading.
 - `2559b399` — batch 2: executor Apply/Delete hard-error aggregation, update-rejection log signal, malformed-create fail-fast.
+- `5f8c171b`, `7ce66a90`, `803597d4` — batch 5: compiler/parser (self-ref, ancestor patch capture, dyn each, optional<bool>, real cycle detection, single-quote scanner, unterminated-expr error). VERIFIED.
 
 ## GitHub thread state
 
@@ -56,7 +57,17 @@ File: `pkg/graphengine/executor/simple.go` unless noted.
 - ⬜ `helm cluster-role.yaml:155` cluster-wide impersonate even with GraphKind off. Fix: gate behind opt-in + scope.
 - ⬜ `impersonation.go:129` executor cache never evicts. Fix: LRU bound / evict on Graph delete.
 
-## Batch 5 — Compiler / parser (OPEN)
+## Batch 5 — Compiler / parser (DONE — 5f8c171b, 7ce66a90, 803597d4; verified)
+
+Skipped context.go:237/256 (deferred-schema / CRD-CEL — product decision, not a code fix).
+
+- ✅ `compiler.go:651` includeWhen self-reference → compile-time reject. +test.
+- ✅ `compiler.go:730` ancestor patch capture → framePatchKind walks frames, rejects. +test.
+- ✅ `typecheck.go:302` dyn-GVK collection `each` → declared as cel.DynType. +test.
+- ✅ `typecheck.go:325` optional<bool> conditions → compile-time reject w/ orValue hint. +test.
+- ✅ `validation.go:206` no-CEL-seed heuristic → requireResolvableRoot (real root check; cycles still caught by AddDependencies+TopologicalSort, verified double-guarded). +test.
+- ✅ `cel.go:31` scanner now tracks single-quoted literals identically to double. +tests. (verified no example regression)
+- ✅ `parser.go:285` unterminated ${ → ErrUnterminatedExpression. +tests.
 
 - ⬜ `compiler.go:651` includeWhen self-reference silently dropped. Fix: reject at compile.
 - ⬜ `compiler.go:730` patch capture across ancestor frames unchecked. Fix: resolve kind across frames.
