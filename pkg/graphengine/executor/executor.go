@@ -127,6 +127,33 @@ type Contribution struct {
 	FieldManager string `json:"fieldManager"`
 }
 
+// ToleratedRejection describes a collection item whose server-side-apply UPDATE
+// was rejected on an ALREADY-EXISTING object and tolerated: the live object is
+// kept and the node still converges (so an unfixable update — e.g. an immutable
+// field — does not wedge the instance forever). The desired change did NOT land,
+// so this is surfaced as an observational signal (log + optional Warning event
+// via Simple.OnToleratedRejection) WITHOUT affecting readiness gating or
+// requeue — flipping those would reintroduce the wedge.
+type ToleratedRejection struct {
+	NodeID     string // fully-qualified node path
+	APIVersion string // target apiVersion ("apps/v1", "v1", ...)
+	Kind       string // target kind
+	Namespace  string
+	Name       string
+	// Reason is a short operator-facing classification of WHY the update was
+	// rejected (e.g. "field immutable", "invalid request", or a transient cause
+	// that will be retried on a later reconcile). Derived from the typed API
+	// error, since a permanent immutable-field rejection and a transient one are
+	// not distinguishable by outcome here (both keep the live object).
+	Reason string
+	// Permanent is true when the rejection cannot succeed by retrying the same
+	// payload (Invalid/BadRequest); false for transient causes that a later
+	// reconcile may resolve.
+	Permanent bool
+	// Cause is the raw API error string, for the log/event detail.
+	Cause string
+}
+
 // Interface is the cluster-I/O surface used by the Graph reconciler.
 // Implementations should treat Apply as idempotent and Delete as tolerant
 // of partial prior progress (NotFound is success).

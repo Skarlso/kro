@@ -852,10 +852,10 @@ func TestReconcileDeletion_RefusesForgedNonKroFieldManager(t *testing.T) {
 	addEmptyDeletionScope(instance)
 	contribs := []executor.Contribution{
 		{
-			APIVersion:   "v1",
-			Kind:         "ConfigMap",
-			Namespace:    "default",
-			Name:         "victim-cm",
+			APIVersion: "v1",
+			Kind:       "ConfigMap",
+			Namespace:  "default",
+			Name:       "victim-cm",
 			// A forged, non-kro field manager. Only kro-graphengine.patch.* managers
 			// are ever legitimately recorded; this must be refused, not released.
 			FieldManager: "kubectl",

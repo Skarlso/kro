@@ -111,6 +111,15 @@ type Simple struct {
 	// Nil outside an Apply walk; the post-apply validateAppliedIdentities check
 	// remains as a backstop.
 	identityClaims *identityClaimSet
+	// OnToleratedRejection, when non-nil, is invoked for each collection item
+	// whose UPDATE was rejected on an already-existing object and tolerated
+	// (the live object is kept and the node still converges). It is a purely
+	// OBSERVATIONAL hook — it must not influence readiness or requeue, or the
+	// anti-wedge tolerance would be lost. The instance controller wires it to an
+	// event recorder (Warning event); the Graph controller leaves it nil
+	// (log-only, it has no recorder). Called from parallel apply goroutines, so
+	// the implementation must be safe for concurrent use (an EventRecorder is).
+	OnToleratedRejection func(ToleratedRejection)
 }
 
 // identityClaimSet is the per-Apply set of claimed object identities, guarded by
@@ -755,6 +764,59 @@ func (st *collectionApplyState) recordApplied(i int, mr expv1alpha1.ManagedResou
 	st.mu.Unlock()
 }
 
+// classifyRejection turns a tolerated collection-update rejection into a short
+// operator-facing reason and a permanent/transient flag. A permanent rejection
+// (Invalid/BadRequest) cannot succeed by retrying the same payload; an Invalid
+// whose status causes name an immutable field is reported specifically so the
+// operator sees WHY the desired change never landed. Transient causes
+// (Conflict, timeouts, throttling, unavailability) are retried on a later
+// reconcile, so they are flagged non-permanent. This is best-effort: a webhook
+// Forbidden or a CEL-validation Invalid that depends on other mutable cluster
+// state cannot be perfectly classified by error code, which is exactly why the
+// node converges and merely SURFACES the rejection rather than gating on it.
+func classifyRejection(err error) (reason string, permanent bool) {
+	switch {
+	case apierrors.IsInvalid(err):
+		if isImmutableFieldError(err) {
+			return "field immutable", true
+		}
+		return "invalid request", true
+	case apierrors.IsBadRequest(err):
+		return "invalid request", true
+	case apierrors.IsConflict(err):
+		return "field-manager conflict, will retry", false
+	case apierrors.IsTooManyRequests(err):
+		return "throttled, will retry", false
+	case apierrors.IsServerTimeout(err) || apierrors.IsTimeout(err) || apierrors.IsServiceUnavailable(err) || apierrors.IsInternalError(err):
+		return "transient server error, will retry", false
+	default:
+		// Unknown cause: treat as transient (a later reconcile re-attempts the
+		// update anyway) but don't claim permanence we can't prove.
+		return "rejected, will retry", false
+	}
+}
+
+// isImmutableFieldError reports whether an Invalid error's status causes name an
+// immutable-field violation (the apiserver phrasing is "field is immutable" or
+// "may not be changed"). Used only to enrich the operator-facing reason.
+func isImmutableFieldError(err error) bool {
+	status := apierrors.APIStatus(nil)
+	if !errors.As(err, &status) {
+		return false
+	}
+	details := status.Status().Details
+	if details == nil {
+		return false
+	}
+	for _, cause := range details.Causes {
+		msg := strings.ToLower(cause.Message)
+		if strings.Contains(msg, "immutable") || strings.Contains(msg, "may not be changed") || strings.Contains(msg, "cannot be changed") {
+			return true
+		}
+	}
+	return false
+}
+
 // recordUpdateRejected records a tolerated per-item UPDATE failure on an
 // already-present object: the live identity is tracked and the desired slot is
 // replaced with the live object so downstream scope sees what actually landed.
@@ -964,15 +1026,33 @@ func (s *Simple) applyCollectionItem(ctx context.Context, rt *runtime.Runtime, n
 			// The rejection is NOT escalated to a hard error or a soft not-ready
 			// (that would wedge the node on an unfixable update), but it must not
 			// be fully SILENT either: a desired change did not land while the node
-			// still converges, so emit a warning to the controller log — the
-			// accepted operator-visible channel — with the object identity and the
-			// rejection cause, so a stale live object is diagnosable rather than
-			// invisible.
+			// still converges. Emit a warning to the controller log AND, when the
+			// caller wired OnToleratedRejection, an observational signal (the
+			// instance controller records a Warning event) classifying WHY — so a
+			// stale live object is diagnosable in `kubectl describe`, not just in
+			// logs. The signal is observational ONLY: it never touches readiness
+			// gating or requeue, or the anti-wedge tolerance would be lost.
+			reason, permanent := classifyRejection(err)
 			log.FromContext(ctx).Info("collection item update rejected; keeping live object and converging (desired change did not land)",
 				"node", s.qualifiedPath(n.ID()),
 				"object", obj.GetNamespace()+"/"+obj.GetName(),
 				"gvk", obj.GroupVersionKind().String(),
+				"reason", reason,
+				"permanent", permanent,
 				"cause", err.Error())
+			if s.OnToleratedRejection != nil {
+				gvk := obj.GroupVersionKind()
+				s.OnToleratedRejection(ToleratedRejection{
+					NodeID:     s.qualifiedPath(n.ID()),
+					APIVersion: gvk.GroupVersion().String(),
+					Kind:       gvk.Kind,
+					Namespace:  obj.GetNamespace(),
+					Name:       obj.GetName(),
+					Reason:     reason,
+					Permanent:  permanent,
+					Cause:      err.Error(),
+				})
+			}
 			st.recordUpdateRejected(i, managedResourceFrom(n, current), desired, current)
 			return nil
 		}

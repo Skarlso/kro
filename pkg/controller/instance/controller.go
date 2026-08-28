@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/go-logr/logr"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -173,6 +174,29 @@ func NewController(
 		exec.WithLabelInjector(func(obj *unstructured.Unstructured) {
 			lab.ApplyLabels(obj)
 		})
+	}
+	// Surface a tolerated collection-update rejection (an already-existing item
+	// whose SSA update was rejected — e.g. an immutable field — that we keep-live
+	// and converge on) as a Warning Event on the affected CHILD object, so the
+	// dropped desired change is visible in `kubectl describe` and not just the
+	// controller log. Observational only: this hook never influences readiness or
+	// requeue (the node still converges), so it cannot reintroduce the wedge an
+	// unfixable update would otherwise cause. Set at construction (not per
+	// reconcile) because the executor is shared across concurrent reconcile
+	// workers; the event subject is derived from the rejection's own target
+	// identity rather than any per-reconcile instance state.
+	if eventRecorder != nil {
+		exec.OnToleratedRejection = func(r executor.ToleratedRejection) {
+			ref := &corev1.ObjectReference{
+				APIVersion: r.APIVersion,
+				Kind:       r.Kind,
+				Namespace:  r.Namespace,
+				Name:       r.Name,
+			}
+			eventRecorder.Eventf(ref, corev1.EventTypeWarning, "UpdateRejected",
+				"node %q: desired update rejected (%s) and NOT applied; keeping the live object. Cause: %s",
+				r.NodeID, r.Reason, r.Cause)
+		}
 	}
 	// The compiler is set via WithGraphEngineCompiler after construction
 	// because it requires rest.Config which the caller owns.
