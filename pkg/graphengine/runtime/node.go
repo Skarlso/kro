@@ -426,6 +426,13 @@ func (n *Node) expand() ([]map[string]any, error) {
 	for _, axis := range n.spec.ForEach {
 		items, err := evalList(axis.Expression, n.rt.scope)
 		if err != nil {
+			// A forEach axis referencing not-yet-published upstream data is a
+			// soft, retryable condition — mirror the scalar renderOne path
+			// (which wraps ErrDataPending) rather than turning a normal pending
+			// field into a permanent hard graph failure.
+			if IsCELDataPending(err) {
+				return nil, fmt.Errorf("forEach %q: %w (%w)", axis.Name, err, ErrDataPending)
+			}
 			return nil, fmt.Errorf("forEach %q: %w", axis.Name, err)
 		}
 		dims = append(dims, evaluatedDimension{name: axis.Name, values: items})

@@ -303,6 +303,7 @@ func main() {
 			MaxConcurrentReconciles: resourceGraphDefinitionConcurrentReconciles,
 			MaxGraphRevisions:       rgdMaxGraphRevisions,
 			ApplyConcurrency:        applyConcurrency,
+			CELCostLimit:            celCostLimit,
 			RGDConfig: graph.Config{
 				MaxCollectionSize:          rgdMaxCollectionSize,
 				MaxCollectionDimensionSize: rgdMaxCollectionDimensionSize,

@@ -66,6 +66,7 @@ import (
 func ProjectInstanceStatus(
 	rt *runtime.Runtime,
 	rgd *v1alpha1.ResourceGraphDefinition,
+	costLimit uint64,
 ) (map[string]any, error) {
 	if rt == nil {
 		return nil, fmt.Errorf("status projection: runtime is required")
@@ -109,7 +110,7 @@ func ProjectInstanceStatus(
 
 	result := make(map[string]any, len(fields))
 	for _, f := range fields {
-		val, err := evalStatusExpr(env, saScope, f.Expression)
+		val, err := evalStatusExpr(env, saScope, f.Expression, costLimit)
 		if err != nil {
 			if runtime.IsCELDataPending(err) {
 				// Dependency not observable this cycle: drop the field so a
@@ -162,6 +163,7 @@ func ProjectInstanceConditions(
 	rt *runtime.Runtime,
 	rgd *v1alpha1.ResourceGraphDefinition,
 	kroBuiltins []v1alpha1.Condition,
+	costLimit uint64,
 ) (conditions []library.Condition, incomplete bool, err error) {
 	if rt == nil {
 		return nil, false, fmt.Errorf("condition projection: runtime is required")
@@ -209,7 +211,7 @@ func ProjectInstanceConditions(
 	var failures []string
 	for _, rawExpr := range conditionExprs {
 		inner := unwrapExpr(rawExpr)
-		raw, evalErr := evalConditionRaw(env, scope, inner)
+		raw, evalErr := evalConditionRaw(env, scope, inner, costLimit)
 		if evalErr != nil {
 			if runtime.IsCELDataPending(evalErr) {
 				incomplete = true
@@ -384,7 +386,10 @@ func getAtPath(m map[string]any, path string) (any, bool) {
 
 // compileCEL parses, type-checks, and programs a plain CEL expression (no
 // ${…} wrapper) against env, wrapping each stage's error with expr context.
-func compileCEL(env *cel.Env, expr string) (cel.Program, error) {
+// costLimit (0 = disabled) bounds evaluation cost so author status/condition
+// expressions share the same execution bound as graph expressions rather than
+// running unbounded.
+func compileCEL(env *cel.Env, expr string, costLimit uint64) (cel.Program, error) {
 	parsed, issues := env.Parse(expr)
 	if issues != nil && issues.Err() != nil {
 		return nil, fmt.Errorf("parse %q: %w", expr, issues.Err())
@@ -393,7 +398,7 @@ func compileCEL(env *cel.Env, expr string) (cel.Program, error) {
 	if issues != nil && issues.Err() != nil {
 		return nil, fmt.Errorf("check %q: %w", expr, issues.Err())
 	}
-	prog, err := env.Program(checked, krocel.DefaultProgramOptions()...)
+	prog, err := env.Program(checked, krocel.ProgramOptions(costLimit)...)
 	if err != nil {
 		return nil, fmt.Errorf("program %q: %w", expr, err)
 	}
@@ -402,8 +407,8 @@ func compileCEL(env *cel.Env, expr string) (cel.Program, error) {
 
 // evalStatusExpr compiles and evaluates a plain CEL expression (no ${…}
 // wrapper) against scope.  Returns the Go-native result.
-func evalStatusExpr(env *cel.Env, scope map[string]any, expr string) (any, error) {
-	prog, err := compileCEL(env, expr)
+func evalStatusExpr(env *cel.Env, scope map[string]any, expr string, costLimit uint64) (any, error) {
+	prog, err := compileCEL(env, expr, costLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -415,8 +420,8 @@ func evalStatusExpr(env *cel.Env, scope map[string]any, expr string) (any, error
 // and returns the raw CEL ref.Val for the caller to flatten. We call
 // cel.Program.Eval directly (not krocel.Expression.Eval) because Go-native
 // conversion does not know the custom *library.Condition ref.Val type.
-func evalConditionRaw(env *cel.Env, scope map[string]any, expr string) (ref.Val, error) {
-	prog, err := compileCEL(env, expr)
+func evalConditionRaw(env *cel.Env, scope map[string]any, expr string, costLimit uint64) (ref.Val, error) {
+	prog, err := compileCEL(env, expr, costLimit)
 	if err != nil {
 		return nil, err
 	}

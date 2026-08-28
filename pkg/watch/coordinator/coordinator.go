@@ -196,7 +196,13 @@ func (c *Coordinator[K]) RouteEvent(event kwatch.Event) {
 			matched[entry.key] = struct{}{}
 			continue
 		}
-		if len(event.OldLabels) > 0 && entry.selector.Matches(labels.Set(event.OldLabels)) {
+		// On an update, always evaluate the old labels (nil treated as the empty
+		// set). An object that transitions FROM matching to not-matching —
+		// including a selector like `key DoesNotExist`, which the empty set
+		// satisfies — must still re-enqueue the previously-matched owner so it
+		// observes the object leaving its collection. A len>0 guard would skip
+		// exactly the empty-old-set case that DoesNotExist selectors need.
+		if event.Type == kwatch.EventUpdate && entry.selector.Matches(labels.Set(event.OldLabels)) {
 			matched[entry.key] = struct{}{}
 		}
 	}

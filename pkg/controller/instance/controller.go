@@ -66,6 +66,11 @@ type ReconcileConfig struct {
 	// ApplyConcurrency bounds the number of concurrent SSA apply operations
 	// executed in parallel for collection nodes. 0 means use default (20).
 	ApplyConcurrency int
+	// CELCostLimit bounds CEL evaluation cost for author status/condition
+	// projection (0 = disabled). Threaded into ProjectInstanceConditions so
+	// author conditions share the same execution bound as graph expressions
+	// instead of silently using DefaultProgramOptions (unbounded).
+	CELCostLimit uint64
 }
 
 // Controller manages the reconciliation of a single instance of a ResourceGraphDefinition,

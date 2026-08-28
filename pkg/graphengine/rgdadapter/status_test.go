@@ -132,7 +132,7 @@ func TestProjectInstanceStatus_ResourceField(t *testing.T) {
 		"cm1": cm1Observed,
 	})
 
-	status, err := ProjectInstanceStatus(rt, rgd)
+	status, err := ProjectInstanceStatus(rt, rgd, 0)
 	require.NoError(t, err)
 
 	readyName, ok := status["readyName"]
@@ -157,7 +157,7 @@ func TestProjectInstanceStatus_SchemaField(t *testing.T) {
 
 	rt := compileAndSeedRuntime(t, rgd, instance, nil)
 
-	status, err := ProjectInstanceStatus(rt, rgd)
+	status, err := ProjectInstanceStatus(rt, rgd, 0)
 	require.NoError(t, err)
 
 	instanceName, ok := status["instanceName"]
@@ -190,7 +190,7 @@ func TestProjectInstanceStatus_MultiField(t *testing.T) {
 		"cm1": cm1Observed,
 	})
 
-	status, err := ProjectInstanceStatus(rt, rgd)
+	status, err := ProjectInstanceStatus(rt, rgd, 0)
 	require.NoError(t, err)
 
 	assert.Equal(t, "cm1", status["readyName"])
@@ -223,7 +223,7 @@ func TestProjectInstanceStatus_NoStatus(t *testing.T) {
 
 	rt := compileAndSeedRuntime(t, rgd, instance, nil)
 
-	status, err := ProjectInstanceStatus(rt, rgd)
+	status, err := ProjectInstanceStatus(rt, rgd, 0)
 	require.NoError(t, err)
 	assert.Empty(t, status, "no status block → empty map")
 }
@@ -248,7 +248,7 @@ func TestProjectInstanceConditions_Basic(t *testing.T) {
 
 	rt := compileAndSeedRuntime(t, rgd, instance, nil)
 
-	conditions, incomplete, err := ProjectInstanceConditions(rt, rgd, nil)
+	conditions, incomplete, err := ProjectInstanceConditions(rt, rgd, nil, 0)
 	require.NoError(t, err)
 	assert.False(t, incomplete)
 	require.Len(t, conditions, 1)
@@ -280,7 +280,7 @@ func TestProjectInstanceConditions_BuiltinReference(t *testing.T) {
 	rt := compileAndSeedRuntime(t, rgd, instance, nil)
 
 	builtins := []v1alpha1.Condition{{Type: "ResourcesReady", Status: "True"}}
-	conditions, incomplete, err := ProjectInstanceConditions(rt, rgd, builtins)
+	conditions, incomplete, err := ProjectInstanceConditions(rt, rgd, builtins, 0)
 	require.NoError(t, err)
 	assert.False(t, incomplete)
 	require.Len(t, conditions, 1)

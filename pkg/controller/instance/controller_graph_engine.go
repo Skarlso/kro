@@ -872,7 +872,7 @@ func (c *Controller) persistGraphEngineStatus(
 	}
 
 	if c.reconcileConfig.HasAuthorConditions {
-		authored, incomplete, condErr := rgdadapter.ProjectInstanceConditions(rt, rgd, builtins)
+		authored, incomplete, condErr := rgdadapter.ProjectInstanceConditions(rt, rgd, builtins, c.reconcileConfig.CELCostLimit)
 		prev, _ := wireStatus["conditions"].([]any)
 		previous := decodeConditions(prev)
 		stamped := stampAuthorConditions(authored, previous, inst.GetGeneration())

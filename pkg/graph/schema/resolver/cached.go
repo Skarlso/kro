@@ -121,12 +121,17 @@ func (c *CachedSchemaResolver) ResolveSchema(gvk schema.GroupVersionKind) (*spec
 		if err != nil {
 			return nil, err
 		}
-		c.mu.RLock()
-		curEpoch := c.epochs[gk]
-		c.mu.RUnlock()
-		if curEpoch == epoch {
+		// Re-check the epoch and insert atomically under the write lock.
+		// InvalidateGroupKind/Clear both bump the epoch AND Remove/Purge under
+		// c.mu.Lock(); holding the same lock across the compare and the Add means
+		// an invalidation cannot slip between them and let this (now stale) fetch
+		// repopulate the cache. A separate RLock+read then unlock-before-Add would
+		// leave exactly that window open.
+		c.mu.Lock()
+		if c.epochs[gk] == epoch {
 			c.cache.Add(gvk, sch)
 		}
+		c.mu.Unlock()
 		return sch, nil
 	})
 	if err != nil {

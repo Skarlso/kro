@@ -39,12 +39,12 @@ func projectionInstance() *unstructured.Unstructured {
 func TestProjectInstanceStatus_Guards(t *testing.T) {
 	rgd := buildRGDWithStatus(map[string]any{"ready": "${cm1.data.key}"})
 
-	_, err := ProjectInstanceStatus(nil, rgd)
+	_, err := ProjectInstanceStatus(nil, rgd, 0)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "runtime is required")
 
 	rt := compileAndSeedRuntime(t, rgd, projectionInstance(), nil)
-	_, err = ProjectInstanceStatus(rt, nil)
+	_, err = ProjectInstanceStatus(rt, nil, 0)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "rgd is required")
 }
@@ -66,7 +66,7 @@ func TestProjectInstanceStatus_DataPendingFieldDroppedSiblingsSurvive(t *testing
 		},
 	})
 
-	status, err := ProjectInstanceStatus(rt, rgd)
+	status, err := ProjectInstanceStatus(rt, rgd, 0)
 	require.NoError(t, err, "a data-pending field must not fail the whole projection")
 	assert.Equal(t, "val", status["ready"], "the resolvable sibling must still project")
 	assert.NotContains(t, status, "pending",
@@ -87,7 +87,7 @@ func TestProjectInstanceStatus_HardErrorFailsProjection(t *testing.T) {
 		},
 	})
 
-	_, err := ProjectInstanceStatus(rt, rgd)
+	_, err := ProjectInstanceStatus(rt, rgd, 0)
 	require.Error(t, err, "a type error must fail rather than being treated as pending")
 	assert.Contains(t, err.Error(), "broken", "the error must name the offending field path")
 }
@@ -107,7 +107,7 @@ func TestProjectInstanceStatus_NestedPathsAndLiterals(t *testing.T) {
 		},
 	})
 
-	status, err := ProjectInstanceStatus(rt, rgd)
+	status, err := ProjectInstanceStatus(rt, rgd, 0)
 	require.NoError(t, err)
 
 	net, ok := status["net"].(map[string]any)
@@ -141,7 +141,7 @@ func TestProjectInstanceStatus_MalformedStatusBlockIsAnError(t *testing.T) {
 	valid := buildRGDWithStatus(map[string]any{"ready": "${cm1.data.key}"})
 	rt := compileAndSeedRuntime(t, valid, projectionInstance(), nil)
 
-	_, err := ProjectInstanceStatus(rt, rgd)
+	_, err := ProjectInstanceStatus(rt, rgd, 0)
 	require.Error(t, err)
 }
 
@@ -152,12 +152,12 @@ func TestProjectInstanceConditions_Guards(t *testing.T) {
 		},
 	})
 
-	_, _, err := ProjectInstanceConditions(nil, rgd, nil)
+	_, _, err := ProjectInstanceConditions(nil, rgd, nil, 0)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "runtime is required")
 
 	rt := compileAndSeedRuntime(t, rgd, projectionInstance(), nil)
-	_, _, err = ProjectInstanceConditions(rt, nil, nil)
+	_, _, err = ProjectInstanceConditions(rt, nil, nil, 0)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "rgd is required")
 }
@@ -169,7 +169,7 @@ func TestProjectInstanceConditions_NoConditionsBlock(t *testing.T) {
 	rgd := buildRGDWithStatus(map[string]any{"ready": "${cm1.data.key}"})
 	rt := compileAndSeedRuntime(t, rgd, projectionInstance(), nil)
 
-	conditions, incomplete, err := ProjectInstanceConditions(rt, rgd, nil)
+	conditions, incomplete, err := ProjectInstanceConditions(rt, rgd, nil, 0)
 	require.NoError(t, err)
 	assert.False(t, incomplete)
 	assert.Empty(t, conditions)
@@ -189,7 +189,7 @@ func TestProjectInstanceConditions_DuplicateTypesDegrade(t *testing.T) {
 	})
 	rt := compileAndSeedRuntime(t, rgd, projectionInstance(), nil)
 
-	conditions, _, err := ProjectInstanceConditions(rt, rgd, nil)
+	conditions, _, err := ProjectInstanceConditions(rt, rgd, nil, 0)
 	require.Error(t, err, "a duplicate condition type must be reported")
 	assert.True(t, errors.Is(err, ErrConditionProjectionDegraded),
 		"the caller distinguishes a degraded projection from a hard failure, got %v", err)
@@ -218,7 +218,7 @@ func TestProjectInstanceConditions_DataPendingIsIncompleteNotAnError(t *testing.
 		},
 	})
 
-	conditions, incomplete, err := ProjectInstanceConditions(rt, rgd, nil)
+	conditions, incomplete, err := ProjectInstanceConditions(rt, rgd, nil, 0)
 	require.NoError(t, err, "pending data must not be a hard failure")
 	assert.True(t, incomplete, "the caller needs to know a condition was skipped")
 	assert.Empty(t, conditions)
