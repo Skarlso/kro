@@ -145,6 +145,58 @@ func TestIntendedManagedResources_ProjectsTemplateIdentities(t *testing.T) {
 	assert.Empty(t, got[0].UID, "pre-apply intent carries no UID")
 }
 
+// TestIntendedManagedResources_SkipsDynamicGVKWithoutNamespace pins the
+// tracking.go:161 fix: a dynamic-GVK node has no compile-time REST scope
+// (Namespaced()==false), so a rendered object with NO explicit namespace can't
+// be namespace-defaulted in the projection the way the executor will at apply
+// time. Emitting a ns="" intent entry would never dedup against the applied
+// entry (ns=graph), churning status every cycle — so it must be skipped. A
+// dynamic node that DOES set an explicit namespace keeps its intent entry.
+func TestIntendedManagedResources_SkipsDynamicGVKWithoutNamespace(t *testing.T) {
+	t.Parallel()
+	g := graph("g") // namespace "default"
+
+	dynNoNS := func(nodeID, name, namespace string) *compiler.Node {
+		obj := &unstructured.Unstructured{Object: map[string]any{
+			"apiVersion": "example.com/v1",
+			"kind":       "Widget",
+			"metadata":   map[string]any{"name": name},
+		}}
+		if namespace != "" {
+			_ = unstructured.SetNestedField(obj.Object, namespace, "metadata", "namespace")
+		}
+		return &compiler.Node{
+			ID:         nodeID,
+			Kind:       compiler.NodeKindTemplate,
+			DynamicGVK: true,
+			Namespaced: false, // dynamic: unknown at compile time
+			Object:     obj,
+		}
+	}
+
+	t.Run("dynamic node without explicit namespace is skipped", func(t *testing.T) {
+		n := dynNoNS("dyn", "w", "")
+		prog := &compiler.Program{
+			Nodes:            map[string]*compiler.Node{"dyn": n},
+			TopologicalOrder: []string{"dyn"},
+		}
+		got := intendedManagedResources(krotruntime.New(prog, g))
+		assert.Empty(t, got, "a dynamic-GVK node with no explicit namespace must not emit a ns=\"\" intent entry")
+	})
+
+	t.Run("dynamic node with explicit namespace is kept", func(t *testing.T) {
+		n := dynNoNS("dyn", "w", "other-ns")
+		prog := &compiler.Program{
+			Nodes:            map[string]*compiler.Node{"dyn": n},
+			TopologicalOrder: []string{"dyn"},
+		}
+		got := intendedManagedResources(krotruntime.New(prog, g))
+		require.Len(t, got, 1, "an explicit namespace is a stable identity and must be tracked")
+		assert.Equal(t, "other-ns", got[0].Namespace)
+		assert.Equal(t, "w", got[0].Name)
+	})
+}
+
 // lostStatusWriteClient drops the FIRST N status Patch calls (returning nil so
 // the reconciler believes they succeeded) then delegates. It simulates a lost
 // status write — the exact crash window Finding A guards.

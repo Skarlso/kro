@@ -176,6 +176,18 @@ func intendedManagedResources(rt *krotruntime.Runtime) []expv1alpha1.ManagedReso
 			if ns == "" && n.Namespaced() {
 				ns = rt.Graph().GetNamespace()
 			}
+			// A dynamic-GVK node has no compile-time REST scope (Namespaced() is
+			// false), so a rendered object with no explicit namespace can't be
+			// namespace-defaulted here the way the executor will at apply time
+			// (which resolves the scope from the live RESTMapper). Emitting a
+			// ns="" intent entry would never dedup against the applied entry
+			// (ns=graph), rewriting status every cycle. Skip it from the
+			// write-ahead: its identity is uncertain until apply, and its
+			// post-apply Applied entry records it correctly. (A dynamic node that
+			// DOES set an explicit namespace keeps its intent entry and dedups.)
+			if ns == "" && n.DynamicGVK() {
+				continue
+			}
 			mr := expv1alpha1.ManagedResource{
 				NodeID:     n.ID(),
 				APIVersion: gvk.GroupVersion().String(),
