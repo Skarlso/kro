@@ -263,6 +263,13 @@ func (c *Controller) reconcileViaGraphEngine(
 	// Reconcile patch contributions: release pruned contributions and persist inventory.
 	if contribErr := c.reconcilePatchContributions(ctx, log, inst, priorContribs, applyResult.Contributions, applyErr); contribErr != nil {
 		if applyErr == nil {
+			// Apply + prune were clean (ResourcesReady set above), but releasing a
+			// retired patch contribution or persisting the contribution ledger
+			// failed. The instance has NOT converged: a contributed field may
+			// still be present with no release inventory, so flip the condition
+			// off Ready (mirroring the prune-failure branch) instead of persisting
+			// Ready with the error only in the log, and requeue.
+			mark.ResourcesNotReady("release of retired patch contributions failed: %v", contribErr)
 			applyErr = contribErr
 		}
 	}
@@ -444,6 +451,16 @@ func (c *Controller) reconcileApplySetInventory(
 			log.V(1).Info("graph-engine: failed to align inventory after apply/prune", "error", err)
 			return fmt.Errorf("align inventory after apply/prune: %w", err)
 		}
+	}
+	if !conflictFree {
+		// A prune orphan could not be deleted because a different object now
+		// occupies its tracked identity (UID-precondition conflict). The orphan
+		// is left in place and the inventory is NOT shrunk, so without an
+		// explicit requeue the conflict would linger until an unrelated event.
+		// Surface it as a soft not-ready so the caller requeues and retries the
+		// prune on the next cycle (the object occupying the identity may itself
+		// be mid-deletion). Not a hard error: apply itself succeeded.
+		return fmt.Errorf("prune left an unresolved UID conflict; will retry: %w", executor.ErrNotReady)
 	}
 	return nil
 }

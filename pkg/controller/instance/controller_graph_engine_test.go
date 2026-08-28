@@ -1119,10 +1119,16 @@ func TestReconcileViaGraphEngine_HardErrorsAndInventory(t *testing.T) {
 
 		watcher := &fakeInstanceWatcher{}
 		err := c.reconcileViaGraphEngine(context.Background(), inst, watcher)
-		require.NoError(t, err)
+		// FINDING 663: a prune UID conflict leaves the orphan in place and the
+		// inventory unshrunk, so the reconcile must soft-requeue to retry rather
+		// than return clean success (which would strand the conflict until an
+		// unrelated event). It is a requeue error, not a hard error.
+		require.Error(t, err)
+		assert.True(t, requeue.IsRequeueError(err), "a prune UID conflict must soft-requeue, got %v", err)
 
 		stored := getStoredParentObject(t, raw)
-		// Superset inventory preserved
+		// Superset inventory preserved (the orphan's GroupKind is retained so a
+		// later cycle can retry the prune).
 		assert.Contains(t, stored.GetAnnotations()[applyset.ApplySetGKsAnnotation], "Deployment.apps")
 	})
 
