@@ -463,6 +463,49 @@ func MarshalContributions(contribs []executor.Contribution) (string, error) {
 	return string(raw), nil
 }
 
+// toAPIContributions converts the in-memory executor contribution inventory
+// to its persisted API representation for the Graph status subresource.
+// Nil-safe: a nil/empty input returns nil so an empty inventory serializes as
+// an absent field rather than an empty array.
+func toAPIContributions(contribs []executor.Contribution) []expv1alpha1.Contribution {
+	if len(contribs) == 0 {
+		return nil
+	}
+	out := make([]expv1alpha1.Contribution, 0, len(contribs))
+	for _, c := range contribs {
+		out = append(out, expv1alpha1.Contribution{
+			APIVersion:   c.APIVersion,
+			Kind:         c.Kind,
+			Namespace:    c.Namespace,
+			Name:         c.Name,
+			Subresource:  c.Subresource,
+			FieldManager: c.FieldManager,
+		})
+	}
+	return out
+}
+
+// fromAPIContributions converts the persisted API contribution inventory back
+// to the in-memory executor representation the reconciler and executor use.
+// Nil-safe: a nil/empty input returns nil.
+func fromAPIContributions(contribs []expv1alpha1.Contribution) []executor.Contribution {
+	if len(contribs) == 0 {
+		return nil
+	}
+	out := make([]executor.Contribution, 0, len(contribs))
+	for _, c := range contribs {
+		out = append(out, executor.Contribution{
+			APIVersion:   c.APIVersion,
+			Kind:         c.Kind,
+			Namespace:    c.Namespace,
+			Name:         c.Name,
+			Subresource:  c.Subresource,
+			FieldManager: c.FieldManager,
+		})
+	}
+	return out
+}
+
 // DiffContributions returns the entries present in prior but absent from
 // current — the contributions to release because their patch node was removed
 // or its target identity changed.

@@ -87,6 +87,64 @@ type GraphStatus struct {
 	//
 	// +kubebuilder:validation:Optional
 	AppliedServiceAccount string `json:"appliedServiceAccount,omitempty"`
+
+	// Contributions is the authoritative release inventory for this Graph's
+	// patch nodes: each entry records a field-manager contribution the Graph
+	// applied to a resource it does not own. Because a patch never owns its
+	// target, teardown/prune cannot rediscover these fields from ownership —
+	// the inventory is what lets Release relinquish exactly the fields the
+	// Graph contributed. The controller write-aheads the intended set BEFORE
+	// apply and rewrites it with the observed set AFTER a clean apply, so a
+	// crash in that window still leaves teardown a superset to release from.
+	//
+	// Persisted on the status subresource (not a metadata annotation) so it is
+	// RBAC-separable: a principal with only spec/metadata edit rights cannot
+	// forge the release inventory.
+	//
+	// +kubebuilder:validation:Optional
+	Contributions []Contribution `json:"contributions,omitempty"`
+}
+
+// Contribution is a lightweight record of a patch node's field-manager
+// contribution to a resource this Graph does not own. It mirrors the
+// in-memory executor contribution: the tuple identifies the target
+// (APIVersion, Kind, Namespace, Name, Subresource) and FieldManager is the
+// dedicated server-side-apply manager the contributed fields were applied
+// under. On prune/teardown the manager relinquishes exactly those fields;
+// the target object is never deleted.
+type Contribution struct {
+	// APIVersion of the patched target ("apps/v1", "v1", ...).
+	//
+	// +kubebuilder:validation:Required
+	APIVersion string `json:"apiVersion"`
+
+	// Kind of the patched target ("Deployment", "ConfigMap", ...).
+	//
+	// +kubebuilder:validation:Required
+	Kind string `json:"kind"`
+
+	// Namespace of the patched target. Empty for cluster-scoped targets.
+	//
+	// +kubebuilder:validation:Optional
+	Namespace string `json:"namespace,omitempty"`
+
+	// Name of the patched target.
+	//
+	// +kubebuilder:validation:Required
+	Name string `json:"name"`
+
+	// Subresource the contribution was applied through ("status" for a
+	// status patch, empty for the main resource).
+	//
+	// +kubebuilder:validation:Optional
+	Subresource string `json:"subresource,omitempty"`
+
+	// FieldManager is the dedicated server-side-apply field manager the
+	// contributed fields were applied under. Release relinquishes the fields
+	// owned by this manager on the target.
+	//
+	// +kubebuilder:validation:Required
+	FieldManager string `json:"fieldManager"`
 }
 
 // ManagedResource is a lightweight pointer to a cluster resource the Graph

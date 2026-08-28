@@ -161,10 +161,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		}
 		// Release every recorded patch contribution so the field managers
 		// relinquish their fields. Targets survive — patches never own them.
-		contribs, err := ReadContributions(&g)
-		if err != nil {
-			return ctrl.Result{}, fmt.Errorf("read patch contributions on delete: %w", err)
-		}
+		contribs := fromAPIContributions(g.Status.Contributions)
 		if len(contribs) > 0 {
 			if err := ex.Release(ctx, contribs); err != nil {
 				return ctrl.Result{}, fmt.Errorf("executor release: %w", err)
@@ -282,10 +279,7 @@ func (r *Reconciler) reconcileGraph(ctx context.Context, g *expv1alpha1.Graph) e
 	rt := krotruntime.New(prog, g, rtOpts...)
 	watcher := r.watcherFor(key)
 	previous := g.Status.ManagedResources
-	priorContribs, err := ReadContributions(g)
-	if err != nil {
-		return fmt.Errorf("read patch contributions: %w", err)
-	}
+	priorContribs := fromAPIContributions(g.Status.Contributions)
 
 	// Resolve the executor bound to this Graph's impersonated identity. All
 	// resource writes (apply, prune, release) for this Graph go through it so
@@ -470,51 +464,38 @@ func (r *Reconciler) reconcileGraph(ctx context.Context, g *expv1alpha1.Graph) e
 	return nil
 }
 
-// persistContributions writes the patch-contribution inventory onto the
-// Graph as an annotation, patching only when the value changed. An empty
-// inventory drops the annotation.
+// persistContributions writes the patch-contribution release inventory onto
+// the Graph's STATUS subresource, patching only when it changed. Mirrors
+// persistManagedResources: it flushes ONLY g.Status.Contributions (retry on
+// conflict), never gates on Generation, and keeps the in-memory Graph in sync
+// with what was persisted. Persisting on status (not a metadata annotation)
+// makes the inventory RBAC-separable — a principal with only spec/metadata
+// edit rights cannot forge it.
 func (r *Reconciler) persistContributions(
 	ctx context.Context,
 	g *expv1alpha1.Graph,
 	contribs []executor.Contribution,
 ) error {
-	value, err := MarshalContributions(contribs)
-	if err != nil {
-		return fmt.Errorf("marshal contributions: %w", err)
-	}
-	if g.GetAnnotations()[metadata.PatchContributionsAnnotation] == value {
+	desired := toAPIContributions(contribs)
+	if equality.Semantic.DeepEqual(g.Status.Contributions, desired) {
 		return nil
 	}
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		current := &expv1alpha1.Graph{}
 		if err := r.Client.Get(ctx, client.ObjectKeyFromObject(g), current); err != nil {
-			return err
+			return fmt.Errorf("refetch graph: %w", err)
 		}
-		if current.GetAnnotations()[metadata.PatchContributionsAnnotation] == value {
+		if equality.Semantic.DeepEqual(current.Status.Contributions, desired) {
+			// Keep the in-memory Graph consistent with the server.
+			g.Status.Contributions = desired
 			return nil
 		}
 		dc := current.DeepCopy()
-		anns := dc.GetAnnotations()
-		if anns == nil {
-			anns = make(map[string]string, 1)
-		}
-		if value == "" {
-			delete(anns, metadata.PatchContributionsAnnotation)
-		} else {
-			anns[metadata.PatchContributionsAnnotation] = value
-		}
-		dc.SetAnnotations(anns)
-		if err := r.Client.Patch(ctx, dc, client.MergeFrom(current)); err != nil {
+		dc.Status.Contributions = desired
+		if err := r.Client.Status().Patch(ctx, dc, client.MergeFrom(current)); err != nil {
 			return err
 		}
-		if g.Annotations == nil {
-			g.Annotations = make(map[string]string, 1)
-		}
-		if value == "" {
-			delete(g.Annotations, metadata.PatchContributionsAnnotation)
-		} else {
-			g.Annotations[metadata.PatchContributionsAnnotation] = value
-		}
+		g.Status.Contributions = desired
 		return nil
 	})
 }

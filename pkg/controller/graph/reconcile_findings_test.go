@@ -34,7 +34,6 @@ import (
 	"github.com/kubernetes-sigs/kro/pkg/graphengine/registry"
 	krotruntime "github.com/kubernetes-sigs/kro/pkg/graphengine/runtime"
 	"github.com/kubernetes-sigs/kro/pkg/graphengine/watchrouter"
-	"github.com/kubernetes-sigs/kro/pkg/metadata"
 )
 
 // templateProgram builds a minimal compiled Program with a single static
@@ -498,14 +497,9 @@ func TestReconcile_NoReleaseOnSoftNotReady(t *testing.T) {
 		Name:         "target",
 		FieldManager: "kro-graphengine.patch.oldidentity",
 	}}
-	raw, err := MarshalContributions(prior)
-	require.NoError(t, err)
 
 	g := graph("g", withFinalizer, func(g *expv1alpha1.Graph) {
-		if g.Annotations == nil {
-			g.Annotations = map[string]string{}
-		}
-		g.Annotations[metadata.PatchContributionsAnnotation] = raw
+		g.Status.Contributions = toAPIContributions(prior)
 	})
 	cl := newClient(t, g)
 

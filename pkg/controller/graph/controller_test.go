@@ -169,13 +169,6 @@ func withDeletionTimestamp(g *expv1alpha1.Graph) {
 	g.DeletionTimestamp = &now
 }
 
-func withMalformedContributions(g *expv1alpha1.Graph) {
-	if g.Annotations == nil {
-		g.Annotations = map[string]string{}
-	}
-	g.Annotations[metadata.PatchContributionsAnnotation] = "not-json"
-}
-
 func TestReconcile(t *testing.T) {
 	t.Parallel()
 
@@ -374,21 +367,6 @@ func TestReconcile(t *testing.T) {
 				return &patchErrClient{Client: c, statusErr: errors.New("status boom")}
 			},
 			wantErr: "status boom",
-		},
-		{
-			name:     "deletion with malformed patch contributions retains finalizer and errors",
-			initial:  graph("g", withFinalizer, withDeletionTimestamp, withMalformedContributions),
-			wantErr:  "read patch contributions",
-			wantGone: false,
-			after: func(t *testing.T, g *expv1alpha1.Graph) {
-				assert.Equal(t, 1, countFinalizer(g.Finalizers, metadata.GraphFinalizer))
-			},
-		},
-		{
-			name:    "reconcile with malformed patch contributions returns error",
-			initial: graph("g", withFinalizer, withMalformedContributions),
-			compile: &fakeCompiler{program: prog(1)},
-			wantErr: "read patch contributions",
 		},
 	}
 	for _, tc := range cases {

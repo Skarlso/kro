@@ -401,3 +401,40 @@ func TestUnionContributions(t *testing.T) {
 		assert.Equal(t, []executor.Contribution{c1, c2}, union)
 	})
 }
+
+func TestContributionsAPIRoundTrip(t *testing.T) {
+	t.Run("nil and empty are nil-safe", func(t *testing.T) {
+		assert.Nil(t, toAPIContributions(nil))
+		assert.Nil(t, toAPIContributions([]executor.Contribution{}))
+		assert.Nil(t, fromAPIContributions(nil))
+		assert.Nil(t, fromAPIContributions([]expv1alpha1.Contribution{}))
+	})
+
+	t.Run("round-trips every field including subresource", func(t *testing.T) {
+		in := []executor.Contribution{
+			{
+				APIVersion:   "apps/v1",
+				Kind:         "Deployment",
+				Namespace:    "ns",
+				Name:         "dep",
+				Subresource:  "status",
+				FieldManager: "fm1",
+			},
+			{
+				// cluster-scoped, main-resource contribution (no ns/subresource)
+				APIVersion:   "v1",
+				Kind:         "Namespace",
+				Name:         "team",
+				FieldManager: "fm2",
+			},
+		}
+		api := toAPIContributions(in)
+		require.Len(t, api, 2)
+		assert.Equal(t, "status", api[0].Subresource)
+		assert.Equal(t, "apps/v1", api[0].APIVersion)
+		assert.Equal(t, "fm2", api[1].FieldManager)
+		assert.Empty(t, api[1].Namespace)
+
+		assert.Equal(t, in, fromAPIContributions(api), "round-trip must be lossless")
+	})
+}
