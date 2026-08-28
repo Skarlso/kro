@@ -12,6 +12,17 @@ Verification detail lives in `pr-1355-unresolved-full-verification.md`; this doc
 - `2559b399` — batch 2: executor Apply/Delete hard-error aggregation, update-rejection log signal, malformed-create fail-fast.
 - `5f8c171b`, `7ce66a90`, `803597d4` — batch 5: compiler/parser (7 findings). VERIFIED.
 - `4f0c2777`, `4b0ff871`, `5d6fd30b`, `a4a87dda` — batch 6: schema-wrapper typing, lossless schema events, scope-leak, soft-dep list seed, dead-projector removal, cache metrics. VERIFIED (-race).
+- `814e91d2`, `f64591e8`, `2252bb81` — batch 7 (agent): api spec Required + codegen, lint cmd/kro, helm graph-concurrent-reconciles. VERIFIED.
+- `d8d3d876` — main.go:350 fail-closed on incomplete controller identity when GraphKind on.
+- `65d14946` — batch 3: instance contribution-release not-ready flip + prune UID-conflict requeue.
+- `bca...`/`0ee2b54b` — batch 3: graph release-failure condition (421) + soft-not-ready prune narrowing (357).
+
+## GitHub thread state
+
+- 🟢 `registry.go:135` — replied + **resolved** (FP).
+- ⬜ `.golangci.yml:43` — replied (doc-exists), left open for scoping judgment.
+- 💬 batch 2/5/6 fixes — replied on-thread (left open for author to resolve).
+- 💬 `886`, `runtime.go:203`, `cached.go:91` — replied as open design decisions.
 
 ## GitHub thread state
 
@@ -40,15 +51,18 @@ File: `pkg/graphengine/executor/simple.go` unless noted.
 - ⬜ `simple.go:1489` SSA contribution release can recreate deleted target — DEFERRED to batch 3 (release semantics, groups with 1492).
 - ⬜ `simple.go:1492` release fails when target CRD GVK unmaps — DEFERRED to batch 3.
 
-## Batch 3 — Lifecycle / leak (OPEN)
+## Batch 3 — Lifecycle / leak (IN PROGRESS)
 
-- ⬜ `graph/controller.go:314` + `controller_graph_engine.go:266` contribution lands before annotation persisted → field leak. Fix: write-ahead contribution intent.
-- ⬜ `controller_graph_engine.go:207` / `simple.go:1627` duplicate identity detected post-apply. Fix: pre-write duplicate-identity reject, executor-side.
-- ⬜ `graph/controller.go:357` Graph-path prune gated on coarse applyErr==nil. Fix: port ownedUnresolved/pruneGate narrowing.
-- ⬜ `graph/controller.go:421` release failure returns without flipping ResourcesConverged. Fix: set release-failure condition.
-- ⬜ `controller_graph_engine.go:663` prune UID conflict returns success. Fix: requeue while conflict remains.
-- ⬜ `graph/controller.go:344` + `tracking.go:137,161` single AppliedServiceAccount / write-ahead skips subgraph+dependent / dynamic empty-ns never dedups.
-- ⬜ `tracking.go:34` resourceKey includes apiVersion → apply-then-prune on version-only change.
+- ✅ `controller_graph_engine.go:266` contribution-release failure now flips ResourcesNotReady + requeues (was: persisted Ready). `65d14946`
+- ✅ `controller_graph_engine.go:663` prune UID-conflict now soft-requeues (was: clean success, no retry). `65d14946`
+- ✅ `graph/controller.go:421` release failure flips ResourcesConverged=False (ReleaseFailed). `0ee2b54b`/earlier
+- ✅ `graph/controller.go:357` prune retired nodes on soft not-ready, not only clean apply (E2 twin). `0ee2b54b`
+- 🔵 `simple.go:1489` SSA contribution release can recreate deleted target — NEXT.
+- 🔵 `simple.go:1492` release fails when target CRD GVK unmaps — NEXT.
+- ⬜ `controller_graph_engine.go:207` / `simple.go:1627` duplicate identity detected post-apply (pre-write check) — pending.
+- ⬜ `graph/controller.go:314` contribution write-ahead — pending.
+- ⬜ `graph/controller.go:344` + `tracking.go:137,161` mixed-identity / write-ahead subgraph / dynamic-ns dedup — pending.
+- ⬜ `tracking.go:34` resourceKey includes apiVersion — pending.
 
 ## Batch 4 — Security (OPEN)
 
