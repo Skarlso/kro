@@ -113,7 +113,7 @@ Skipped context.go:237/256 (deferred-schema / CRD-CEL — product decision, not 
 
 ## Batch 6 — Runtime / watch / status / cache (DONE — 4f0c2777, 4b0ff871, 5d6fd30b, a4a87dda; verified -race)
 
-LEFT OUT (needs decision): `runtime.go:203` apply-order version stability.
+LEFT OUT (resolved as Opt A): `runtime.go:203` apply-order — documented revision-locality at the computation site (`f274f34e`); deletion path already tolerant of mixed schemes.
 
 - ✅ `status.go:205` schema-wrapper preserved: extract underlying map from the ref.Val, overlay conditions, re-wrap with InstanceSchemaForCEL so byte/date-time/number typing survives. +tests. (High)
 - ✅ `schemawatcher/watcher.go:457` lossless enqueue: dirty-set + wakeup-signalled drainer, blocking send (backpressure not drop), coalesced by key; stop-channel escape, no leak/deadlock. +2 tests, -race. (High)
@@ -121,7 +121,7 @@ LEFT OUT (needs decision): `runtime.go:203` apply-order version stability.
 - ✅ `runtime.go:178` soft-dep collections seeded as []any{} not {}. +test.
 - ✅ `status.go:66` dead ProjectInstanceStatus + exclusive helpers (evalStatusExpr/setAtPath/getAtPath) removed; verified only worktree refs remained.
 - ✅ `cached.go:104` cache metrics instrumented (hits/misses/duration/errors/singleflight/size/evictions via onEvict). +tests.
-- ⬜ `cached.go:91` epoch map growth — BACKED OFF: safe deletion reintroduces the fixed TOCTOU (singleflight exposes no in-flight-leader info); kept unconditional bump, growth is O(1)/GK ≈ installed CRDs. **Needs in-flight-leader tracking = design decision.**
+- ✅ `cached.go:91` epoch map growth — Opt A: documented as intentional/bounded (O(1)/GK ≈ installed CRDs; reclamation reintroduces the fixed TOCTOU). Committed NOTE in `a4a87dda`; thread replied.
 
 ## Batch 7 — API / docs / examples / helm / cleanup (OPEN)
 
