@@ -286,6 +286,18 @@ func TestReconcile(t *testing.T) {
 			compile: &fakeCompiler{program: prog(1)},
 			exec:    &fakeExecutor{deleteErr: errors.New("delete boom")},
 			wantErr: "executor delete",
+			// The wedged finalizer must surface WHY: a ResourcesConverged=False
+			// condition with reason DeleteFailed, persisted before the error
+			// returns, instead of leaving the Graph's last (healthy) status.
+			after: func(t *testing.T, g *expv1alpha1.Graph) {
+				rc := findCondition(g.Status.Conditions, ResourcesConverged)
+				require.NotNil(t, rc)
+				assert.Equal(t, metav1.ConditionFalse, rc.Status)
+				require.NotNil(t, rc.Reason)
+				assert.Equal(t, "DeleteFailed", *rc.Reason)
+				require.NotNil(t, rc.Message)
+				assert.Contains(t, *rc.Message, "delete boom")
+			},
 		},
 		{
 			// A clean apply that drops a previously-tracked resource makes

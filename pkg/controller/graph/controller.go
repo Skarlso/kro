@@ -156,6 +156,14 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		// resource it ever applied removed.
 		if len(g.Status.ManagedResources) > 0 {
 			if err := ex.Delete(ctx, g.Status.ManagedResources); err != nil {
+				// Surface WHY the finalizer is blocked instead of returning with
+				// the last (possibly healthy) status intact: record a
+				// deletion-failure condition, persist it best-effort, then requeue.
+				marker := NewConditionsMarkerFor(&g)
+				marker.ResourcesDeleteFailed(err.Error())
+				if serr := r.updateStatus(ctx, &g); serr != nil {
+					logger.Error(serr, "failed to persist teardown delete-failure condition")
+				}
 				return ctrl.Result{}, fmt.Errorf("executor delete: %w", err)
 			}
 		}
@@ -164,6 +172,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		contribs := fromAPIContributions(g.Status.Contributions)
 		if len(contribs) > 0 {
 			if err := ex.Release(ctx, contribs); err != nil {
+				marker := NewConditionsMarkerFor(&g)
+				marker.ResourcesDeleteFailed(err.Error())
+				if serr := r.updateStatus(ctx, &g); serr != nil {
+					logger.Error(serr, "failed to persist teardown release-failure condition")
+				}
 				return ctrl.Result{}, fmt.Errorf("executor release: %w", err)
 			}
 		}
@@ -870,4 +883,14 @@ func (m *ConditionsMarker) ResourcesPruneFailed(msg string) {
 // while a stale contributed field remains.
 func (m *ConditionsMarker) ResourcesReleaseFailed(msg string) {
 	m.cs.SetFalse(ResourcesConverged, "ReleaseFailed", msg)
+}
+
+// ResourcesDeleteFailed marks ResourcesConverged=False with reason
+// "DeleteFailed" when teardown (finalizer path) could not delete a managed
+// resource or release a patch contribution — e.g. the persisted applying
+// identity lacks delete/patch RBAC. Without this, a wedged finalizer would
+// keep reporting the Graph's last (possibly healthy) status with no signal as
+// to why deletion is blocked; recording it lets an operator see the cause.
+func (m *ConditionsMarker) ResourcesDeleteFailed(msg string) {
+	m.cs.SetFalse(ResourcesConverged, "DeleteFailed", msg)
 }
