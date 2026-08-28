@@ -74,7 +74,7 @@ File: `pkg/graphengine/executor/simple.go` unless noted.
 - ⬜ `graph/controller.go:314` contribution write-ahead — DEFERRED: needs an in-memory patch-node projection that exactly replicates the executor's patchFieldManager/subresource derivation, or write-ahead entries won't correlate (risk: releasing still-wanted fields). Not mechanical.
 - ✅ `tracking.go:34` resourceKey now keys on Group+Kind (not full apiVersion) — version-only change no longer apply-then-prunes. `f50ab83b` (turned out mechanical: Group parses from apiVersion, no RESTMapper)
 - ⬜ `tracking.go:137` write-ahead skips subgraph+dependent nodes — DEFERRED: recursing subgraphs in a best-effort I/O-free projection has real edge cases (child scope seeding, nested collections).
-- ⬜ `tracking.go:161` dynamic-node empty-ns never dedups — DEFERRED: needs rendered-GVK REST-scope resolution in a projection that deliberately avoids cluster I/O.
+- ✅ `tracking.go:161` dynamic-node empty-namespace — skip ambiguous dynamic-GVK node (no explicit ns) from write-ahead intent; kills idle churn. `767242b2` (approach (b), I/O-free; RESTMapper alternative offered on-thread)
 
 ## Batch 4 — Security (OPEN)
 
