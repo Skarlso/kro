@@ -59,7 +59,7 @@ File: `pkg/graphengine/executor/simple.go` unless noted.
 - ✅ `graph.md` doc accuracy (patch RawExtension API, RGD→graphengine unconditional, status-patch force split, nested-Graph revisions unimplemented, async-nesting boundary, deferral syntax, applier SA/RBAC note, illustrative-example caveat). `1ceb79bf` (agent, VERIFIED: force-split + deferral syntax probed against real parser)
 - ✅ nested inline-`graph:` compile test. `d9b0ca5d` (agent, passes)
 - NOTE: caught + reverted a stale foreign CRD reformatting (indentation churn) in the working tree; committed CRD matches `make manifests` exactly (verify-codegen safe).
-- ⬜ examples rewrites (`rgd.yaml` unregistered CEL / `.ready()` deferred to KREP-006, `coredns` inline blocks, `singleton` fan-out) — DEFERRED: descope-vs-rewrite-vs-mark-aspirational needs decision. graph.md now carries an illustrative caveat in the meantime.
+- ⬜ examples rewrites (`rgd.yaml` unregistered CEL / `.ready()` deferred to KREP-006, `coredns` inline blocks, `singleton` fan-out) — RESOLVED (#6): keep examples in-tree, flag aspirational parts as FUTURE WORK. rgd.yaml banner + singleton/coredns callouts (`13122c53`); all example threads replied. L0 compile test still passes.
 
 ## Batch 3 — Lifecycle / leak (IN PROGRESS)
 
