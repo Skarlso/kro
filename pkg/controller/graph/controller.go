@@ -419,6 +419,13 @@ func (r *Reconciler) reconcileGraph(ctx context.Context, g *expv1alpha1.Graph) e
 	// next reconcile.
 	if released := DiffContributions(priorContribs, result.Contributions); len(released) > 0 {
 		if err := ex.Release(ctx, released); err != nil {
+			// Apply was clean, so ResourcesConverged was set True above — but a
+			// retired patch node's contribution is still on its target with no
+			// release inventory, so the Graph has NOT converged. Flip the
+			// condition to surface the failure in status instead of reporting
+			// Ready=True with the error only in the log (symmetric with the
+			// prune-failure branch).
+			marker.ResourcesReleaseFailed(err.Error())
 			if perr := r.persistContributions(ctx, g, UnionContributions(priorContribs, result.Contributions)); perr != nil {
 				return errors.Join(fmt.Errorf("release contributions: %w", err), perr)
 			}
@@ -823,4 +830,15 @@ func (m *ConditionsMarker) ResourcesApplyFailed(msg string) {
 // True while an orphan lingers.
 func (m *ConditionsMarker) ResourcesPruneFailed(msg string) {
 	m.cs.SetFalse(ResourcesConverged, "PruneFailed", msg)
+}
+
+// ResourcesReleaseFailed marks ResourcesConverged=False with reason
+// "ReleaseFailed" when the apply was clean but a retired patch node's
+// contribution could not be released from its target (e.g. the impersonated
+// ServiceAccount lacks patch RBAC, or the target's CRD was removed). The
+// contributed field lingers on the target with no release inventory, so the
+// Graph has not converged — surfacing this keeps Ready from reporting True
+// while a stale contributed field remains.
+func (m *ConditionsMarker) ResourcesReleaseFailed(msg string) {
+	m.cs.SetFalse(ResourcesConverged, "ReleaseFailed", msg)
 }
