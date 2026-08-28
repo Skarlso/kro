@@ -1784,7 +1784,7 @@ func TestReconcileViaGraphEngine_PatchContributions(t *testing.T) {
 		inst.SetAnnotations(anns)
 
 		fakeRuntimeCl := &errorClient{
-			Client:   newFakeRuntimeClient(t),
+			Client:   newFakeRuntimeClient(t, newConfigMapObject("target-cm", "default")),
 			patchErr: errors.New("release error"),
 		}
 		raw := newControllerTestDynamicClient(t, inst.DeepCopy())

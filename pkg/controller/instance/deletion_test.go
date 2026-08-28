@@ -813,7 +813,18 @@ func TestReconcileDeletion_ReleaseFailure_RetainsFinalizer(t *testing.T) {
 	instance.SetAnnotations(anns)
 
 	fakeRuntimeCl := &errorClient{
-		Client:   newFakeRuntimeClient(t),
+		Client: newFakeRuntimeClient(t, &unstructured.Unstructured{Object: map[string]any{
+			"apiVersion": "v1",
+			"kind":       "ConfigMap",
+			"metadata": map[string]any{
+				"name":      "target-cm",
+				"namespace": "default",
+			},
+		}}),
+		// The release target EXISTS (seeded above) so Release's GET-first guard
+		// passes and the SSA patch is attempted — which fails here, exercising the
+		// release-failure path the test asserts. (With an absent target, a
+		// patchErr would now be a tolerated already-released no-op, not a failure.)
 		patchErr: errors.New("SSA patch failure"),
 	}
 

@@ -1520,6 +1520,27 @@ func (s *Simple) Release(ctx context.Context, contributions []Contribution) erro
 		obj.SetNamespace(c.Namespace)
 		obj.SetName(c.Name)
 
+		// Release relinquishes this manager's field-ownership claim on an
+		// EXISTING target. GET first so we never recreate a target that was
+		// legitimately deleted: a server-side Apply of an identity-only object
+		// with no live object present would CREATE it (a bare, unwanted
+		// resource). Only patch when the object is confirmed present.
+		live := &unstructured.Unstructured{}
+		live.SetGroupVersionKind(obj.GroupVersionKind())
+		getErr := s.Client.Get(ctx, client.ObjectKey{Namespace: c.Namespace, Name: c.Name}, live)
+		if getErr != nil {
+			// Target object gone (NotFound) or its type gone (the CRD was
+			// removed → NoMatch): nothing to release, treat as already-released.
+			if apierrors.IsNotFound(getErr) || meta.IsNoMatchError(getErr) {
+				continue
+			}
+			// A transient discovery/transport failure (apiserver unavailable,
+			// throttling) must NOT be mistaken for a missing target — return it
+			// so the caller retries rather than silently dropping the release.
+			return fmt.Errorf("release %s/%s %s: get target: %w",
+				c.APIVersion, c.Kind, refName(expv1alpha1.ManagedResource{Namespace: c.Namespace, Name: c.Name}), getErr)
+		}
+
 		var err error
 		if c.Subresource == "status" {
 			err = s.Client.Status().Patch(ctx, obj, client.Apply, client.FieldOwner(c.FieldManager))
@@ -1527,7 +1548,10 @@ func (s *Simple) Release(ctx context.Context, contributions []Contribution) erro
 			err = s.Client.Patch(ctx, obj, client.Apply, client.FieldOwner(c.FieldManager))
 		}
 		if err != nil {
-			if apierrors.IsNotFound(err) {
+			// The target was deleted between our GET and the patch: still
+			// already-released, tolerate. (A NoMatch here would likewise mean
+			// the type went away in the same window.)
+			if apierrors.IsNotFound(err) || meta.IsNoMatchError(err) {
 				continue
 			}
 			return fmt.Errorf("release %s/%s %s (manager %q): %w",
