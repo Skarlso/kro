@@ -255,7 +255,8 @@ type Graph struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
 
-	Spec   GraphSpec   `json:"spec,omitempty"`
+	// +kubebuilder:validation:Required
+	Spec   GraphSpec   `json:"spec"`
 	Status GraphStatus `json:"status,omitempty"`
 }
 
