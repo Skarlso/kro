@@ -124,6 +124,19 @@ type SchemaWatcher struct {
 	events chan event.GenericEvent
 	closed atomic.Bool
 
+	// Lossless enqueue: schema changes are recorded in a dirty set rather
+	// than sent non-blocking onto events (which silently dropped a change
+	// when the bounded channel was full, leaving a Graph's compiled Program
+	// stale forever). enqueue adds the key to dirty and signals wakeup; a
+	// drainer goroutine coalesces by key and forwards each dirty key onto
+	// events with a blocking send, so a full channel throttles rather than
+	// loses. dirtyMu guards dirty independently of mu so the informer
+	// callback never contends with the reverse-index locks.
+	dirtyMu sync.Mutex
+	dirty   map[client.ObjectKey]struct{}
+	wakeup  chan struct{}
+	stop    chan struct{}
+
 	mu sync.RWMutex
 	// byGK is the reverse index: which Graphs care about this GK.
 	byGK map[schema.GroupKind]map[client.ObjectKey]struct{}
@@ -158,16 +171,68 @@ func New(log logr.Logger, cfg Config) *SchemaWatcher {
 	if buf <= 0 {
 		buf = 1024
 	}
-	return &SchemaWatcher{
+	w := &SchemaWatcher{
 		log:          log.WithName("schema-watcher"),
 		cache:        cfg.Cache,
 		graphs:       cfg.Graphs,
 		schemas:      cfg.Schemas,
 		events:       make(chan event.GenericEvent, buf),
+		dirty:        make(map[client.ObjectKey]struct{}),
+		wakeup:       make(chan struct{}, 1),
+		stop:         make(chan struct{}),
 		byGK:         make(map[schema.GroupKind]map[client.ObjectKey]struct{}),
 		dynamic:      make(map[client.ObjectKey]struct{}),
 		subs:         make(map[client.ObjectKey]*graphSub),
 		schemaHashes: make(map[schema.GroupKind]string),
+	}
+	// The drainer forwards coalesced dirty keys onto events. Started here
+	// (not in Start) so events flow even for callers that use the watcher
+	// without running it as a manager Runnable (e.g. unit tests draining
+	// events directly). It exits when stop is closed.
+	go w.drainLoop()
+	return w
+}
+
+// drainLoop forwards coalesced dirty keys onto the events channel. Each
+// wakeup drains the ENTIRE dirty set (snapshotting under dirtyMu, then
+// sending outside the lock), so a burst of N>buffer events for a key is
+// coalesced into a single forwarded event and never dropped: a full
+// events channel blocks the send (backpressure) instead of discarding
+// the key. Newly-arriving keys during a blocked send accumulate in the
+// dirty set and are picked up on the next drain.
+func (w *SchemaWatcher) drainLoop() {
+	for {
+		select {
+		case <-w.stop:
+			return
+		case <-w.wakeup:
+		}
+		for {
+			w.dirtyMu.Lock()
+			if len(w.dirty) == 0 {
+				w.dirtyMu.Unlock()
+				break
+			}
+			keys := make([]client.ObjectKey, 0, len(w.dirty))
+			for k := range w.dirty {
+				keys = append(keys, k)
+			}
+			// Clear the snapshot now; keys that re-dirty during the send
+			// loop below re-signal wakeup and are handled next round.
+			w.dirty = make(map[client.ObjectKey]struct{})
+			w.dirtyMu.Unlock()
+
+			for _, key := range keys {
+				u := &unstructured.Unstructured{}
+				u.SetName(key.Name)
+				u.SetNamespace(key.Namespace)
+				select {
+				case w.events <- event.GenericEvent{Object: u}:
+				case <-w.stop:
+					return
+				}
+			}
+		}
 	}
 }
 
@@ -200,6 +265,7 @@ func (w *SchemaWatcher) Start(ctx context.Context) error {
 	w.log.Info("schema watcher started")
 	<-ctx.Done()
 	w.closed.Store(true)
+	close(w.stop)
 	if err := informer.RemoveEventHandler(reg); err != nil {
 		w.log.V(1).Error(err, "remove CRD event handler on shutdown")
 	}
@@ -486,13 +552,17 @@ func (w *SchemaWatcher) enqueue(key client.ObjectKey) {
 	if w.closed.Load() {
 		return
 	}
-	u := &unstructured.Unstructured{}
-	u.SetName(key.Name)
-	u.SetNamespace(key.Namespace)
+	// Lossless: record the key in the dirty set (coalescing by key) and
+	// signal the drainer. A burst of many events for the same key collapses
+	// to a single dirty entry; the drainer forwards it onto events with a
+	// blocking send so a full channel throttles rather than drops.
+	w.dirtyMu.Lock()
+	w.dirty[key] = struct{}{}
+	w.dirtyMu.Unlock()
 	select {
-	case w.events <- event.GenericEvent{Object: u}:
+	case w.wakeup <- struct{}{}:
 	default:
-		w.log.V(0).Info("event buffer full; dropping schema enqueue", "graph", key)
+		// A wakeup is already pending; the drainer will observe the key.
 	}
 }
 
