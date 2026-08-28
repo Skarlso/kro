@@ -51,6 +51,16 @@ File: `pkg/graphengine/executor/simple.go` unless noted.
 - ⬜ `simple.go:1489` SSA contribution release can recreate deleted target — DEFERRED to batch 3 (release semantics, groups with 1492).
 - ⬜ `simple.go:1492` release fails when target CRD GVK unmaps — DEFERRED to batch 3.
 
+## Batch 7 — API / docs / examples / helm / cleanup
+
+- ✅ `graph_types.go:258` spec Required + CRD regen. `814e91d2` (agent, verified: `make manifests` clean)
+- ✅ `.golangci.yml:98` lint covers cmd/kro. `f64591e8` (agent)
+- ✅ `helm deployment.yaml:188` --graph-concurrent-reconciles wired. `2252bb81` (agent)
+- ✅ `graph.md` doc accuracy (patch RawExtension API, RGD→graphengine unconditional, status-patch force split, nested-Graph revisions unimplemented, async-nesting boundary, deferral syntax, applier SA/RBAC note, illustrative-example caveat). `1ceb79bf` (agent, VERIFIED: force-split + deferral syntax probed against real parser)
+- ✅ nested inline-`graph:` compile test. `d9b0ca5d` (agent, passes)
+- NOTE: caught + reverted a stale foreign CRD reformatting (indentation churn) in the working tree; committed CRD matches `make manifests` exactly (verify-codegen safe).
+- ⬜ examples rewrites (`rgd.yaml` unregistered CEL / `.ready()` deferred to KREP-006, `coredns` inline blocks, `singleton` fan-out) — DEFERRED: descope-vs-rewrite-vs-mark-aspirational needs decision. graph.md now carries an illustrative caveat in the meantime.
+
 ## Batch 3 — Lifecycle / leak (IN PROGRESS)
 
 - ✅ `controller_graph_engine.go:266` contribution-release failure now flips ResourcesNotReady + requeues. `65d14946`
