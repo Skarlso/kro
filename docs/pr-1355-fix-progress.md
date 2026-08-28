@@ -1,141 +1,111 @@
 # PR #1355 — Fix progress tracker (living doc)
 
-Continuously updated as fixes land. Source of truth for what's done / in-flight / open.
-Verification detail lives in `pr-1355-unresolved-full-verification.md`; this doc tracks execution.
+Source of truth for what's done / open. Verification detail lives in
+`pr-1355-unresolved-full-verification.md`; this doc tracks execution.
 
-**74 unresolved review threads (2026-08-28 round).** Legend: ✅ done+committed ·
-🔵 in progress · ⬜ open · 🟢 resolved-on-GitHub · ❎ false-positive.
+**Scope:** the 74 unresolved review threads from the 2026-08-28 round
+(cheeseandcereal). Legend: ✅ fixed+committed · ⚪ decided (no code / documented) ·
+❎ false-positive · 🕐 awaiting-author-resolve on GitHub.
 
-## Commits so far
+## Status summary
 
-- `b3f3e0a7` — batch 1: cache TOCTOU, forEach data-pending, coordinator labels, cost-limit threading.
-- `2559b399` — batch 2: executor Apply/Delete hard-error aggregation, update-rejection log signal, malformed-create fail-fast.
-- `5f8c171b`, `7ce66a90`, `803597d4` — batch 5: compiler/parser (7 findings). VERIFIED.
-- `4f0c2777`, `4b0ff871`, `5d6fd30b`, `a4a87dda` — batch 6: schema-wrapper typing, lossless schema events, scope-leak, soft-dep list seed, dead-projector removal, cache metrics. VERIFIED (-race).
-- `814e91d2`, `f64591e8`, `2252bb81` — batch 7 (agent): api spec Required + codegen, lint cmd/kro, helm graph-concurrent-reconciles. VERIFIED.
-- `d8d3d876` — main.go:350 fail-closed on incomplete controller identity when GraphKind on.
-- `65d14946` — batch 3: instance contribution-release not-ready flip + prune UID-conflict requeue.
-- `bca...`/`0ee2b54b` — batch 3: graph release-failure condition (421) + soft-not-ready prune narrowing (357).
+**Correction (audit outcome):** an earlier "all 74 resolved" claim was premature.
+The six maintainer decisions + the bulk of the code findings ARE fixed &
+committed (see tables below), but a line-by-line audit against the GitHub thread
+list found **4 code findings I lost track of that are genuinely still open**, plus
+a few reply-only/decided ones. Honest state: **~66 fixed, 4 open, ~4 decided-no-code.**
 
-## GitHub thread state
+On GitHub, 73 threads are in the "unresolved" (unclicked) state by design — fix
+replies are posted and left for the author/reviewer to click *Resolve*; only
+`registry.go:135` was explicitly resolved (clean FP). 213 author replies posted.
 
-- 🟢 `registry.go:135` — replied + **resolved** (FP).
-- ⬜ `.golangci.yml:43` — replied (doc-exists), left open for scoping judgment.
-- 💬 batch 2/5/6 fixes — replied on-thread (left open for author to resolve).
-- 💬 `886`, `runtime.go:203`, `cached.go:91` — replied as open design decisions.
+**`make test WHAT=integration` is GREEN** (175/175 core + impersonation suite;
+`6dfbb35e` fixed 3 stale assertions). `go build`, `make -n lint`, `helm template` pass.
 
-## GitHub thread state
+## GENUINELY OPEN (audit found these uncommitted)
 
-- 🟢 `registry.go:135` — replied + **resolved** (race genuinely closed; presence+monotonic counter).
-- ⬜ `.golangci.yml:43` — replied (doc-exists correction) but **left open** for the scoping judgment.
-- 💬 `simple.go:272/493/751` — replied (fixed in 2559b399); left open for author to resolve.
-- 💬 `simple.go:886` — replied; **open design decision** (tolerate+log vs unconverged; 3 tests + integration pin tolerate).
+- 🔴 `simple.go:778` — dynamic collection watch registers only `mappings[0].gvr`; a
+  collection rendering multiple GVRs gets drift detection for only the first.
+  Confirmed still `mappings[0]` in code. Fix: dedupe GVRs, one selector watch each.
+- 🔴 `simple.go:1344` — collection children on the STANDALONE Graph path get only
+  `NodeIDLabel` via stampKROMeta, not `InstanceIDLabel`, but watchCollection's
+  selector requires instance-id → drift/deletion events don't match. Fix: stamp the
+  Graph UID as InstanceIDLabel on collection items when no injector supplied it.
+- 🔴 `simple.go:1407` — the synthesized `instance` status-patch node registers a
+  drift watch on the instance it writes; each status write can retrigger reconcile.
+  No self-origin/generation guard found on the drift path. Fix: skip self-watch for
+  the status-patch node, or apply the generation guard on the coordinator enqueue.
+- 🔴 `graph_types.go:77` — `status.managedResources` has NO `MaxItems`; no aggregate
+  forEach-expansion cap either (per-node cap only). Fix: MaxItems marker + compile-time
+  aggregate cap.
 
----
+## Decided / reply-only (no code, or premise inaccurate)
 
-## Batch 1 — DONE (`b3f3e0a7`)
+- ⚪ `graph/controller.go:149` teardown guards — COVERED BY INVARIANT: teardown uses the
+  persisted AppliedServiceAccount, only ever written after a reconcile passed the
+  self-impersonation + fail-closed guards (:237/:250), so a forbidden identity never
+  reaches teardown. Re-running the guard is redundant. (reply)
+- ⚪ `user-cluster-role.yaml:19` — file is NEW in this PR (`730df93d`), so the reviewer's
+  "users lose PREVIOUS aggregated access on upgrade" premise is inaccurate; the
+  no-instance-access design point is minor. (reply)
+- ⚪ `cmd/controller/main.go:344` (example RGD-as-Graph dual-ownership) &
+  `graphengine.go:56` (duplicate watch router) — architecture/design notes; need a
+  maintainer call (reply or descope), not a mechanical fix.
+- ⚪ `graph/controller.go:306` managedResources double-write — PARTIAL (growth-gated
+  write-ahead already limits churn); reply.
 
-- ✅ `cached.go:128` TOCTOU — Add under write lock, atomic w.r.t. invalidation. (High)
-- ✅ `node.go:448` forEach data-pending → ErrDataPending wrap. (High)
-- ✅ `coordinator.go:199` empty old-labels on update (+2 tests). (Med)
-- ✅ `status.go:396` cost-limit threaded flag→ReconcileConfig→projection. (Med)
 
-## Batch 2 — Executor High-severity (DONE `2559b399`, 2 items deferred)
+## Commits (chronological, by batch)
 
-File: `pkg/graphengine/executor/simple.go` unless noted.
+- **Batch 1** `b3f3e0a7` — cache TOCTOU (cached.go:128), forEach data-pending (node.go:448),
+  coordinator empty-old-labels (coordinator.go:199), cost-limit threading (status.go:396).
+- **Batch 2** `2559b399` — executor Apply/Delete hard-error aggregation (272/493),
+  malformed-create fail-fast (751), update-rejection log.
+- **Batch 5** `5f8c171b`,`7ce66a90`,`803597d4` — compiler/parser (compiler.go:651/730,
+  typecheck.go:302/325, validation.go:206, cel.go:31, parser.go:285).
+- **Batch 6** `4f0c2777`,`4b0ff871`,`5d6fd30b`,`a4a87dda` — schema-wrapper typing (status.go:205),
+  lossless schema events (watcher.go:457), scope-leak (runtime.go:108), soft-dep list seed
+  (runtime.go:178), dead projector removal (status.go:66), cache metrics (cached.go:104).
+- **Batch 7 (agent)** `814e91d2`,`f64591e8`,`2252bb81` — spec Required+CRD regen (graph_types.go:258),
+  lint cmd/kro (.golangci.yml:98), helm --graph-concurrent-reconciles (deployment.yaml:188).
+  `1ceb79bf`,`d9b0ca5d` — graph.md doc accuracy + nested compile test.
+- **Batch 3 (lifecycle)** `65d14946` (instance 266/663), `3d6bc14b`+`0ee2b54b` (graph 421/357),
+  `7a3ffb47` (release 1489/1492), `025382e6` (impersonation LRU 129), `f0004a3c` (pre-write
+  duplicate-identity 207/1627), `51c90831` (contribution write-ahead 314), `f50ab83b`
+  (Group+Kind identity, tracking.go:34), `62d570da` (subgraph write-ahead recursion 137),
+  `767242b2` (dynamic-ns churn 161).
+- **main.go:350** `d8d3d876` — fail-closed when GraphKind on but controller identity incomplete.
+- **Decisions batch** `430685c4` (#5 helm impersonate gate), `f08df2e8`+`973f2248` (#4 contribution
+  inventory: Graph→status + instance FM-guard), `f274f34e` (#2 apply-order doc), `4e2a5955` (#1
+  886 Opt 2: converge+event), `13122c53` (#6 examples future-work flags).
+- **Integration fixups** `6dfbb35e` — stale test assertions (compilation msg + patch status.Contributions).
 
-- ✅ `simple.go:272` Apply loop: collect hard errors, continue, errors.Join after walk; `ready` gating preserved. Status patch + independent nodes now run.
-- ✅ `simple.go:493` Delete: accumulate + errors.Join, continue whole inventory.
-- ✅ `simple.go:751` collection CREATE: Invalid/BadRequest → hard fail-fast; transient stays soft. +test.
-- 💬 `simple.go:886` recordUpdateRejected — RESOLVED as Opt 2 (`4e2a5955`): converge + Warning Event ('UpdateRejected') on the affected child via observational OnToleratedRejection hook; classifyRejection surfaces permanent(immutable/invalid) vs transient reason. Never flips aggregate Ready (no wedge). Graph path log-only (no recorder).
-- ⬜ `simple.go:1489` SSA contribution release can recreate deleted target — DEFERRED to batch 3 (release semantics, groups with 1492).
-- ⬜ `simple.go:1492` release fails when target CRD GVK unmaps — DEFERRED to batch 3.
+## The six maintainer decisions (all closed)
 
-## Batch 7 — API / docs / examples / helm / cleanup
+| # | Finding | Decision | Commit |
+| --- | --------- | ---------- | -------- |
+| 1 | `886` update-rejection | Opt 2 — converge + `UpdateRejected` Warning event (no wedge) | `4e2a5955` |
+| 2 | `runtime.go:203` apply-order | Opt A — documented revision-local; deletion already tolerant | `f274f34e` |
+| 3 | `cached.go:91` epoch growth | Opt A — documented bounded (reclamation reintroduces TOCTOU) | `a4a87dda` |
+| 4 | `deletion.go:139` release trust | Graph→`status.Contributions`; instance FM-prefix guard | `f08df2e8`,`973f2248` |
+| 5 | `cluster-role.yaml:155` impersonate | gate behind GraphKind | `430685c4` |
+| 6 | examples | keep in-tree, flag aspirational parts as FUTURE WORK | `13122c53` |
 
-- ✅ `graph_types.go:258` spec Required + CRD regen. `814e91d2` (agent, verified: `make manifests` clean)
-- ✅ `.golangci.yml:98` lint covers cmd/kro. `f64591e8` (agent)
-- ✅ `helm deployment.yaml:188` --graph-concurrent-reconciles wired. `2252bb81` (agent)
-- ✅ `graph.md` doc accuracy (patch RawExtension API, RGD→graphengine unconditional, status-patch force split, nested-Graph revisions unimplemented, async-nesting boundary, deferral syntax, applier SA/RBAC note, illustrative-example caveat). `1ceb79bf` (agent, VERIFIED: force-split + deferral syntax probed against real parser)
-- ✅ nested inline-`graph:` compile test. `d9b0ca5d` (agent, passes)
-- NOTE: caught + reverted a stale foreign CRD reformatting (indentation churn) in the working tree; committed CRD matches `make manifests` exactly (verify-codegen safe).
-- ⬜ examples rewrites (`rgd.yaml` unregistered CEL / `.ready()` deferred to KREP-006, `coredns` inline blocks, `singleton` fan-out) — RESOLVED (#6): keep examples in-tree, flag aspirational parts as FUTURE WORK. rgd.yaml banner + singleton/coredns callouts (`13122c53`); all example threads replied. L0 compile test still passes.
+## False-positive / decided-no-code
 
-## Batch 3 — Lifecycle / leak (IN PROGRESS)
+- ❎ `registry.go:135` — race genuinely closed (presence + monotonic counter). **Resolved on GitHub.**
+- ⚪ `.golangci.yml:43` — cited doc DOES exist (replied); staticcheck-exclusion scoping is a
+  maintainer preference, left as a reply.
+- ⚪ `compiler/context.go:237/256` — deferred-schema / CRD-CEL-in-spec is a **product/KREP decision**
+  (deferred-schema-resolution proposal), not a code fix. Out of scope; replied.
+- ⚪ `examples_test.go:127` — permissive test-resolver schema accepts unknown Kinds; inherent to the
+  fake resolver, informational.
+- ⚪ `examples_test.go:159` — nested compile coverage: inline-`graph:` covered (`d9b0ca5d`);
+  runtime-stamped children are integration-level (documented, not compiler-reachable).
 
-- ✅ `controller_graph_engine.go:266` contribution-release failure now flips ResourcesNotReady + requeues. `65d14946`
-- ✅ `controller_graph_engine.go:663` prune UID-conflict now soft-requeues. `65d14946`
-- ✅ `graph/controller.go:421` release failure flips ResourcesConverged=False (ReleaseFailed). `0ee2b54b`
-- ✅ `graph/controller.go:357` prune retired nodes on soft not-ready (E2 twin). `0ee2b54b`
-- ✅ `simple.go:1489` release GET-first — no longer recreates a deleted target. `7a3ffb47`
-- ✅ `simple.go:1492` release tolerates removed CRD (NoMatch), retries transient. `7a3ffb47`
-- ✅ `impersonation.go:129` impersonated-executor cache bounded with LRU (evict-safe; size bound). `025382e6`
-- ✅ `controller_graph_engine.go:207` / `simple.go:1627` duplicate identity now rejected PRE-WRITE (executor identity-claim guard in prepareItem; covers RGD + Graph + subgraph frames; ErrDuplicateIdentity hard error). `f0004a3c`
-- ✅ `graph/controller.go:314` contribution write-ahead before Apply (shared executor.PatchFieldManager, drift-proof; intendedContributions projection). `51c90831`
-- ✅ `tracking.go:34` resourceKey now keys on Group+Kind (not full apiVersion) — version-only change no longer apply-then-prunes. `f50ab83b` (turned out mechanical: Group parses from apiVersion, no RESTMapper)
-- ✅ `tracking.go:137` write-ahead now recurses subgraphs (both intendedManagedResources + intendedContributions; qualified NodeID + field-manager match executor byte-for-byte). `62d570da` (agent, VERIFIED)
-- ✅ `tracking.go:161` dynamic-node empty-namespace — skip ambiguous dynamic-GVK node (no explicit ns) from write-ahead intent; kills idle churn. `767242b2` (approach (b), I/O-free; RESTMapper alternative offered on-thread)
+## Items resolved that I re-verified during the audit
 
-## Batch 4 — Security (decisions)
-
-- ✅ #4 `deletion.go:139` editable-annotation release — DONE (both paths):
-  - Graph path: contribution inventory moved annotation → `GraphStatus.Contributions` (RBAC-separable status subresource; API type + codegen + controller rewrite). `f08df2e8` (agent, VERIFIED: codegen in sync, CRD has status.contributions, graph+instance suites pass)
-  - Instance path (status is a no-go on a dynamic CR): finalizer releases ONLY kro patch field managers (`executor.IsPatchFieldManager`); forged non-kro managers refused. Scope-GK filter rejected as security theater (non-secret hash). `973f2248`
-- ✅ #5 `cluster-role.yaml:155` cluster-wide impersonate gated behind GraphKind. `430685c4` (verified via helm template)
-- ⬜ `impersonation.go:129` executor cache eviction — already fixed earlier (`025382e6`, LRU bound).
-
-- ⬜ `cmd/controller/main.go:350` missing controller ns/SA flags silently disable self-impersonation guard. Fix: fail startup when GraphKind on.
-- ⬜ `graph/controller.go:149` teardown skips ns + self + fail-closed checks. Fix: re-run guards before teardown executor.
-- ⬜ `deletion.go:139` release trusts editable annotation under controller privileges. Fix: move to status / validate against ApplySet scope.
-- ⬜ `helm cluster-role.yaml:155` cluster-wide impersonate even with GraphKind off. Fix: gate behind opt-in + scope.
-- ⬜ `impersonation.go:129` executor cache never evicts. Fix: LRU bound / evict on Graph delete.
-
-## Batch 5 — Compiler / parser (DONE — 5f8c171b, 7ce66a90, 803597d4; verified)
-
-Skipped context.go:237/256 (deferred-schema / CRD-CEL — product decision, not a code fix).
-
-- ✅ `compiler.go:651` includeWhen self-reference → compile-time reject. +test.
-- ✅ `compiler.go:730` ancestor patch capture → framePatchKind walks frames, rejects. +test.
-- ✅ `typecheck.go:302` dyn-GVK collection `each` → declared as cel.DynType. +test.
-- ✅ `typecheck.go:325` optional<bool> conditions → compile-time reject w/ orValue hint. +test.
-- ✅ `validation.go:206` no-CEL-seed heuristic → requireResolvableRoot (real root check; cycles still caught by AddDependencies+TopologicalSort, verified double-guarded). +test.
-- ✅ `cel.go:31` scanner now tracks single-quoted literals identically to double. +tests. (verified no example regression)
-- ✅ `parser.go:285` unterminated ${ → ErrUnterminatedExpression. +tests.
-
-- ⬜ `compiler.go:651` includeWhen self-reference silently dropped. Fix: reject at compile.
-- ⬜ `compiler.go:730` patch capture across ancestor frames unchecked. Fix: resolve kind across frames.
-- ⬜ `typecheck.go:302` dyn-GVK collection leaves `each` undeclared. Fix: declare `each` as dyn.
-- ⬜ `typecheck.go:325` optional<bool> accepted, empty = runtime error. Fix: reject or define empty semantics.
-- ⬜ `validation.go:206` requires no-CEL seed node. Fix: validate real DAG cycles.
-- ⬜ `cel.go:31` scanner only double-quoted strings (WIDE blast radius — careful).
-- ⬜ `parser.go:285` unterminated ${ silently literal. Fix: parser error.
-- ⬜ `context.go:237/256` static custom-Kind resolved before CRD applies (deferred-schema unimplemented).
-
-## Batch 6 — Runtime / watch / status / cache (DONE — 4f0c2777, 4b0ff871, 5d6fd30b, a4a87dda; verified -race)
-
-LEFT OUT (resolved as Opt A): `runtime.go:203` apply-order — documented revision-locality at the computation site (`f274f34e`); deletion path already tolerant of mixed schemes.
-
-- ✅ `status.go:205` schema-wrapper preserved: extract underlying map from the ref.Val, overlay conditions, re-wrap with InstanceSchemaForCEL so byte/date-time/number typing survives. +tests. (High)
-- ✅ `schemawatcher/watcher.go:457` lossless enqueue: dirty-set + wakeup-signalled drainer, blocking send (backpressure not drop), coalesced by key; stop-channel escape, no leak/deadlock. +2 tests, -race. (High)
-- ✅ `runtime.go:108` child scope no longer leaks ancestor under shadowed local ID (override-exempt). +tests.
-- ✅ `runtime.go:178` soft-dep collections seeded as []any{} not {}. +test.
-- ✅ `status.go:66` dead ProjectInstanceStatus + exclusive helpers (evalStatusExpr/setAtPath/getAtPath) removed; verified only worktree refs remained.
-- ✅ `cached.go:104` cache metrics instrumented (hits/misses/duration/errors/singleflight/size/evictions via onEvict). +tests.
-- ✅ `cached.go:91` epoch map growth — Opt A: documented as intentional/bounded (O(1)/GK ≈ installed CRDs; reclamation reintroduces the fixed TOCTOU). Committed NOTE in `a4a87dda`; thread replied.
-
-## Batch 7 — API / docs / examples / helm / cleanup (OPEN)
-
-- ⬜ `graph_types.go:258` spec omitempty → empty Graph passes admission. Fix: Required + regen.
-- ⬜ `graph_types.go:77` managedResources unbounded. Fix: MaxItems + aggregate cap.
-- ⬜ `helm deployment.yaml:188` --graph-concurrent-reconciles not wired. Fix: value + arg.
-- ⬜ `cmd/controller/main.go:344` example RGD-as-Graph dual-owns RGD lineage.
-- ⬜ `cmd/controller/graphengine.go:56` duplicate cluster-wide watch router.
-- ⬜ `.golangci.yml:98` lint skips cmd/kro module.
-- ⬜ examples: rgd.yaml unregistered CEL (plural/toOpenAPI/.ready), singleton claims[0] only.
-- ⬜ docs graph.md:3/294/304 stale PatchSpec banner, force claim, nested revisions.
-- ⬜ `user-cluster-role.yaml:19` no instance access (PARTIAL — claim inaccurate).
-
-## Non-actionable / decided
-
-- ❎ `registry.go:135` — resolved.
-- PARTIAL `graph/controller.go:306` (double-write growth-gated), `controller_graph_engine.go:266` (degraded not folded — will fix in batch 3).
+- ✅ `rgdadapter/status.go:396` — author-condition compile threads `costLimit` through
+  `compileCEL` (verified: `ProgramOptions(costLimit)`, not DefaultProgramOptions).
+- ✅ `simple.go:272/493/751/886/1489/1492/1627` — all committed (batches 2/3).
+- ✅ `tracking.go:34/137/161` — all committed (batch 3).
