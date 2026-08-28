@@ -322,4 +322,4 @@ spec:
                       observedGeneration: >-
                         ${"${schema.metadata.generation}"}
                       lastTransitionTime: >-
-                          ${"${schema.metadata.creationTimestamp}"}
+                        ${"${schema.metadata.creationTimestamp}"}

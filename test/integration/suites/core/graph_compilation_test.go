@@ -132,7 +132,12 @@ var _ = Describe("Graph Compilation", func() {
 			},
 			{
 				name: "invalid-input-node-rule-missing",
-				// Every node references another; no literal input node.
+				// A single node that references ITSELF, so there is no resolvable
+				// root. The dependency-graph builder rejects the self-edge directly
+				// ("self references are not allowed") — the graph is still refused
+				// (Accepted=False), which is what this case guards. (Previously the
+				// no-CEL-seed heuristic produced an "input node" message; that
+				// heuristic was replaced by real cycle/resolvable-root validation.)
 				nodes: []expv1alpha1.Node{
 					{
 						ID: "a",
@@ -144,7 +149,7 @@ var _ = Describe("Graph Compilation", func() {
 					},
 				},
 				wantStatus: metav1.ConditionFalse,
-				wantSubstr: "input",
+				wantSubstr: "self references are not allowed",
 			},
 		}
 
