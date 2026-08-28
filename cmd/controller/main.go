@@ -348,12 +348,20 @@ func main() {
 	if features.FeatureGate.Enabled(features.GraphKind) {
 		setupLog.Info("GraphKind feature enabled; starting Graph controller")
 		// Compose kro's own impersonation identity so the Graph controller can
-		// refuse a Graph that would impersonate it. Empty when the deployment
-		// doesn't supply both parts (e.g. local runs) — the guard is then a no-op.
-		var controllerSA string
-		if controllerNamespace != "" && controllerServiceAccount != "" {
-			controllerSA = fmt.Sprintf("system:serviceaccount:%s:%s", controllerNamespace, controllerServiceAccount)
+		// refuse a Graph that would impersonate it. This guard is a security
+		// control, not an optional nicety: without it a Graph could impersonate
+		// the controller's own ServiceAccount and escalate. If GraphKind is on
+		// but the deployment did not supply both identity parts, fail closed
+		// rather than silently degrade the guard to a no-op.
+		if controllerNamespace == "" || controllerServiceAccount == "" {
+			setupLog.Error(nil, "GraphKind is enabled but the controller identity is incomplete; "+
+				"both --controller-namespace and --controller-service-account must be set so the "+
+				"self-impersonation guard is active (refusing to start fail-open)",
+				"controllerNamespaceSet", controllerNamespace != "",
+				"controllerServiceAccountSet", controllerServiceAccount != "")
+			os.Exit(1)
 		}
+		controllerSA := fmt.Sprintf("system:serviceaccount:%s:%s", controllerNamespace, controllerServiceAccount)
 		if err := setupGraphController(
 			mgr,
 			geCmp,
