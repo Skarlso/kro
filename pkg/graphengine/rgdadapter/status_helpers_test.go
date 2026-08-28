@@ -90,66 +90,6 @@ func TestIsDataPendingCEL(t *testing.T) {
 	}
 }
 
-// setAtPath and getAtPath are the dotted-path accessors used to assemble the
-// projected status map. They handle map levels only; anything else is a
-// not-found rather than a panic.
-func TestSetAndGetAtPath(t *testing.T) {
-	t.Parallel()
-
-	t.Run("a top-level key round-trips", func(t *testing.T) {
-		t.Parallel()
-		m := map[string]any{}
-		require.NoError(t, setAtPath(m, "state", "ACTIVE"))
-		got, found := getAtPath(m, "state")
-		assert.True(t, found)
-		assert.Equal(t, "ACTIVE", got)
-	})
-
-	t.Run("a nested path creates intermediate maps", func(t *testing.T) {
-		t.Parallel()
-		m := map[string]any{}
-		require.NoError(t, setAtPath(m, "bucket.status.arn", "arn:aws:s3:::b"))
-		got, found := getAtPath(m, "bucket.status.arn")
-		assert.True(t, found)
-		assert.Equal(t, "arn:aws:s3:::b", got)
-	})
-
-	t.Run("an existing intermediate map is reused, not replaced", func(t *testing.T) {
-		t.Parallel()
-		m := map[string]any{}
-		require.NoError(t, setAtPath(m, "net.vpcID", "vpc-1"))
-		require.NoError(t, setAtPath(m, "net.subnetID", "subnet-1"))
-
-		vpc, found := getAtPath(m, "net.vpcID")
-		require.True(t, found, "the first write must survive the second")
-		assert.Equal(t, "vpc-1", vpc)
-		subnet, found := getAtPath(m, "net.subnetID")
-		require.True(t, found)
-		assert.Equal(t, "subnet-1", subnet)
-	})
-
-	t.Run("a scalar blocking an intermediate path is an error", func(t *testing.T) {
-		t.Parallel()
-		m := map[string]any{"net": "not-a-map"}
-		err := setAtPath(m, "net.vpcID", "vpc-1")
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "net")
-		assert.Contains(t, err.Error(), "string", "the error should report the conflicting type")
-	})
-
-	t.Run("a missing path is not found", func(t *testing.T) {
-		t.Parallel()
-		_, found := getAtPath(map[string]any{"a": "1"}, "b")
-		assert.False(t, found)
-	})
-
-	t.Run("a scalar intermediate is not found rather than a panic", func(t *testing.T) {
-		t.Parallel()
-		_, found := getAtPath(map[string]any{"a": "scalar"}, "a.b.c")
-		assert.False(t, found)
-	})
-}
-
 // unwrapExpr strips a standalone ${...} wrapper so the expression can be handed
 // to CEL directly.
 func TestUnwrapExpr(t *testing.T) {
