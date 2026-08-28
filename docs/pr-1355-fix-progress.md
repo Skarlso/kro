@@ -53,16 +53,18 @@ File: `pkg/graphengine/executor/simple.go` unless noted.
 
 ## Batch 3 — Lifecycle / leak (IN PROGRESS)
 
-- ✅ `controller_graph_engine.go:266` contribution-release failure now flips ResourcesNotReady + requeues (was: persisted Ready). `65d14946`
-- ✅ `controller_graph_engine.go:663` prune UID-conflict now soft-requeues (was: clean success, no retry). `65d14946`
-- ✅ `graph/controller.go:421` release failure flips ResourcesConverged=False (ReleaseFailed). `0ee2b54b`/earlier
-- ✅ `graph/controller.go:357` prune retired nodes on soft not-ready, not only clean apply (E2 twin). `0ee2b54b`
-- ✅ `simple.go:1489` SSA contribution release GET-first guard — no longer recreates a deleted target. `7a3ffb47`
-- ✅ `simple.go:1492` release tolerates removed CRD (NoMatch=already-released), retries transient discovery. `7a3ffb47`
-- ⬜ `controller_graph_engine.go:207` / `simple.go:1627` duplicate identity detected post-apply (pre-write check) — pending.
-- ⬜ `graph/controller.go:314` contribution write-ahead — pending.
-- ⬜ `graph/controller.go:344` + `tracking.go:137,161` mixed-identity / write-ahead subgraph / dynamic-ns dedup — pending.
-- ⬜ `tracking.go:34` resourceKey includes apiVersion — pending.
+- ✅ `controller_graph_engine.go:266` contribution-release failure now flips ResourcesNotReady + requeues. `65d14946`
+- ✅ `controller_graph_engine.go:663` prune UID-conflict now soft-requeues. `65d14946`
+- ✅ `graph/controller.go:421` release failure flips ResourcesConverged=False (ReleaseFailed). `0ee2b54b`
+- ✅ `graph/controller.go:357` prune retired nodes on soft not-ready (E2 twin). `0ee2b54b`
+- ✅ `simple.go:1489` release GET-first — no longer recreates a deleted target. `7a3ffb47`
+- ✅ `simple.go:1492` release tolerates removed CRD (NoMatch), retries transient. `7a3ffb47`
+- ✅ `impersonation.go:129` impersonated-executor cache bounded with LRU (evict-safe; size bound). `025382e6`
+- ⬜ `controller_graph_engine.go:207` / `simple.go:1627` duplicate identity detected post-apply — DEFERRED: pre-write reject is an invasive executor change (resolve/prepare-time), its own commit + tests. Replied on-thread.
+- ⬜ `graph/controller.go:314` contribution write-ahead — DEFERRED: needs an in-memory patch-node projection that exactly replicates the executor's patchFieldManager/subresource derivation, or write-ahead entries won't correlate (risk: releasing still-wanted fields). Not mechanical.
+- ⬜ `tracking.go:34` resourceKey includes apiVersion — DEFERRED: dropping version from the identity key needs RESTMapper GroupKind resolution and touches teardown identity; real correctness surface.
+- ⬜ `tracking.go:137` write-ahead skips subgraph+dependent nodes — DEFERRED: recursing subgraphs in a best-effort I/O-free projection has real edge cases (child scope seeding, nested collections).
+- ⬜ `tracking.go:161` dynamic-node empty-ns never dedups — DEFERRED: needs rendered-GVK REST-scope resolution in a projection that deliberately avoids cluster I/O.
 
 ## Batch 4 — Security (OPEN)
 
