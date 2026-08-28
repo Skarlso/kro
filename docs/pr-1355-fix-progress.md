@@ -62,7 +62,7 @@ File: `pkg/graphengine/executor/simple.go` unless noted.
 - ✅ `impersonation.go:129` impersonated-executor cache bounded with LRU (evict-safe; size bound). `025382e6`
 - ⬜ `controller_graph_engine.go:207` / `simple.go:1627` duplicate identity detected post-apply — DEFERRED: pre-write reject is an invasive executor change (resolve/prepare-time), its own commit + tests. Replied on-thread.
 - ⬜ `graph/controller.go:314` contribution write-ahead — DEFERRED: needs an in-memory patch-node projection that exactly replicates the executor's patchFieldManager/subresource derivation, or write-ahead entries won't correlate (risk: releasing still-wanted fields). Not mechanical.
-- ⬜ `tracking.go:34` resourceKey includes apiVersion — DEFERRED: dropping version from the identity key needs RESTMapper GroupKind resolution and touches teardown identity; real correctness surface.
+- ✅ `tracking.go:34` resourceKey now keys on Group+Kind (not full apiVersion) — version-only change no longer apply-then-prunes. `f50ab83b` (turned out mechanical: Group parses from apiVersion, no RESTMapper)
 - ⬜ `tracking.go:137` write-ahead skips subgraph+dependent nodes — DEFERRED: recursing subgraphs in a best-effort I/O-free projection has real edge cases (child scope seeding, nested collections).
 - ⬜ `tracking.go:161` dynamic-node empty-ns never dedups — DEFERRED: needs rendered-GVK REST-scope resolution in a projection that deliberately avoids cluster I/O.
 
