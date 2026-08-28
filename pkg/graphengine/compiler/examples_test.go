@@ -22,6 +22,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -30,6 +31,7 @@ import (
 	"sigs.k8s.io/yaml"
 
 	expv1alpha1 "github.com/kubernetes-sigs/kro/api/v1alpha1"
+	"github.com/kubernetes-sigs/kro/pkg/graphengine/testutil/generator"
 	testk8s "github.com/kubernetes-sigs/kro/pkg/testutil/k8s"
 )
 
@@ -203,4 +205,49 @@ func TestExamplesGraphCompile(t *testing.T) {
 			require.True(t, foundGraph, "expected at least one Graph document in %s", file)
 		})
 	}
+}
+
+// TestExamplesNestedGraphCompile closes the coverage gap that
+// TestExamplesGraphCompile leaves open: that test compiles only the OUTER
+// Graph of each example, so expressions living in a nested (stamped/inline)
+// child Graph are never parsed. Here we compile an outer Graph that embeds an
+// inline `graph:` subgraph (the compiler recurses into child frames) and assert
+// that the child compiled into its own SubProgram — including a child node
+// whose CEL expression captures a parent node, exercising cross-frame
+// resolution during compilation.
+//
+// Note: stamped child Graphs (a `template:` node with `kind: Graph`) are
+// applied as independent objects and compiled on the child's own reconcile, so
+// their generated expressions cannot be reached from a compiler-level test;
+// that path needs integration-level coverage. This test covers the inline
+// `graph:` nesting that IS compiled by the parent.
+func TestExamplesNestedGraphCompile(t *testing.T) {
+	child := generator.NewGraph("child",
+		generator.WithDef("inner", map[string]any{"suffix": "child"}),
+		generator.WithTemplate("cm", map[string]any{
+			"apiVersion": "v1", "kind": "ConfigMap",
+			// captures the parent `seed` def and a child-local `inner` def
+			"metadata": map[string]any{"name": "${seed.name}"},
+			"data":     map[string]any{"suffix": "${inner.suffix}"},
+		}),
+	)
+	outer := generator.NewGraph("outer",
+		generator.WithNamespace("default"),
+		generator.WithDef("seed", map[string]any{"name": "from-parent"}),
+		generator.WithSubgraph("sub", child),
+	)
+
+	prog, err := newExampleTestCompiler(t).Compile(outer)
+	require.NoError(t, err, "nested graph must compile")
+	require.NotNil(t, prog)
+
+	sub := prog.Nodes["sub"]
+	require.NotNil(t, sub, "subgraph node must exist in the outer program")
+	require.NotNil(t, sub.SubProgram, "child Graph must compile into its own SubProgram")
+	assert.Contains(t, sub.SubProgram.Nodes, "inner", "child def node compiled")
+	assert.Contains(t, sub.SubProgram.Nodes, "cm", "child template node compiled")
+	// The parent capture becomes a dependency of the subgraph node, proving the
+	// child's expression was parsed and resolved against the parent frame.
+	assert.Contains(t, sub.HardDepIDs(), "seed",
+		"child expression capturing a parent node must be parsed at compile time")
 }
