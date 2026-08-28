@@ -76,7 +76,13 @@ File: `pkg/graphengine/executor/simple.go` unless noted.
 - ✅ `tracking.go:137` write-ahead now recurses subgraphs (both intendedManagedResources + intendedContributions; qualified NodeID + field-manager match executor byte-for-byte). `62d570da` (agent, VERIFIED)
 - ✅ `tracking.go:161` dynamic-node empty-namespace — skip ambiguous dynamic-GVK node (no explicit ns) from write-ahead intent; kills idle churn. `767242b2` (approach (b), I/O-free; RESTMapper alternative offered on-thread)
 
-## Batch 4 — Security (OPEN)
+## Batch 4 — Security (decisions)
+
+- ✅ #4 `deletion.go:139` editable-annotation release — DONE (both paths):
+  - Graph path: contribution inventory moved annotation → `GraphStatus.Contributions` (RBAC-separable status subresource; API type + codegen + controller rewrite). `f08df2e8` (agent, VERIFIED: codegen in sync, CRD has status.contributions, graph+instance suites pass)
+  - Instance path (status is a no-go on a dynamic CR): finalizer releases ONLY kro patch field managers (`executor.IsPatchFieldManager`); forged non-kro managers refused. Scope-GK filter rejected as security theater (non-secret hash). `973f2248`
+- ✅ #5 `cluster-role.yaml:155` cluster-wide impersonate gated behind GraphKind. `430685c4` (verified via helm template)
+- ⬜ `impersonation.go:129` executor cache eviction — already fixed earlier (`025382e6`, LRU bound).
 
 - ⬜ `cmd/controller/main.go:350` missing controller ns/SA flags silently disable self-impersonation guard. Fix: fail startup when GraphKind on.
 - ⬜ `graph/controller.go:149` teardown skips ns + self + fail-closed checks. Fix: re-run guards before teardown executor.
