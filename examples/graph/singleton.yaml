@@ -12,6 +12,12 @@
 # + name), the highest priority wins. Ties broken by name (lowest wins).
 # If the winner is deleted, the next-highest claimant takes over with zero
 # downtime — the resource UID never changes.
+#
+# STATUS / FUTURE WORK: the status-writeback shown below patches only the
+# first claimant (claims[0]), so other claimants receive no status and the
+# empty-claim-list case is not handled. A complete fan-out status design (one
+# status write per claim, plus the empty case) is tracked follow-up work; the
+# example is kept to illustrate the priority-resolution pattern.
 # ---------------------------------------------------------------------------
 
 # Team A claims webapp-dashboard with priority 100
