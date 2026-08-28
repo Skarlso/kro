@@ -9,11 +9,14 @@ Verification detail lives in `pr-1355-unresolved-full-verification.md`; this doc
 ## Commits so far
 
 - `b3f3e0a7` — batch 1: cache TOCTOU, forEach data-pending, coordinator labels, cost-limit threading.
+- `2559b399` — batch 2: executor Apply/Delete hard-error aggregation, update-rejection log signal, malformed-create fail-fast.
 
 ## GitHub thread state
 
 - 🟢 `registry.go:135` — replied + **resolved** (race genuinely closed; presence+monotonic counter).
 - ⬜ `.golangci.yml:43` — replied (doc-exists correction) but **left open** for the scoping judgment.
+- 💬 `simple.go:272/493/751` — replied (fixed in 2559b399); left open for author to resolve.
+- 💬 `simple.go:886` — replied; **open design decision** (tolerate+log vs unconverged; 3 tests + integration pin tolerate).
 
 ---
 
@@ -24,16 +27,16 @@ Verification detail lives in `pr-1355-unresolved-full-verification.md`; this doc
 - ✅ `coordinator.go:199` empty old-labels on update (+2 tests). (Med)
 - ✅ `status.go:396` cost-limit threaded flag→ReconcileConfig→projection. (Med)
 
-## Batch 2 — Executor High-severity (IN PROGRESS)
+## Batch 2 — Executor High-severity (DONE `2559b399`, 2 items deferred)
 
 File: `pkg/graphengine/executor/simple.go` unless noted.
 
-- 🔵 `simple.go:272` Apply loop aborts on first hard error → strands independent nodes + status patch. Fix: collect hard errors, continue, errors.Join after walk; keep `ready` gating.
-- ⬜ `simple.go:493` Delete stops on first hard error → strands remaining inventory. Fix: accumulate + errors.Join, continue.
-- ⬜ `simple.go:751` collection CREATE permanent rejection soft-forever. Fix: classify IsInvalid/IsBadRequest/IsForbidden as hard.
-- ⬜ `simple.go:886` recordUpdateRejected false-ready on permanent UPDATE rejection. Fix: classify permanent rejections as recordFailure (soft not-ready), keep desired[i]=current swap.
-- ⬜ `simple.go:1489` SSA contribution release can recreate deleted target. Fix: existence precondition / non-creating patch; NotFound = released.
-- ⬜ `simple.go:1492` release fails when target CRD GVK unmaps. Fix: treat confirmed missing API as released, retry transient discovery.
+- ✅ `simple.go:272` Apply loop: collect hard errors, continue, errors.Join after walk; `ready` gating preserved. Status patch + independent nodes now run.
+- ✅ `simple.go:493` Delete: accumulate + errors.Join, continue whole inventory.
+- ✅ `simple.go:751` collection CREATE: Invalid/BadRequest → hard fail-fast; transient stays soft. +test.
+- 💬 `simple.go:886` recordUpdateRejected: scope-half already fixed (desired[i]=current); added log signal; **unconverged-vs-tolerate is an open design decision** (replied on-thread, 3 tests + integration pin tolerate).
+- ⬜ `simple.go:1489` SSA contribution release can recreate deleted target — DEFERRED to batch 3 (release semantics, groups with 1492).
+- ⬜ `simple.go:1492` release fails when target CRD GVK unmaps — DEFERRED to batch 3.
 
 ## Batch 3 — Lifecycle / leak (OPEN)
 
