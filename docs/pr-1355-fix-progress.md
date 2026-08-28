@@ -47,7 +47,7 @@ File: `pkg/graphengine/executor/simple.go` unless noted.
 - ✅ `simple.go:272` Apply loop: collect hard errors, continue, errors.Join after walk; `ready` gating preserved. Status patch + independent nodes now run.
 - ✅ `simple.go:493` Delete: accumulate + errors.Join, continue whole inventory.
 - ✅ `simple.go:751` collection CREATE: Invalid/BadRequest → hard fail-fast; transient stays soft. +test.
-- 💬 `simple.go:886` recordUpdateRejected: scope-half already fixed (desired[i]=current); added log signal; **unconverged-vs-tolerate is an open design decision** (replied on-thread, 3 tests + integration pin tolerate).
+- 💬 `simple.go:886` recordUpdateRejected — RESOLVED as Opt 2 (`4e2a5955`): converge + Warning Event ('UpdateRejected') on the affected child via observational OnToleratedRejection hook; classifyRejection surfaces permanent(immutable/invalid) vs transient reason. Never flips aggregate Ready (no wedge). Graph path log-only (no recorder).
 - ⬜ `simple.go:1489` SSA contribution release can recreate deleted target — DEFERRED to batch 3 (release semantics, groups with 1492).
 - ⬜ `simple.go:1492` release fails when target CRD GVK unmaps — DEFERRED to batch 3.
 
