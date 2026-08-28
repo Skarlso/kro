@@ -10,10 +10,9 @@ Source of truth for what's done / open. Verification detail lives in
 ## Status summary
 
 **Correction (audit outcome):** an earlier "all 74 resolved" claim was premature.
-The six maintainer decisions + the bulk of the code findings ARE fixed &
-committed (see tables below), but a line-by-line audit against the GitHub thread
-list found **4 code findings I lost track of that are genuinely still open**, plus
-a few reply-only/decided ones. Honest state: **~66 fixed, 4 open, ~4 decided-no-code.**
+A line-by-line audit found 4 code findings that were still open; **all four are
+now fixed** (`59b6b9ed`) with tests. Current honest state: **~70 fixed, 0 open
+code findings, ~4 decided-no-code / reply-only.**
 
 On GitHub, 73 threads are in the "unresolved" (unclicked) state by design — fix
 replies are posted and left for the author/reviewer to click *Resolve*; only
@@ -24,20 +23,19 @@ replies are posted and left for the author/reviewer to click *Resolve*; only
 
 ## GENUINELY OPEN (audit found these uncommitted)
 
-- 🔴 `simple.go:778` — dynamic collection watch registers only `mappings[0].gvr`; a
-  collection rendering multiple GVRs gets drift detection for only the first.
-  Confirmed still `mappings[0]` in code. Fix: dedupe GVRs, one selector watch each.
-- 🔴 `simple.go:1344` — collection children on the STANDALONE Graph path get only
-  `NodeIDLabel` via stampKROMeta, not `InstanceIDLabel`, but watchCollection's
-  selector requires instance-id → drift/deletion events don't match. Fix: stamp the
-  Graph UID as InstanceIDLabel on collection items when no injector supplied it.
-- 🔴 `simple.go:1407` — the synthesized `instance` status-patch node registers a
-  drift watch on the instance it writes; each status write can retrigger reconcile.
-  No self-origin/generation guard found on the drift path. Fix: skip self-watch for
-  the status-patch node, or apply the generation guard on the coordinator enqueue.
-- 🔴 `graph_types.go:77` — `status.managedResources` has NO `MaxItems`; no aggregate
-  forEach-expansion cap either (per-node cap only). Fix: MaxItems marker + compile-time
-  aggregate cap.
+All four are now FIXED (`59b6b9ed`) and covered by tests; unit + integration suites green.
+
+- ✅ `simple.go:778` — multi-GVR collection watch: `distinctWatchMappings` registers one
+  selector watch per distinct GVR. +test.
+- ✅ `simple.go:1344` — collection children stamped with instance-id (Graph UID) on the
+  standalone path so the selector matches; scoped to COLLECTIONS (scalar co-ownership across
+  Graphs must not conflict on the label — verified by Multi-Graph Isolation integration test,
+  which initially regressed and drove the narrowing). +test.
+- ✅ `simple.go:1407` — status-patch self-watch: `compiler.WithSelfWatchExempt` +
+  `Node.SelfWatchExempt`; applyPatch skips the drift watch for the synthesized author-status
+  writeback node (StatusPatchNodeID). +test.
+- ✅ `graph_types.go:77` — `status.managedResources` MaxItems=5000 backstop (below etcd
+  object-size limit; per-node forEach cap is the practical limiter). CRD regen.
 
 ## Decided / reply-only (no code, or premise inaccurate)
 
