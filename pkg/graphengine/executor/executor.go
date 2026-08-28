@@ -46,6 +46,16 @@ var ErrNotReady = errors.New("executor: node not ready")
 // errors.Is(err, ErrNotReady).
 var ErrResourceDeleting = errors.New("executor: resource is being deleted")
 
+// ErrDuplicateIdentity is the sentinel signaling that two DISTINCT nodes
+// rendered the same Kubernetes object identity (GVK + namespace + name) in one
+// Apply walk. It is a HARD error surfaced BEFORE the second node's write, so an
+// invalid graph cannot clobber a shared target (or, on the standalone-Graph
+// path, cannot leave two same-Graph template managers force-reclaiming each
+// other's fields forever while the Graph reports Ready). It does NOT satisfy
+// errors.Is(err, ErrNotReady): a duplicate identity is a permanent graph
+// misconfiguration the author must fix, not a converge-and-retry condition.
+var ErrDuplicateIdentity = errors.New("executor: duplicate resource identity across nodes")
+
 // ResourceDeletingError carries the identity of a managed object that is
 // currently terminating so the reconciler can build a condition message.
 // Detect it with errors.Is(err, ErrResourceDeleting)

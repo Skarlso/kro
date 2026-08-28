@@ -99,6 +99,40 @@ type Simple struct {
 	// the node-path annotation — derives from this via qualifiedPath /
 	// nodeIDToken so all three agree by construction.
 	nodePrefix string
+	// identityClaims records which node has claimed each rendered object
+	// identity (GVK+namespace+name) during a single Apply walk, so a SECOND
+	// node rendering the same identity is refused BEFORE its SSA write instead
+	// of clobbering the first node's object (and, for the standalone-Graph
+	// path, before two same-Graph template managers force-reclaim each other's
+	// fields forever while the Graph reports Ready). It is created per top-level
+	// Apply and shared across subgraph child walks (applySubgraph copies the
+	// executor by value, carrying this pointer) so a collision between template
+	// nodes in different frames targeting one cluster object is caught too.
+	// Nil outside an Apply walk; the post-apply validateAppliedIdentities check
+	// remains as a backstop.
+	identityClaims *identityClaimSet
+}
+
+// identityClaimSet is the per-Apply set of claimed object identities, guarded by
+// a mutex because collection items apply in parallel.
+type identityClaimSet struct {
+	mu    sync.Mutex
+	owner map[string]string // identity key -> qualified node ID that claimed it
+}
+
+// claim records that qualifiedNodeID intends to write objIdentity. It returns a
+// non-nil error when a DIFFERENT node already claimed the same identity this
+// walk — the caller turns that into a hard error before any write. Re-claiming
+// by the same node (e.g. across retries) is allowed.
+func (c *identityClaimSet) claim(identityKey, qualifiedNodeID string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if owner, ok := c.owner[identityKey]; ok && owner != qualifiedNodeID {
+		return fmt.Errorf("%w: nodes %q and %q both render %s",
+			ErrDuplicateIdentity, owner, qualifiedNodeID, identityKey)
+	}
+	c.owner[identityKey] = qualifiedNodeID
+	return nil
 }
 
 // NewSimple constructs a Simple executor bound to the given client.
@@ -192,6 +226,17 @@ var _ Interface = (*Simple)(nil)
 // via GateReadiness; when it is off every reachable node is applied
 // regardless of upstream readiness.
 func (s *Simple) Apply(ctx context.Context, rt *runtime.Runtime, w watchrouter.Watcher) (ApplyResult, error) {
+	// Establish the per-Apply identity-claim set at the top-level walk. A
+	// subgraph child walk (applySubgraph copies the executor by value) inherits
+	// this non-nil pointer and shares the same set, so a template-node identity
+	// collision is detected across frames. Guard on nil so only the outermost
+	// Apply creates it.
+	if s.identityClaims == nil {
+		child := *s
+		child.identityClaims = &identityClaimSet{owner: map[string]string{}}
+		return child.Apply(ctx, rt, w)
+	}
+
 	var result ApplyResult
 	var firstSoft error
 	recordSoft := func(err error) {
@@ -594,6 +639,20 @@ func (s *Simple) prepareItem(rt *runtime.Runtime, n *runtime.Node, obj *unstruct
 	s.defaultNamespace(rt, m.namespaced, obj)
 	if m.namespaced && obj.GetNamespace() == "" {
 		return fmt.Errorf("node %q: namespaced resource %s/%s must set metadata.namespace when the instance is cluster-scoped", n.ID(), obj.GetKind(), obj.GetName())
+	}
+	// Pre-write duplicate-identity guard: claim this object's identity BEFORE
+	// the SSA write. If another node already claimed it this walk, refuse now so
+	// the second node cannot clobber the first's object (RGD path) or force-
+	// reclaim its fields forever (standalone-Graph path). The identity key
+	// matches validateAppliedIdentities (apiVersion/kind/namespace/name); the
+	// owner is the frame-qualified node path so a legitimate re-claim by the same
+	// node is allowed while a cross-node collision is a hard error.
+	if s.identityClaims != nil {
+		gvk := obj.GroupVersionKind()
+		identityKey := fmt.Sprintf("%s/%s/%s/%s", gvk.GroupVersion().String(), gvk.Kind, obj.GetNamespace(), obj.GetName())
+		if err := s.identityClaims.claim(identityKey, s.qualifiedPath(n.ID())); err != nil {
+			return err
+		}
 	}
 	s.stampKROMeta(rt, n, obj, i, size)
 	if s.LabelInjector != nil {
