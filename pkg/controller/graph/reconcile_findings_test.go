@@ -238,7 +238,207 @@ func TestIntendedContributions_MatchesExecutorFieldManager(t *testing.T) {
 		"write-ahead FieldManager must match the executor's, or Release cannot correlate the ledger entry")
 }
 
-// lostStatusWriteClient drops the FIRST N status Patch calls (returning nil so
+// subgraphProgram wraps one or more child programs as inline subgraph
+// (NodeKindGraph) nodes at the root, mirroring how the compiler emits a
+// `graph:` node (Kind=NodeKindGraph, SubProgram=<child>). Each entry's key is
+// the subgraph node ID; the value is the compiled child Program. Used to build
+// realistic nested-frame runtimes for the write-ahead projection tests.
+func subgraphProgram(children map[string]*compiler.Program) *compiler.Program {
+	nodes := make(map[string]*compiler.Node, len(children))
+	order := make([]string, 0, len(children))
+	for id, child := range children {
+		nodes[id] = &compiler.Node{ID: id, Kind: compiler.NodeKindGraph, SubProgram: child}
+		order = append(order, id)
+	}
+	return &compiler.Program{Nodes: nodes, TopologicalOrder: order}
+}
+
+// patchProgram builds a minimal compiled Program with a single static Patch
+// node whose rendered target identity is (apiVersion, kind, namespace, name).
+func patchProgram(nodeID, apiVersion, kind, namespace, name string) *compiler.Program {
+	obj := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": apiVersion,
+		"kind":       kind,
+		"metadata": map[string]any{
+			"name":      name,
+			"namespace": namespace,
+		},
+		"data": map[string]any{"k": "v"},
+	}}
+	node := &compiler.Node{
+		ID:         nodeID,
+		Kind:       compiler.NodeKindPatch,
+		Namespaced: namespace != "",
+		Object:     obj,
+	}
+	return &compiler.Program{
+		Nodes:            map[string]*compiler.Node{nodeID: node},
+		TopologicalOrder: []string{nodeID},
+	}
+}
+
+// TestIntendedManagedResources_RecursesSubgraphs pins the tracking.go:137 fix:
+// a template node declared inside an inline subgraph is applied by the executor
+// (applySubgraph) but, before the fix, had NO write-ahead inventory entry — a
+// crash between Apply and the post-apply status persist would orphan it. The
+// projection must recurse subgraph frames to arbitrary depth, qualifying each
+// child NodeID with the subgraph prefix exactly as the executor records it.
+func TestIntendedManagedResources_RecursesSubgraphs(t *testing.T) {
+	t.Parallel()
+	g := graph("g") // namespace "default"
+
+	t.Run("one level deep qualifies sub/child", func(t *testing.T) {
+		t.Parallel()
+		child := templateProgram("child", "example.com/v1", "Widget", "default", "w")
+		prog := subgraphProgram(map[string]*compiler.Program{"sub": child})
+		rt := krotruntime.New(prog, g)
+
+		got := intendedManagedResources(rt)
+		require.Len(t, got, 1, "the subgraph's template node must be projected")
+		assert.Equal(t, "sub/child", got[0].NodeID, "child NodeID is qualified with the subgraph prefix")
+		assert.Equal(t, "example.com/v1", got[0].APIVersion)
+		assert.Equal(t, "Widget", got[0].Kind)
+		assert.Equal(t, "default", got[0].Namespace)
+		assert.Equal(t, "w", got[0].Name)
+		assert.Empty(t, got[0].UID, "pre-apply intent carries no UID")
+	})
+
+	t.Run("two levels deep qualifies subA/subB/leaf", func(t *testing.T) {
+		t.Parallel()
+		leaf := templateProgram("leaf", "example.com/v1", "Widget", "default", "w")
+		inner := subgraphProgram(map[string]*compiler.Program{"subB": leaf})
+		prog := subgraphProgram(map[string]*compiler.Program{"subA": inner})
+		rt := krotruntime.New(prog, g)
+
+		got := intendedManagedResources(rt)
+		require.Len(t, got, 1, "a template nested two subgraphs deep must be projected")
+		assert.Equal(t, "subA/subB/leaf", got[0].NodeID, "nested NodeIDs stack the subgraph prefix")
+		assert.Equal(t, "Widget", got[0].Kind)
+		assert.Equal(t, "w", got[0].Name)
+	})
+
+	t.Run("top-level and nested template both projected", func(t *testing.T) {
+		t.Parallel()
+		child := templateProgram("child", "example.com/v1", "Gadget", "default", "gg")
+		prog := subgraphProgram(map[string]*compiler.Program{"sub": child})
+		// Add a top-level template alongside the subgraph node.
+		prog.Nodes["top"] = templateProgram("top", "example.com/v1", "Widget", "default", "w").Nodes["top"]
+		prog.TopologicalOrder = []string{"top", "sub"}
+		rt := krotruntime.New(prog, g)
+
+		got := intendedManagedResources(rt)
+		require.Len(t, got, 2)
+		byNode := map[string]expv1alpha1.ManagedResource{}
+		for _, mr := range got {
+			byNode[mr.NodeID] = mr
+		}
+		require.Contains(t, byNode, "top")
+		require.Contains(t, byNode, "sub/child")
+		assert.Equal(t, "Widget", byNode["top"].Kind)
+		assert.Equal(t, "Gadget", byNode["sub/child"].Kind)
+	})
+
+	t.Run("dynamic-no-namespace child is still skipped inside a subgraph", func(t *testing.T) {
+		t.Parallel()
+		dynObj := &unstructured.Unstructured{Object: map[string]any{
+			"apiVersion": "example.com/v1",
+			"kind":       "Widget",
+			"metadata":   map[string]any{"name": "w"},
+		}}
+		dynNode := &compiler.Node{
+			ID:         "dyn",
+			Kind:       compiler.NodeKindTemplate,
+			DynamicGVK: true,
+			Namespaced: false,
+			Object:     dynObj,
+		}
+		child := &compiler.Program{
+			Nodes:            map[string]*compiler.Node{"dyn": dynNode},
+			TopologicalOrder: []string{"dyn"},
+		}
+		prog := subgraphProgram(map[string]*compiler.Program{"sub": child})
+		rt := krotruntime.New(prog, g)
+
+		got := intendedManagedResources(rt)
+		assert.Empty(t, got, "the dynamic-no-namespace skip must hold inside a subgraph frame too")
+	})
+}
+
+// TestIntendedContributions_RecursesSubgraphs is the patch twin of
+// TestIntendedManagedResources_RecursesSubgraphs: a patch node inside an inline
+// subgraph must be projected, and its FieldManager MUST equal the executor's
+// for the QUALIFIED node path (prefix+localID) — the executor derives it from
+// patchFieldManager(uid, s.qualifiedPath(n.ID())) where qualifiedPath =
+// nodePrefix+id, and applySubgraph extends nodePrefix by "<subID>/". If this
+// drifts, the write-ahead ledger entry never correlates with the contribution
+// Release later looks for.
+func TestIntendedContributions_RecursesSubgraphs(t *testing.T) {
+	t.Parallel()
+	g := graph("g") // namespace "default"
+	g.SetUID(types.UID("graph-uid-123"))
+
+	t.Run("one level deep field manager matches executor for sub/patch", func(t *testing.T) {
+		t.Parallel()
+		child := patchProgram("patch", "v1", "ConfigMap", "default", "target")
+		prog := subgraphProgram(map[string]*compiler.Program{"sub": child})
+		rt := krotruntime.New(prog, g)
+
+		got := intendedContributions(rt)
+		require.Len(t, got, 1, "the subgraph's patch node contribution must be projected")
+		c := got[0]
+		assert.Equal(t, "v1", c.APIVersion)
+		assert.Equal(t, "ConfigMap", c.Kind)
+		assert.Equal(t, "default", c.Namespace)
+		assert.Equal(t, "target", c.Name)
+		// The crux: field manager is byte-identical to the executor's for the
+		// QUALIFIED path "sub/patch", not the bare local id.
+		assert.Equal(t, executor.PatchFieldManager("graph-uid-123", "sub/patch"), c.FieldManager,
+			"write-ahead FieldManager must match the executor's qualified-path derivation")
+		// And it must NOT be the (wrong) bare-id derivation.
+		assert.NotEqual(t, executor.PatchFieldManager("graph-uid-123", "patch"), c.FieldManager,
+			"a bare-id field manager would not correlate with the executor's qualified apply")
+	})
+
+	t.Run("two levels deep field manager matches executor for subA/subB/patch", func(t *testing.T) {
+		t.Parallel()
+		leaf := patchProgram("patch", "v1", "ConfigMap", "default", "target")
+		inner := subgraphProgram(map[string]*compiler.Program{"subB": leaf})
+		prog := subgraphProgram(map[string]*compiler.Program{"subA": inner})
+		rt := krotruntime.New(prog, g)
+
+		got := intendedContributions(rt)
+		require.Len(t, got, 1)
+		assert.Equal(t, executor.PatchFieldManager("graph-uid-123", "subA/subB/patch"), got[0].FieldManager,
+			"nested patch field managers stack the subgraph prefix, matching the executor")
+	})
+
+	t.Run("dynamic-no-namespace patch child is still skipped inside a subgraph", func(t *testing.T) {
+		t.Parallel()
+		dynObj := &unstructured.Unstructured{Object: map[string]any{
+			"apiVersion": "example.com/v1",
+			"kind":       "Widget",
+			"metadata":   map[string]any{"name": "target"},
+			"data":       map[string]any{"k": "v"},
+		}}
+		dynNode := &compiler.Node{
+			ID:         "dynp",
+			Kind:       compiler.NodeKindPatch,
+			DynamicGVK: true,
+			Namespaced: false,
+			Object:     dynObj,
+		}
+		child := &compiler.Program{
+			Nodes:            map[string]*compiler.Node{"dynp": dynNode},
+			TopologicalOrder: []string{"dynp"},
+		}
+		prog := subgraphProgram(map[string]*compiler.Program{"sub": child})
+		rt := krotruntime.New(prog, g)
+
+		got := intendedContributions(rt)
+		assert.Empty(t, got, "the dynamic-no-namespace skip must hold for patch nodes inside a subgraph too")
+	})
+}
+
 // the reconciler believes they succeeded) then delegates. It simulates a lost
 // status write — the exact crash window Finding A guards.
 //
