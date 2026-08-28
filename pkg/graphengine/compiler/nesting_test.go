@@ -83,6 +83,32 @@ func TestCompile_Nesting(t *testing.T) {
 		assert.Less(t, indexOf(prog.TopologicalOrder, "cfg"), indexOf(prog.TopologicalOrder, "sub"))
 	})
 
+	t.Run("child capturing an ancestor patch node is rejected", func(t *testing.T) {
+		t.Parallel()
+		// Finding 2: a patch node publishes no value into scope. A child
+		// frame that captures the ancestor patch node must be rejected the
+		// same way a same-frame reference is — the current-frame-only node
+		// map check missed the cross-frame case.
+		child := generator.NewGraph("child",
+			generator.WithTemplate("cm", map[string]any{
+				"apiVersion": "v1", "kind": "ConfigMap",
+				"metadata": map[string]any{"name": "child-cm"},
+				"data":     map[string]any{"v": "${p.data.k}"}, // captures ancestor patch node p
+			}),
+		)
+		g := generator.NewGraph("g",
+			generator.WithNamespace("default"),
+			generator.WithPatch("p", "v1", "ConfigMap", "existing", map[string]any{
+				"data": map[string]any{"k": "v"},
+			}),
+			generator.WithSubgraph("sub", child),
+		)
+		_, err := newTestCompiler(t).Compile(g)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(),
+			`patch node "p" does not publish a value into scope and cannot be referenced in CEL expressions`)
+	})
+
 	t.Run("parent references a child output through the subgraph node ID", func(t *testing.T) {
 		t.Parallel()
 		child := generator.NewGraph("child",

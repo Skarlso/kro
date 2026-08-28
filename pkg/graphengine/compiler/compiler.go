@@ -224,9 +224,14 @@ func (ctx *CompilationContext) compileFrame(apiNodes []expv1alpha1.Node, isRoot 
 
 	// Declare every local ID up front so a child frame compiled mid-build
 	// (when we recurse into a subgraph node below) can resolve forward
-	// references to this frame's later nodes.
+	// references to this frame's later nodes. Record which of those are Patch
+	// nodes too, so an ancestor capture of a patch node is rejected even while
+	// this frame is still mid-build.
 	for i := range apiNodes {
 		ctx.localIDs[apiNodes[i].ID] = struct{}{}
+		if apiNodes[i].Patch != nil {
+			ctx.localPatchIDs[apiNodes[i].ID] = struct{}{}
+		}
 	}
 
 	p := parser.New(ctx.fieldCache)
@@ -258,13 +263,8 @@ func (ctx *CompilationContext) compileFrame(apiNodes []expv1alpha1.Node, isRoot 
 		}
 	}
 
-	// A seed node is only required at the root: a subgraph may legitimately
-	// be driven entirely by captures from its parent.
-	if isRoot {
-		if err := requireInputNode(nodes); err != nil {
-			return nil, nil, err
-		}
-	}
+	// The resolvable-root check is root-only and needs the built DAG, so it
+	// runs after buildDependencyGraph below.
 
 	// The inspector environment knows every local ID, every visible ancestor
 	// ID (captures), iterator names, and `each`. Ancestor refs are valid
@@ -293,6 +293,15 @@ func (ctx *CompilationContext) compileFrame(apiNodes []expv1alpha1.Node, isRoot 
 		return nil, nil, fmt.Errorf("build dependency graph: %w", err)
 	}
 	captured = append(captured, frameCaptured...)
+	// A subgraph may legitimately be driven entirely by captures from its
+	// parent, so it has no local root; only the top-level Graph must have a
+	// resolvable root of its own. Cycles (at any depth) are caught by the
+	// topological sort below.
+	if isRoot {
+		if err := requireResolvableRoot(dependencyGraph); err != nil {
+			return nil, nil, err
+		}
+	}
 	topo, err := dependencyGraph.TopologicalSort()
 	if err != nil {
 		return nil, nil, fmt.Errorf("topological sort: %w", err)
@@ -634,8 +643,10 @@ func (ctx *CompilationContext) analyzeForEach(n *Node, nodes map[string]*Node, i
 	return captured, nil
 }
 
-// analyzeIncludeWhen collects includeWhen dependencies, dropping a node's
-// self-reference so it doesn't create a self-edge in the DAG.
+// analyzeIncludeWhen collects includeWhen dependencies. A node cannot depend
+// on itself here: it must publish (become included) before its own includeWhen
+// can be evaluated, so a self-reference is unsatisfiable and is rejected at
+// compile time.
 func (ctx *CompilationContext) analyzeIncludeWhen(n *Node, nodes map[string]*Node, inspector *ast.Inspector) ([]string, error) {
 	var captured []string
 	for i, expr := range n.IncludeWhen {
@@ -649,7 +660,7 @@ func (ctx *CompilationContext) analyzeIncludeWhen(n *Node, nodes map[string]*Nod
 		captured = append(captured, analysis.captured...)
 		for _, d := range analysis.nodeDeps {
 			if d == n.ID {
-				continue
+				return nil, fmt.Errorf("node %q: includeWhen references its own id %q, which can never be satisfied", n.ID, n.ID)
 			}
 			addDependency(n, d)
 		}
@@ -727,7 +738,11 @@ func (ctx *CompilationContext) extractDependencies(
 		if id == EachVarName {
 			return nil
 		}
-		if targetNode, ok := nodes[id]; ok && targetNode.Kind == NodeKindPatch {
+		// A patch node publishes no value into scope and cannot be referenced
+		// in CEL. Resolve across the ancestor frame chain (mirroring
+		// frameDepth) so a child frame that captures an ancestor patch node is
+		// rejected too — not only references to a patch node in this frame.
+		if ctx.framePatchKind(id) {
 			return fmt.Errorf("patch node %q does not publish a value into scope and cannot be referenced in CEL expressions", id)
 		}
 		if !slices.Contains(expr.References, id) {
