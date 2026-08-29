@@ -222,12 +222,6 @@ func TestSimple_ApplyTemplate_CollectionApplyTolerance(t *testing.T) {
 
 		require.NoError(t, err,
 			"a tolerated update conflict on objects that exist must not hold the node not-ready")
-		// The per-item error is dropped by design (see recordUpdateRejected): a
-		// tolerated update-rejection is silent — the object is present, so the
-		// node converges and the underlying conflict is NOT surfaced as any
-		// returned error. (This pins the corrected comment: the rejection is not
-		// escalated to a hard error, and — the RGD path having no per-node
-		// condition message for a converged node — it is not surfaced at all.)
 		names := make([]string, 0, len(res.Applied))
 		for _, a := range res.Applied {
 			names = append(names, a.Name)
@@ -283,15 +277,13 @@ func TestSimple_ApplyTemplate_CollectionApplyTolerance(t *testing.T) {
 	})
 }
 
-// TestCollectionApplyState_UpdateRejectedIsSilent pins the corrected contract
-// behind the FINDING-1 comment fix: recordUpdateRejected records the live
-// identity (so the item lands in Applied) but records NO item failure and NO
-// hard error — the tolerated update-rejection is intentionally silent and is
-// NOT surfaced as any returned error. The old comment claimed the per-item
-// error was "surfaced in the node's condition message", which was false; this
-// test guards against that false claim creeping back in as behavior (e.g. a
-// well-meaning change that starts returning the dropped error).
-func TestCollectionApplyState_UpdateRejectedIsSilent(t *testing.T) {
+// A rejected UPDATE on an existing item is tolerated: neither a soft item
+// failure nor a hard error, so the node converges rather than wedging on a
+// change retrying can never fix. The rejection is logged and counted
+// (graphengine_item_update_rejected_total) at the call site, but it is NOT
+// carried in the reconcile result, so a converged node with a stale member
+// still reports ready. See the TODO in applyCollectionItem.
+func TestCollectionApplyState_UpdateRejectedIsTolerated(t *testing.T) {
 	t.Parallel()
 
 	st := &collectionApplyState{
@@ -317,8 +309,6 @@ func TestCollectionApplyState_UpdateRejectedIsSilent(t *testing.T) {
 	// sees what actually landed.
 	assert.Same(t, current, desired[0], "the desired slot is replaced with the live object")
 
-	// The tolerated rejection is silent: neither a soft item failure nor a
-	// hard error is recorded, so nothing is surfaced up the walk.
 	assert.NoError(t, st.softError("node"),
 		"a tolerated update-rejection must not be surfaced as a soft not-ready error")
 	assert.NoError(t, st.hardError(),

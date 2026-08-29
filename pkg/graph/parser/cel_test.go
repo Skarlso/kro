@@ -113,6 +113,42 @@ func TestExtractExpressions(t *testing.T) {
 			want:  []exprMatch{{expr: "outer(\"${inner}\")", start: 0, end: 20}},
 		},
 		{
+			// Only double quotes were tracked, so this "${" read as a nested
+			// expression despite being inside a literal.
+			name:  "Literal ${ inside a single-quoted string",
+			input: "${seed.text.contains('${')}",
+			want:  []exprMatch{{expr: "seed.text.contains('${')", start: 0, end: 27}},
+		},
+		{
+			name:  "Nested expression inside single quotes",
+			input: "${outer('${inner}')}",
+			want:  []exprMatch{{expr: "outer('${inner}')", start: 0, end: 20}},
+		},
+		{
+			// A quoted brace must not move the bracket counter.
+			name:  "Braces inside a single-quoted string",
+			input: "${seed.text.contains('}')}",
+			want:  []exprMatch{{expr: "seed.text.contains('}')", start: 0, end: 26}},
+		},
+		{
+			// The opposite delimiter must not toggle the literal state.
+			name:  "Double quote inside a single-quoted string",
+			input: "${seed.text.contains('\"')}",
+			want:  []exprMatch{{expr: "seed.text.contains('\"')", start: 0, end: 26}},
+		},
+		{
+			name:  "Single quote inside a double-quoted string",
+			input: "${seed.text.contains(\"'\")}",
+			want:  []exprMatch{{expr: "seed.text.contains(\"'\")", start: 0, end: 26}},
+		},
+		{
+			// Still a genuine nesting error: the "${" is outside any literal.
+			name:    "Nested expression after a single-quoted string (should error)",
+			input:   "${outer('x', ${inner})}",
+			want:    nil,
+			wantErr: true,
+		},
+		{
 			name:  "Nested closing brace without opening one",
 			input: "${\"text with }} inside\"}",
 			want:  []exprMatch{{expr: "\"text with }} inside\"", start: 0, end: 24}},

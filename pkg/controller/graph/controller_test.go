@@ -169,6 +169,14 @@ func withDeletionTimestamp(g *expv1alpha1.Graph) {
 	g.DeletionTimestamp = &now
 }
 
+// withReadyTrue seeds the conditions a healthy reconcile leaves behind, so a
+// test asserting a flip to False cannot pass on a condition never written.
+func withReadyTrue(g *expv1alpha1.Graph) {
+	m := NewConditionsMarkerFor(g)
+	m.GraphCompiled(1)
+	m.ResourcesConverged()
+}
+
 func withMalformedContributions(g *expv1alpha1.Graph) {
 	if g.Annotations == nil {
 		g.Annotations = map[string]string{}
@@ -288,11 +296,28 @@ func TestReconcile(t *testing.T) {
 			wantErr: "ssa boom",
 		},
 		{
-			name:    "executor delete failure during deletion surfaces a wrapped error",
-			initial: graph("g", withFinalizer, withDeletionTimestamp, withManagedResource),
+			// A blocked teardown keeps its finalizer and requeues forever. The
+			// deletion path used to write no status, so the object kept
+			// reporting Ready=True while orphaning its resources.
+			name:    "executor delete failure during deletion surfaces a wrapped error and flips Ready False",
+			initial: graph("g", withFinalizer, withDeletionTimestamp, withManagedResource, withReadyTrue),
 			compile: &fakeCompiler{program: prog(1)},
-			exec:    &fakeExecutor{deleteErr: errors.New("delete boom")},
+			exec:    &fakeExecutor{deleteErr: errors.New("cannot delete resource \"configmaps\"")},
 			wantErr: "executor delete",
+			after: func(t *testing.T, g *expv1alpha1.Graph) {
+				assert.Equal(t, 1, countFinalizer(g.Finalizers, metadata.GraphFinalizer),
+					"finalizer must be retained while teardown is blocked")
+				rc := findCondition(g.Status.Conditions, ResourcesConverged)
+				require.NotNil(t, rc)
+				assert.Equal(t, metav1.ConditionFalse, rc.Status)
+				require.NotNil(t, rc.Reason)
+				assert.Equal(t, "TeardownFailed", *rc.Reason)
+				require.NotNil(t, rc.Message)
+				assert.Contains(t, *rc.Message, "configmaps")
+				ready := findCondition(g.Status.Conditions, Ready)
+				require.NotNil(t, ready)
+				assert.Equal(t, metav1.ConditionFalse, ready.Status)
+			},
 		},
 		{
 			// A clean apply that drops a previously-tracked resource makes

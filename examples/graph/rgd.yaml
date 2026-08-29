@@ -10,13 +10,13 @@
 #
 # ─── Architecture ─────────────────────────────────────────────────────────────
 #
-#   L0 (this Graph)                — creates the RGD CRD, watches all RGDs
+#   L0 (this Graph)                — reads the RGD CRD, watches all RGDs
 #   └─ L1 (per-RGD Graph)         — validates, creates Kind CRD, watches instances
 #      └─ L2 (per-instance Graph)  — manages resources, writes instance status
 #
 # ─── L0 → L1: Graph Per RGD ──────────────────────────────────────────────────
 #
-#   L0 uses watch: to observe all RGD objects, then forEach stamps one child
+#   L0 uses ref: to observe all RGD objects, then forEach stamps one child
 #   Graph per RGD. The child Graph's name is derived from the RGD name,
 #   creating a stable 1:1 mapping. Each child gets an ownerReference back to
 #   its RGD for garbage collection.
@@ -63,6 +63,12 @@
 #   Expressions inside L2's CEL-constructed node list survive as opaque strings
 #   and are evaluated by L2's controller.
 #
+# ─── Permissions ──────────────────────────────────────────────────────────────
+#
+# A Graph applies while impersonating a ServiceAccount in its OWN namespace:
+# spec.serviceAccountName, or "default" when unset. For testing, it's easier
+# to use an admin service account. Otherwise, restrict it to the necessary
+# resources.
 # ---------------------------------------------------------------------------
 apiVersion: kro.run/v1alpha1
 kind: Graph
@@ -70,49 +76,17 @@ metadata:
   name: rgd
   namespace: kro-system
 spec:
+  serviceAccountName: rgd-controller
   nodes:
-    # ─── L0: Create the ResourceGraphDefinition CRD ──────────────────────────
+    # ─── L0: Read the ResourceGraphDefinition CRD ────────────────────────────
+    # READ-ONLY: a `template:` here would make this Graph the owner of Kro's own
+    # CRD, so deleting it would delete every RGD. Exists only to gate watchRgds.
     - id: rgdCrd
-      template:
+      ref:
         apiVersion: apiextensions.k8s.io/v1
         kind: CustomResourceDefinition
         metadata:
           name: resourcegraphdefinitions.kro.run
-        spec:
-          group: kro.run
-          names:
-            plural: resourcegraphdefinitions
-            singular: resourcegraphdefinition
-            kind: ResourceGraphDefinition
-            listKind: ResourceGraphDefinitionList
-          scope: Cluster
-          versions:
-            - name: v1alpha1
-              served: true
-              storage: true
-              schema:
-                openAPIV3Schema:
-                  type: object
-                  x-kubernetes-preserve-unknown-fields: true
-              subresources:
-                status: {}
-              additionalPrinterColumns:
-                - name: APIVERSION
-                  type: string
-                  jsonPath: .spec.schema.apiVersion
-                - name: KIND
-                  type: string
-                  jsonPath: .spec.schema.kind
-                - name: STATE
-                  type: string
-                  jsonPath: .status.state
-                - name: TOPOLOGICALORDER
-                  type: string
-                  priority: 1
-                  jsonPath: .status.topologicalOrder
-                - name: AGE
-                  type: date
-                  jsonPath: .metadata.creationTimestamp
 
     # ─── L0: Watch all RGD objects (gated on CRD being established) ──────────
     - id: watchRgds

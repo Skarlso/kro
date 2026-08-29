@@ -6,6 +6,12 @@
 #
 # Add or remove the label on a namespace and the policy appears or disappears.
 # Delete the Graph and all managed NetworkPolicies are cleaned up.
+#
+# ─── Permissions ──────────────────────────────────────────────────────────────
+#
+# A Graph applies while impersonating a ServiceAccount in its OWN namespace:
+# spec.serviceAccountName, or "default" when unset. Use a service account with
+# the following permissions: namespaces: get, list, watch. networkpolicies: all.
 # ---------------------------------------------------------------------------
 apiVersion: kro.run/v1alpha1
 kind: Graph
@@ -13,6 +19,7 @@ metadata:
   name: namespace-decorator
   namespace: kro-system
 spec:
+  serviceAccountName: namespace-decorator
   nodes:
     - id: namespaces
       ref:

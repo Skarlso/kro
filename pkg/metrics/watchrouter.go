@@ -48,4 +48,13 @@ var (
 		},
 		[]string{"gvr"},
 	)
+	// GraphItemUpdateRejectedTotal counts collection items whose UPDATE was
+	// rejected and tolerated, leaving them stale while the node still converges.
+	GraphItemUpdateRejectedTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "graphengine_item_update_rejected_total",
+			Help: "Total collection items whose update was rejected and tolerated, leaving the item stale, by GVR",
+		},
+		[]string{"gvr"},
+	)
 )

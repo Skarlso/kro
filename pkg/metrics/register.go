@@ -63,6 +63,7 @@ func Register(registry prometheus.Registerer) {
 		GraphWatchRequestCount,
 		GraphRouteTotal,
 		GraphRouteMatchTotal,
+		GraphItemUpdateRejectedTotal,
 
 		// Instance controller
 		InstanceStateTransitionsTotal,

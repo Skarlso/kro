@@ -140,45 +140,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 	if !g.DeletionTimestamp.IsZero() {
 		logger.V(1).Info("graph is deleting")
-		// Resolve the executor from the identity the Graph ACTUALLY applied
-		// under (persisted in status), not the current spec.serviceAccountName:
-		// editing that field between apply and delete would otherwise run
-		// teardown as an identity that can no longer see the resources, orphaning
-		// children and wedging the finalizer. Fall back to the current spec when
-		// no applied identity was recorded (never applied, or a pre-field kro).
-		ex, err := r.teardownExecutorFor(&g)
-		if err != nil {
-			return ctrl.Result{}, fmt.Errorf("resolve impersonated executor: %w", err)
-		}
-		// Delete operates entirely from the persisted tracking record.
-		// No compile, no resolve — a Graph whose spec was edited
-		// (rename, forEach shrunk, node dropped) still gets every
-		// resource it ever applied removed.
-		if len(g.Status.ManagedResources) > 0 {
-			if err := ex.Delete(ctx, g.Status.ManagedResources); err != nil {
-				return ctrl.Result{}, fmt.Errorf("executor delete: %w", err)
+		if err := r.reconcileDeletion(ctx, req, &g); err != nil {
+			// Without this, the graph stays at Ready=True forever.
+			NewConditionsMarkerFor(&g).ResourcesTeardownFailed(err.Error())
+			if statusErr := r.updateStatus(ctx, &g); statusErr != nil {
+				logger.Error(statusErr, "failed to surface teardown failure in status")
 			}
-		}
-		// Release every recorded patch contribution so the field managers
-		// relinquish their fields. Targets survive — patches never own them.
-		contribs, err := ReadContributions(&g)
-		if err != nil {
-			return ctrl.Result{}, fmt.Errorf("read patch contributions on delete: %w", err)
-		}
-		if len(contribs) > 0 {
-			if err := ex.Release(ctx, contribs); err != nil {
-				return ctrl.Result{}, fmt.Errorf("executor release: %w", err)
-			}
-		}
-		r.Registry.Delete(req.NamespacedName)
-		r.backoff.reset(req.NamespacedName)
-		if r.Router != nil {
-			r.Router.RemoveGraph(req.NamespacedName)
-		}
-		if r.SchemaWatcher != nil {
-			r.SchemaWatcher.RemoveGraph(req.NamespacedName)
-		}
-		if err := r.setUnmanaged(ctx, &g); err != nil {
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{}, nil
@@ -692,6 +659,40 @@ func (r *Reconciler) updateStatus(ctx context.Context, g *expv1alpha1.Graph) err
 	})
 }
 
+// reconcileDeletion tears a Graph down and drops its finalizer. Failures are
+// returned.
+func (r *Reconciler) reconcileDeletion(ctx context.Context, req ctrl.Request, g *expv1alpha1.Graph) error {
+	ex, err := r.teardownExecutorFor(g)
+	if err != nil {
+		return fmt.Errorf("resolve impersonated executor: %w", err)
+	}
+	if len(g.Status.ManagedResources) > 0 {
+		if err := ex.Delete(ctx, g.Status.ManagedResources); err != nil {
+			return fmt.Errorf("executor delete: %w", err)
+		}
+	}
+	// Release every recorded patch contribution so the field managers
+	// relinquish their fields. Targets survive — patches never own them.
+	contribs, err := ReadContributions(g)
+	if err != nil {
+		return fmt.Errorf("read patch contributions on delete: %w", err)
+	}
+	if len(contribs) > 0 {
+		if err := ex.Release(ctx, contribs); err != nil {
+			return fmt.Errorf("executor release: %w", err)
+		}
+	}
+	r.Registry.Delete(req.NamespacedName)
+	r.backoff.reset(req.NamespacedName)
+	if r.Router != nil {
+		r.Router.RemoveGraph(req.NamespacedName)
+	}
+	if r.SchemaWatcher != nil {
+		r.SchemaWatcher.RemoveGraph(req.NamespacedName)
+	}
+	return r.setUnmanaged(ctx, g)
+}
+
 // impersonatesControllerSelf reports whether g would apply its resources under
 // the kro controller's OWN ServiceAccount identity. Guards the escalation where
 // a Graph in the controller's namespace names the controller SA (or the
@@ -823,4 +824,11 @@ func (m *ConditionsMarker) ResourcesApplyFailed(msg string) {
 // True while an orphan lingers.
 func (m *ConditionsMarker) ResourcesPruneFailed(msg string) {
 	m.cs.SetFalse(ResourcesConverged, "PruneFailed", msg)
+}
+
+// ResourcesTeardownFailed marks ResourcesConverged=False/"TeardownFailed" when
+// a deleting Graph could not remove a tracked resource, typically because the
+// pinned ServiceAccount lacks delete RBAC.
+func (m *ConditionsMarker) ResourcesTeardownFailed(msg string) {
+	m.cs.SetFalse(ResourcesConverged, "TeardownFailed", msg)
 }

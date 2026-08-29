@@ -221,7 +221,7 @@ Node modifiers provide conditional logic, health checking, and repetition. In th
 
 - `forEach`: Supported on `template` and `def` nodes. Stamps one instance per element (or cartesian product across multiple dimensions). Explicitly rejected on `graph`, `patch`, and `ref` nodes.
 - `includeWhen`: Supported on `template`, `ref`, `def`, and `patch` nodes. When false, the node is skipped (and template resources are pruned). The skip is contagious — nodes depending on a skipped node are skipped too, rather than erroring on the missing reference. Rejected on `graph` nodes.
-- `readyWhen`: Supported on `template`, `ref`, `def`, and `patch` nodes. Evaluated against scope to determine whether the node is ready. Rejected on `graph` nodes.
+- `readyWhen`: Supported on `template`, `ref`, `def`, and `patch` nodes. Evaluated against scope to determine whether the node is ready. Rejected on `graph` nodes. On a **collection** node (`forEach`) each expression is evaluated once per item with `each` bound to that item, and the node is ready only when every item satisfies every expression: `readyWhen: ["${each.status.phase == 'Running'}"]`. An aggregate over the node's own name (`${items.all(i, ...)}`) does not compile, because the element type is not registered, so use `each`.
 - `propagateWhen`: Planned / Not yet implemented (deferred to KREP-006).
 
 | Modifier        | Supported Node Types             | Question it answers       | When false                           | Status / Defined in  |

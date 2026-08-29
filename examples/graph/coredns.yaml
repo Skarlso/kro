@@ -6,6 +6,9 @@
 #
 # Resources are evaluated in dependency order inferred from CEL references:
 #   ServiceAccount → ClusterRole → ClusterRoleBinding → ConfigMap → Deployment → Service
+#
+# NOTE: This will REMOVE your cluster's core-dns upon deletion!!!! For testing
+#       purposes only!
 # ---------------------------------------------------------------------------
 apiVersion: kro.run/v1alpha1
 kind: Graph

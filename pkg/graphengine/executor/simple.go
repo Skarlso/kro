@@ -44,6 +44,7 @@ import (
 	"github.com/kubernetes-sigs/kro/pkg/graphengine/runtime"
 	"github.com/kubernetes-sigs/kro/pkg/graphengine/watchrouter"
 	"github.com/kubernetes-sigs/kro/pkg/metadata"
+	"github.com/kubernetes-sigs/kro/pkg/metrics"
 )
 
 // defaultApplyConcurrency is the default concurrency limit for parallel
@@ -878,11 +879,21 @@ func (s *Simple) applyCollectionItem(ctx context.Context, rt *runtime.Runtime, n
 			// the live identity and let the collection converge rather than block
 			// the node forever on an unfixable update. (Integration coverage:
 			// collection_test.go deep-chaining scale up/down relies on this.)
-			// The per-item error is intentionally NOT surfaced: the object is
-			// present, so the node converges (this item is recorded in Applied)
-			// and the failure is neither escalated to a walk-aborting hard error
-			// nor returned as a soft not-ready. recordUpdateRejected therefore
-			// drops the error by design.
+			//
+			// The item is now stale, though, and nothing in the reconcile result
+			// says so: the node converges and the instance reports ready. Log
+			// and count it so the divergence is at least observable.
+			//
+			// TODO: needs further thinking. A log line and a counter are
+			// ephemeral; an operator only sees them if they happen to be
+			// looking. Surfacing this properly likely means tracking degraded
+			// items separately (on ApplyResult, and from there in status) so a
+			// converged-but-diverged node is distinguishable from a healthy one.
+			metrics.GraphItemUpdateRejectedTotal.WithLabelValues(m.gvr.String()).Inc()
+			log.FromContext(ctx).Error(err,
+				"collection item update rejected; item is present but stale (tolerated, node still converges)",
+				"node", s.qualifiedPath(n.ID()),
+				"namespace", obj.GetNamespace(), "name", obj.GetName())
 			st.recordUpdateRejected(i, managedResourceFrom(n, current), desired, current)
 			return nil
 		}

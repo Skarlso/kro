@@ -97,6 +97,7 @@ var registeredFamilies = []string{
 
 	// Graph-engine watch router
 	"graphengine_route_match_total",
+	"graphengine_item_update_rejected_total",
 	"graphengine_route_total",
 	"graphengine_watch_owner_count",
 	"graphengine_watch_request_count",

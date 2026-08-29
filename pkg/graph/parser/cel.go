@@ -58,7 +58,10 @@ func extractExpressions(str string) ([]exprMatch, error) {
 		// nested expressions, dictionary building expressions, and string literals
 		bracketCount := 1
 		endIdx := startIdx + len(exprStart)
-		inStringLiteral := false
+		// Delimiter that opened the literal we are inside, 0 when outside one.
+		// CEL accepts both '...' and "..."; tracking only double quotes made
+		// `${s.contains('${')}` look like a nested expression.
+		var quoteChar byte
 		escapeNext := false
 
 		for endIdx < len(str) {
@@ -72,16 +75,22 @@ func extractExpressions(str string) ([]exprMatch, error) {
 			}
 
 			// Check for escape character inside string literals
-			if inStringLiteral && c == '\\' {
+			if quoteChar != 0 && c == '\\' {
 				escapeNext = true
 				endIdx++
 				continue
 			}
 
-			// Handle string literal boundaries
-			if c == '"' {
-				inStringLiteral = !inStringLiteral
-			} else if !inStringLiteral {
+			// Only the opening delimiter closes the literal, so a '"' inside
+			// '...' is ordinary text.
+			if c == '"' || c == '\'' {
+				switch quoteChar {
+				case 0:
+					quoteChar = c
+				case c:
+					quoteChar = 0
+				}
+			} else if quoteChar == 0 {
 				// Only count braces when not inside a string literal
 				if c == '{' {
 					bracketCount++
@@ -91,10 +100,9 @@ func extractExpressions(str string) ([]exprMatch, error) {
 						break
 					}
 				} else if endIdx+1 < len(str) && str[endIdx:endIdx+2] == "${" {
-					// Allow nested expressions, but only if they are escaped with quotes
-					if str[endIdx-1] != '"' {
-						return nil, ErrNestedExpression
-					}
+					// Outside any literal, so genuinely nested. The quoted form
+					// ${outer("${inner}")} never reaches here.
+					return nil, ErrNestedExpression
 				}
 			}
 			endIdx++
