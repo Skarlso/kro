@@ -8,62 +8,15 @@
 # two Graphs that each want to own the same ConfigMap. The Singleton
 # controller (itself a Graph) resolves which one wins based on priority.
 #
-# 1. Install the CRD and the Graph:
+# When multiple Singletons target the same resource (same GVK + namespace
+# + name), the highest priority wins. Ties broken by name (lowest wins).
+# If the winner is deleted, the next-highest claimant takes over with zero
+# downtime — the resource UID never changes.
 #
-#      kubectl apply -f singleton.yaml
-#      kubectl wait --for condition=established crd/singletons.kro.run
-#
-#    The Graph parks on ApplyFailed until step 2.
-#
-# 2. Grant the impersonated identity (spec.serviceAccountName, in the Graph's
-#    OWN namespace) its permissions. Must run AFTER step 1: `--resource=singletons`
-#    is resolved through discovery, so the CRD has to exist. The Graph then
-#    self-heals.
-#
-#      kubectl -n kro-system create serviceaccount singleton-controller
-#      kubectl create clusterrole singleton-controller \
-#        --verb=get,list,watch --resource=singletons \
-#        --verb=get,update,patch --resource=singletons/status \
-#        --verb=get,list,watch,create,update,patch,delete --resource=configmaps
-#      kubectl create clusterrolebinding singleton-controller \
-#        --clusterrole=singleton-controller \
-#        --serviceaccount=kro-system:singleton-controller
-#
-#    The configmaps grant is narrow because this example only claims ConfigMaps.
-#    A general-purpose Singleton controller would need write access to every
-#    Kind its claimants can name.
-#
-# 3. Create two competing claims:
-#
-#      kubectl create namespace monitoring
-#      kubectl apply -f - <<'EOF'
-#      apiVersion: kro.run/v1alpha1
-#      kind: Singleton
-#      metadata: {name: team-a-dashboard, namespace: kro-system}
-#      spec:
-#        priority: 100
-#        template:
-#          apiVersion: v1
-#          kind: ConfigMap
-#          metadata: {name: webapp-dashboard, namespace: monitoring}
-#          data: {dashboard.json: '{ "title": "Team A Dashboard" }'}
-#      ---
-#      apiVersion: kro.run/v1alpha1
-#      kind: Singleton
-#      metadata: {name: team-b-dashboard, namespace: kro-system}
-#      spec:
-#        priority: 200
-#        template:
-#          apiVersion: v1
-#          kind: ConfigMap
-#          metadata: {name: webapp-dashboard, namespace: monitoring}
-#          data: {dashboard.json: '{ "title": "Team B Dashboard" }'}
-#      EOF
-#
-#      kubectl -n monitoring get cm webapp-dashboard -o yaml   # Team B's content
-#      kubectl -n kro-system delete singleton team-b-dashboard
-#      kubectl -n monitoring get cm webapp-dashboard -o yaml   # Team A takes over,
-#                                                              # same UID
+# STATUS: the status-writeback node below uses a forEach patch to fan status
+# out to EVERY claimant (not just the first), and an empty claim list is a
+# no-op — each Singleton CR gets its own active/claim status reflecting whether
+# it is the current winner for its target identity.
 # ---------------------------------------------------------------------------
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
@@ -178,22 +131,25 @@ spec:
           namespace: ${c.template.metadata.namespace}
         data: ${c.template.data}
 
-    # Status writeback. LIMITATION: patches only claims[0], so one Singleton
-    # gets a status. forEach is rejected on patch nodes, so an unbounded
-    # fan-out is not expressible. Winner selection above is unaffected.
-    # includeWhen guards the claims[0] index against an empty claim set.
+    # Status writeback — fan out to EVERY claimant via a forEach patch. Each
+    # Singleton CR receives its own status: active=true only for the winner of
+    # its target identity, claim=<the contested identity>. An empty claim list
+    # renders zero patches (no-op). The patch targets each claimant's own CR by
+    # name, so drift re-enqueues via the `singletons` ref node above.
     - id: singletonStatus
+      forEach:
+        - c: ${claims}
       includeWhen:
-        - ${size(claims) > 0}
+        - ${size(claims) > 0}        
       patch:
         apiVersion: kro.run/v1alpha1
         kind: Singleton
         metadata:
-          name: ${claims[0].name}
-          namespace: ${claims[0].namespace}
+          name: ${c.name}
+          namespace: ${c.namespace}
         status:
           active: >-
-            ${claims[0].key == claims.filter(x, x.identity == claims[0].identity)
+            ${c.key == claims.filter(x, x.identity == c.identity)
               .sortBy(x, x.creationTimestamp)
               .sortBy(x, -x.priority)[0].key}
-          claim: "${claims[0].identity}"
+          claim: "${c.identity}"

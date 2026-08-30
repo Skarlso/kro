@@ -62,6 +62,14 @@ type CompilationContext struct {
 	// still resolve forward references to this frame's later nodes.
 	localIDs map[string]struct{}
 
+	// localPatchIDs is the subset of localIDs whose node is a Patch. Patch
+	// nodes contribute fields to a target they do not own and publish no value
+	// into scope, so they cannot be referenced in CEL expressions — including
+	// by a nested child frame that captures the ancestor ID. Populated up front
+	// (alongside localIDs) so the cross-frame check works even while an
+	// ancestor frame is still mid-build.
+	localPatchIDs map[string]struct{}
+
 	// nodeSchemaOverrides declares per-node publication schemas supplied by
 	// the caller via WithNodeSchemaOverride. A Def node with an override
 	// publishes that schema instead of the value-shape inference of
@@ -80,6 +88,7 @@ type CompilationContext struct {
 	// author-status writeback node, but sharing keeps the semantics uniform.
 	softDepNodes        map[string]struct{}
 	dataPendingTolerant map[string]struct{}
+	selfWatchExempt     map[string]struct{}
 
 	costLimit uint64
 }
@@ -94,6 +103,7 @@ func newRootContext(sr resolver.SchemaResolver, rm meta.RESTMapper) *Compilation
 		restMapper:          rm,
 		fieldCache:          schema.NewCache(),
 		localIDs:            map[string]struct{}{},
+		localPatchIDs:       map[string]struct{}{},
 		nodeSchemaOverrides: map[string]*spec.Schema{},
 		literalNodes:        map[string]struct{}{},
 	}
@@ -110,12 +120,30 @@ func (ctx *CompilationContext) child() *CompilationContext {
 		restMapper:          ctx.restMapper,
 		fieldCache:          ctx.fieldCache,
 		localIDs:            map[string]struct{}{},
+		localPatchIDs:       map[string]struct{}{},
 		nodeSchemaOverrides: ctx.nodeSchemaOverrides,
 		literalNodes:        ctx.literalNodes,
 		softDepNodes:        ctx.softDepNodes,
 		dataPendingTolerant: ctx.dataPendingTolerant,
+		selfWatchExempt:     ctx.selfWatchExempt,
 		costLimit:           ctx.costLimit,
 	}
+}
+
+// framePatchKind reports whether id resolves — following lexical
+// shadowing (nearest frame wins) — to a Patch node in this frame or any
+// enclosing frame. It mirrors frameDepth's walk so an ancestor capture of a
+// patch node is rejected the same way a local reference is.
+func (ctx *CompilationContext) framePatchKind(id string) bool {
+	for c := ctx; c != nil; c = c.parent {
+		if _, ok := c.localIDs[id]; ok {
+			// Nearest frame wins: once id is declared here, that
+			// declaration shadows any same-named ancestor node.
+			_, isPatch := c.localPatchIDs[id]
+			return isPatch
+		}
+	}
+	return false
 }
 
 // frameDepth reports how many frames up id is declared: 0 if local to this

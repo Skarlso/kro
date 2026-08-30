@@ -624,6 +624,39 @@ func TestRouteEvent_Collection(t *testing.T) {
 			},
 			want: []string{"a"},
 		},
+		{
+			// A DoesNotExist selector matches the EMPTY label set. An object that
+			// gains the label on update (old={} -> new={app:svc}) leaves the
+			// selector, so the previously-matched owner must still be enqueued
+			// via the empty OldLabels set. A len(OldLabels)>0 guard would drop it.
+			name: "empty-old-labels-match-doesnotexist-on-update",
+			setup: func(t *testing.T, c *Coordinator[string]) {
+				w := c.For("a")
+				_ = w.Watch(collectionReq("n", gvrA, "ns", mustSelector(t, "!app")))
+				w.Done(true)
+			},
+			event: kwatch.Event{
+				Type: kwatch.EventUpdate, GVR: gvrA, Name: "p-1", Namespace: "ns",
+				Labels:    map[string]string{"app": "svc"},
+				OldLabels: nil,
+			},
+			want: []string{"a"},
+		},
+		{
+			// An Add event carries no OldLabels; the empty-set old-label branch
+			// only fires on updates, so a non-matching Add must NOT enqueue.
+			name: "add-with-nonmatching-labels-no-enqueue",
+			setup: func(t *testing.T, c *Coordinator[string]) {
+				w := c.For("a")
+				_ = w.Watch(collectionReq("n", gvrA, "ns", mustSelector(t, "!app")))
+				w.Done(true)
+			},
+			event: kwatch.Event{
+				Type: kwatch.EventAdd, GVR: gvrA, Name: "p-1", Namespace: "ns",
+				Labels: map[string]string{"app": "svc"},
+			},
+			want: nil,
+		},
 	}
 
 	for _, tc := range tests {

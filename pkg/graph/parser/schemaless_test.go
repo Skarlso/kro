@@ -279,9 +279,41 @@ func TestParseSchemalessResourceEdgeCases(t *testing.T) {
 				"incomplete2": "incomplete}",
 				"incomplete3": "$not_an_expression",
 			},
-			expressionsWant:     []variable.FieldDescriptor{},
-			plainFieldPathsWant: []string{"incomplete1", "incomplete2", "incomplete3"},
-			wantErr:             false,
+			// An unterminated "${" is now a parser error rather than being
+			// silently treated as literal data.
+			expressionsWant:     nil,
+			plainFieldPathsWant: nil,
+			wantErr:             true,
+		},
+		{
+			name: "Complex structure with an unterminated expression is rejected",
+			resource: map[string]any{
+				"string": "${string.value}",
+				"number": 42,
+				"bool":   true,
+				"nested": map[string]any{
+					"array": []any{
+						"${array.value}",
+						123,
+					},
+				},
+				"complex": map[string]any{
+					"field": "Start ${expr1} middle ${expr2} end",
+					"nested": map[string]any{
+						"inner": "${nested.value}",
+					},
+					"array": []any{
+						"${expr3-incmplete",
+						"${expr4}",
+						"${expr5}",
+					},
+				},
+			},
+			// The "${expr3-incmplete" entry never closes: the whole parse now
+			// fails rather than silently discarding it.
+			expressionsWant:     nil,
+			plainFieldPathsWant: nil,
+			wantErr:             true,
 		},
 		{
 			name: "Complex structure with various expressions combinations",
@@ -301,7 +333,6 @@ func TestParseSchemalessResourceEdgeCases(t *testing.T) {
 						"inner": "${nested.value}",
 					},
 					"array": []any{
-						"${expr3-incmplete",
 						"${expr4}",
 						"${expr5}",
 					},
@@ -326,14 +357,14 @@ func TestParseSchemalessResourceEdgeCases(t *testing.T) {
 				},
 				{
 					Expression: krocel.NewUncompiled("expr4"),
-					Path:       "complex.array[1]",
+					Path:       "complex.array[0]",
 				},
 				{
 					Expression: krocel.NewUncompiled("expr5"),
-					Path:       "complex.array[2]",
+					Path:       "complex.array[1]",
 				},
 			},
-			plainFieldPathsWant: []string{"number", "bool", "nested.array[1]", "complex.array[0]"},
+			plainFieldPathsWant: []string{"number", "bool", "nested.array[1]"},
 		},
 	}
 

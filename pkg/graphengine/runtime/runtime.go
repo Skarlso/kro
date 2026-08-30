@@ -156,6 +156,25 @@ func New(prog *compiler.Program, g *expv1alpha1.Graph, opts ...Option) *Runtime 
 			n.objectOverride = obj
 		}
 	}
+	// Drop any seeded scope value that collides with a child-LOCAL node ID.
+	// WithSeedScope(parent.Scope()) copies the parent's whole scope so child
+	// expressions can read captured parent values; but if the child declares
+	// its own node with the same ID, that seeded parent value would shadow-
+	// leak — the child would resolve the stale ANCESTOR value until it
+	// publishes its own. Deleting the seed makes an unpublished child-local
+	// node correctly absent (data-pending) rather than resolving to an
+	// inherited value. A node carrying an objectOverride is exempt: its seed
+	// IS its own designated value (the top-level `schema` node is seeded with
+	// the instance's data AND overridden), not an inherited sibling value.
+	for id := range rt.byID {
+		if _, seeded := rt.scope[id]; !seeded {
+			continue
+		}
+		if _, overridden := rt.nodeObjectOverrides[id]; overridden {
+			continue
+		}
+		delete(rt.scope, id)
+	}
 	// Wire dependency pointers. Each Node carries pointers to
 	// the Node objects it depends on (not just IDs) so IsIgnored /
 	// CheckReadiness can recurse without a runtime lookup loop.
@@ -168,15 +187,25 @@ func New(prog *compiler.Program, g *expv1alpha1.Graph, opts ...Option) *Runtime 
 	}
 	// Soft dependencies carry no edge and no ordering, so a soft-referencing
 	// node can resolve before its target publishes. Seed each soft target with
-	// an empty object so an optional access (id.?field / id[?"k"]) yields
+	// an empty value so an optional access (id.?field / id[?"k"]) yields
 	// optional.none() — the field is omitted — rather than a "no such attribute"
 	// error that would data-pend the node. Once the target applies, publishScope
 	// overwrites the seed with the live value.
+	//
+	// A COLLECTION soft target is seeded as an empty LIST, not an empty object,
+	// so that filter/map/size() over the not-yet-published collection see the
+	// correct type (an empty list) instead of a false-empty object that would
+	// fail type-dependent operations.
 	for _, n := range rt.nodes {
 		for _, softID := range n.spec.SoftDepIDs() {
-			if _, seeded := rt.scope[softID]; !seeded {
-				rt.scope[softID] = map[string]any{}
+			if _, seeded := rt.scope[softID]; seeded {
+				continue
 			}
+			if dep, ok := rt.byID[softID]; ok && dep.IsCollection() {
+				rt.scope[softID] = []any{}
+				continue
+			}
+			rt.scope[softID] = map[string]any{}
 		}
 	}
 	// Compute one-based reverse-topological apply orders. Nodes are
@@ -185,6 +214,17 @@ func New(prog *compiler.Program, g *expv1alpha1.Graph, opts ...Option) *Runtime 
 	// Def nodes (e.g. the synthetic `schema`/instance node) are excluded from
 	// the depth calculation and never stamped: apply orders cover only real
 	// resource nodes.
+	//
+	// These absolute layer values are REVISION-LOCAL, not a stable identifier:
+	// they depend on the graph's shape this revision, so an equivalent resource
+	// can carry a different number across revisions (e.g. after an unrelated node
+	// is added/removed). Only the RELATIVE ordering within one apply is
+	// contractual (a dependent is always a higher wave than its dependency); the
+	// number itself is advisory. The deletion path treats the annotation
+	// accordingly — it groups by descending wave and tolerates mixed/absent
+	// values (unparseable or non-positive fall back to wave 0), so objects
+	// stamped by different revisions still delete safely (see
+	// controller/instance/deletion.go highestDeletionWave).
 	rt.applyOrders = make(map[string]int, len(rt.nodes))
 	for _, n := range rt.nodes {
 		if n.Kind() == compiler.NodeKindDef {

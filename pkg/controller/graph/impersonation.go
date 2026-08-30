@@ -28,6 +28,7 @@ import (
 	"fmt"
 	"sync"
 
+	lru "github.com/hashicorp/golang-lru/v2"
 	authorizationv1 "k8s.io/api/authorization/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -55,12 +56,23 @@ func serviceAccountUsername(g *expv1alpha1.Graph) string {
 	return fmt.Sprintf("system:serviceaccount:%s:%s", g.GetNamespace(), name)
 }
 
+// maxImpersonationCacheEntries bounds the impersonated-executor cache. The key
+// is a user-controlled ServiceAccount username (system:serviceaccount:<ns>:<sa>),
+// so an unbounded map could accrete an entry per distinct SA name a namespace
+// ever churns through and never release them. A bounded LRU caps that; an
+// evicted executor is cheaply rebuilt on the next reconcile that needs it (a
+// REST-client shadow of the base executor). Sized generously so steady-state
+// fleets never evict a live identity.
+const maxImpersonationCacheEntries = 1024
+
 // impersonationCache memoizes an impersonated executor per username so a
-// reconcile does not rebuild a REST client on every loop. One entry per
-// distinct ServiceAccount, so the cache stays small.
+// reconcile does not rebuild a REST client on every loop. Bounded by a
+// size-limited LRU (maxImpersonationCacheEntries) so a namespace churning
+// ServiceAccount names cannot grow it without limit; an evicted entry is
+// rebuilt on demand.
 type impersonationCache struct {
 	mu      sync.Mutex
-	byUser  map[string]executor.Interface
+	byUser  *lru.Cache[string, executor.Interface]
 	newExec func(user string) (executor.Interface, error)
 }
 
@@ -117,16 +129,20 @@ func (r *Reconciler) executorForUser(user string) (executor.Interface, error) {
 	r.Impersonation.mu.Lock()
 	defer r.Impersonation.mu.Unlock()
 	if r.Impersonation.byUser == nil {
-		r.Impersonation.byUser = map[string]executor.Interface{}
+		cache, err := lru.New[string, executor.Interface](maxImpersonationCacheEntries)
+		if err != nil {
+			return nil, fmt.Errorf("init impersonation cache: %w", err)
+		}
+		r.Impersonation.byUser = cache
 	}
-	if ex, ok := r.Impersonation.byUser[user]; ok {
+	if ex, ok := r.Impersonation.byUser.Get(user); ok {
 		return ex, nil
 	}
 	ex, err := r.Impersonation.newExec(user)
 	if err != nil {
 		return nil, fmt.Errorf("build impersonated executor for %q: %w", user, err)
 	}
-	r.Impersonation.byUser[user] = ex
+	r.Impersonation.byUser.Add(user, ex)
 	return ex, nil
 }
 
@@ -150,8 +166,15 @@ func NewImpersonation(
 	newClient func(user string) (client.Client, error),
 	newAuthz func(user string) (authorizationv1client.AuthorizationV1Interface, error),
 ) *impersonationCache {
+	cache, err := lru.New[string, executor.Interface](maxImpersonationCacheEntries)
+	if err != nil {
+		// New only errors on a non-positive size, which is a compile-time
+		// constant here, so this is unreachable — panic rather than thread an
+		// error through every caller.
+		panic(fmt.Sprintf("impersonation cache init: %v", err))
+	}
 	return &impersonationCache{
-		byUser: map[string]executor.Interface{},
+		byUser: cache,
 		newExec: func(user string) (executor.Interface, error) {
 			cl, err := newClient(user)
 			if err != nil {

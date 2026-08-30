@@ -243,6 +243,73 @@ func TestPatch_MetadataNameIsTheTarget(t *testing.T) {
 // TestPatch_TargetAbsentSoftRequeue verifies that a patch whose target does
 // not exist is a soft requeue: ErrNotReady, the node is Unresolved, and no
 // contribution is recorded.
+// TestPatch_ForEachFansOutToEveryTarget verifies a forEach patch node applies
+// the same contribution to every rendered target (fan-out status writeback).
+// Regression/feature test for forEach on patch nodes.
+func TestPatch_ForEachFansOutToEveryTarget(t *testing.T) {
+	cl := patchEnvClient(t)
+	ns := "default"
+	mustCreateConfigMap(t, cl, ns, "claim-a", map[string]any{"orig": "a"})
+	mustCreateConfigMap(t, cl, ns, "claim-b", map[string]any{"orig": "b"})
+	mustCreateConfigMap(t, cl, ns, "claim-c", map[string]any{"orig": "c"})
+
+	g := generator.NewGraph("g",
+		generator.WithNamespace(ns),
+		generator.WithDef("src", map[string]any{"names": []any{"claim-a", "claim-b", "claim-c"}}),
+		generator.WithPatchManifest("p", map[string]any{
+			"apiVersion": "v1",
+			"kind":       "ConfigMap",
+			"metadata":   map[string]any{"name": "${n}"},
+			"data":       map[string]any{"patched": "yes"},
+		}),
+	)
+	g.Spec.Nodes[len(g.Spec.Nodes)-1].ForEach = []expv1alpha1.ForEachDimension{{"n": "${src.names}"}}
+	g.SetUID("uid-foreach-fanout")
+
+	rt := compileAndBuild(t, g)
+	res, err := NewSimple(cl).Apply(context.Background(), rt, watchrouter.NoopWatcher{})
+	require.NoError(t, err)
+
+	assert.Empty(t, res.Applied, "patch must not be recorded as an owned resource")
+	require.Len(t, res.Contributions, 3, "one contribution per rendered target")
+	names := []string{res.Contributions[0].Name, res.Contributions[1].Name, res.Contributions[2].Name}
+	assert.ElementsMatch(t, []string{"claim-a", "claim-b", "claim-c"}, names)
+
+	for _, name := range []string{"claim-a", "claim-b", "claim-c"} {
+		cm := getConfigMap(t, cl, ns, name)
+		data, _, _ := unstructured.NestedStringMap(cm.Object, "data")
+		assert.Equal(t, "yes", data["patched"], "every target %q got the fanned-out contribution", name)
+		assert.Equal(t, name[len(name)-1:], data["orig"], "pre-existing field on %q survives", name)
+	}
+}
+
+// TestPatch_ForEachEmptyListIsNoOp verifies a forEach patch over an empty list
+// applies nothing and does not error — the reviewer's empty-claim-list case.
+func TestPatch_ForEachEmptyListIsNoOp(t *testing.T) {
+	cl := patchEnvClient(t)
+	ns := "default"
+
+	g := generator.NewGraph("g",
+		generator.WithNamespace(ns),
+		generator.WithDef("src", map[string]any{"names": []any{}}),
+		generator.WithPatchManifest("p", map[string]any{
+			"apiVersion": "v1",
+			"kind":       "ConfigMap",
+			"metadata":   map[string]any{"name": "${n}"},
+			"data":       map[string]any{"patched": "yes"},
+		}),
+	)
+	g.Spec.Nodes[len(g.Spec.Nodes)-1].ForEach = []expv1alpha1.ForEachDimension{{"n": "${src.names}"}}
+	g.SetUID("uid-foreach-empty")
+
+	rt := compileAndBuild(t, g)
+	res, err := NewSimple(cl).Apply(context.Background(), rt, watchrouter.NoopWatcher{})
+	require.NoError(t, err, "an empty forEach patch is a no-op, not an error")
+	assert.Empty(t, res.Contributions)
+	assert.Empty(t, res.Applied)
+	assert.NotContains(t, res.Unresolved, "p")
+}
+
 func TestPatch_TargetAbsentSoftRequeue(t *testing.T) {
 	cl := patchEnvClient(t)
 
@@ -560,9 +627,14 @@ func TestPatch_FieldManagerConflictSoftRequeue(t *testing.T) {
 	assert.Equal(t, "v", data["k"])
 }
 
-// TestPatch_NonConflictErrorIsHardAbort verifies that non-conflict errors on patch nodes
-// (e.g. schema/validation errors from the API server) abort the topological walk immediately.
-func TestPatch_NonConflictErrorIsHardAbort(t *testing.T) {
+// TestPatch_NonConflictErrorIsHardButWalkContinues verifies that a non-conflict
+// error on a patch node (e.g. a schema/validation 422 Invalid from the API
+// server) is classified HARD (not soft ErrNotReady), but per the reviewer
+// finding fixed in the executor, a hard node error no longer aborts the whole
+// walk: independent downstream nodes still apply. The failing node is simply
+// never marked ready, so its OWN dependents stay gated. The aggregate hard
+// error still dominates so the caller treats the cycle as degraded (not soft).
+func TestPatch_NonConflictErrorIsHardButWalkContinues(t *testing.T) {
 	cl := patchEnvClient(t)
 	ns := "default"
 	targetName := "pod-target"
@@ -597,12 +669,20 @@ func TestPatch_NonConflictErrorIsHardAbort(t *testing.T) {
 	require.Error(t, err)
 	assert.False(t, errors.Is(err, ErrNotReady), "non-conflict patch error must NOT be soft ErrNotReady, got: %v", err)
 	assert.True(t, apierrors.IsInvalid(err), "expected 422 Invalid error from API server, got: %v", err)
-	assert.Empty(t, res.Applied, "walk must abort immediately without applying downstream nodes")
+
+	// The hard error on 'p' must NOT abort the walk: the independent downstream
+	// node still applies (a failed node only gates its OWN dependents, and
+	// 'downstream' does not depend on 'p'). This is the reviewer-approved
+	// don't-strand-independent-nodes behavior.
+	require.Len(t, res.Applied, 1, "independent downstream node must still be applied despite the hard patch error")
+	assert.Equal(t, "downstream-cm-aborted", res.Applied[0].Name)
 
 	downstreamCM := &unstructured.Unstructured{}
 	downstreamCM.SetGroupVersionKind(configMapGVK)
 	err = cl.Get(context.Background(), types.NamespacedName{Namespace: ns, Name: "downstream-cm-aborted"}, downstreamCM)
-	assert.True(t, apierrors.IsNotFound(err), "downstream resource must not have been created")
+	assert.NoError(t, err, "independent downstream resource must have been created")
+	data, _, _ := unstructured.NestedStringMap(downstreamCM.Object, "data")
+	assert.Equal(t, "v", data["k"])
 }
 
 func compileAndBuildEnv(t *testing.T, cfg *rest.Config, g *expv1alpha1.Graph) *krotruntime.Runtime {

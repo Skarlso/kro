@@ -148,6 +148,8 @@ config:
   resourceGraphDefinitionProgressRequeueDelay: 3s
   # The number of graph revision reconciles to run in parallel
   graphRevisionConcurrentReconciles: 1
+  # The number of graph reconciles to run in parallel
+  graphConcurrentReconciles: 1
   # The maximum duration to wait for the controller manager to gracefully shutdown
   gracefulShutdownTimeout: 60s
   # The number of dynamic controller reconciles to run in parallel

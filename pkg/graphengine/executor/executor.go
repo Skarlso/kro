@@ -46,6 +46,16 @@ var ErrNotReady = errors.New("executor: node not ready")
 // errors.Is(err, ErrNotReady).
 var ErrResourceDeleting = errors.New("executor: resource is being deleted")
 
+// ErrDuplicateIdentity is the sentinel signaling that two DISTINCT nodes
+// rendered the same Kubernetes object identity (GVK + namespace + name) in one
+// Apply walk. It is a HARD error surfaced BEFORE the second node's write, so an
+// invalid graph cannot clobber a shared target (or, on the standalone-Graph
+// path, cannot leave two same-Graph template managers force-reclaiming each
+// other's fields forever while the Graph reports Ready). It does NOT satisfy
+// errors.Is(err, ErrNotReady): a duplicate identity is a permanent graph
+// misconfiguration the author must fix, not a converge-and-retry condition.
+var ErrDuplicateIdentity = errors.New("executor: duplicate resource identity across nodes")
+
 // ResourceDeletingError carries the identity of a managed object that is
 // currently terminating so the reconciler can build a condition message.
 // Detect it with errors.Is(err, ErrResourceDeleting)
@@ -115,6 +125,33 @@ type Contribution struct {
 	Name         string `json:"name"`
 	Subresource  string `json:"subresource,omitempty"`
 	FieldManager string `json:"fieldManager"`
+}
+
+// ToleratedRejection describes a collection item whose server-side-apply UPDATE
+// was rejected on an ALREADY-EXISTING object and tolerated: the live object is
+// kept and the node still converges (so an unfixable update — e.g. an immutable
+// field — does not wedge the instance forever). The desired change did NOT land,
+// so this is surfaced as an observational signal (log + optional Warning event
+// via Simple.OnToleratedRejection) WITHOUT affecting readiness gating or
+// requeue — flipping those would reintroduce the wedge.
+type ToleratedRejection struct {
+	NodeID     string // fully-qualified node path
+	APIVersion string // target apiVersion ("apps/v1", "v1", ...)
+	Kind       string // target kind
+	Namespace  string
+	Name       string
+	// Reason is a short operator-facing classification of WHY the update was
+	// rejected (e.g. "field immutable", "invalid request", or a transient cause
+	// that will be retried on a later reconcile). Derived from the typed API
+	// error, since a permanent immutable-field rejection and a transient one are
+	// not distinguishable by outcome here (both keep the live object).
+	Reason string
+	// Permanent is true when the rejection cannot succeed by retrying the same
+	// payload (Invalid/BadRequest); false for transient causes that a later
+	// reconcile may resolve.
+	Permanent bool
+	// Cause is the raw API error string, for the log/event detail.
+	Cause string
 }
 
 // Interface is the cluster-I/O surface used by the Graph reconciler.

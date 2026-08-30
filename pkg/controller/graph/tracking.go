@@ -19,6 +19,8 @@ import (
 	"fmt"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 
 	expv1alpha1 "github.com/kubernetes-sigs/kro/api/v1alpha1"
 	"github.com/kubernetes-sigs/kro/pkg/graphengine/compiler"
@@ -30,19 +32,33 @@ import (
 // resourceKey is the identity tuple used to dedup ManagedResource
 // entries. UID is excluded because pre-apply entries (write-ahead)
 // and post-apply entries (with UID) describe the same resource.
+//
+// Identity keys on GROUP + Kind, not the full apiVersion: a CRD's multiple
+// served versions all address the SAME stored object, so a version-only
+// template change (e.g. apps/v1 -> apps/v2 for the same Kind/namespace/name)
+// must NOT make the old-version entry look like a different resource. If it
+// did, the old entry would become a prune candidate and Delete — which keys on
+// the stable object UID — would delete the very object just applied under the
+// new version (a destructive apply-then-prune churn on one object). Keying on
+// Group+Kind makes the two versions dedup to one identity.
 type resourceKey struct {
-	APIVersion string
-	Kind       string
-	Namespace  string
-	Name       string
+	Group     string
+	Kind      string
+	Namespace string
+	Name      string
 }
 
 func keyOf(r expv1alpha1.ManagedResource) resourceKey {
+	// APIVersion is "group/version" (or just "version" for core); take the group
+	// so the version segment does not participate in identity. A parse error
+	// (malformed apiVersion) falls back to an empty group, which still yields a
+	// stable key for that (malformed) entry.
+	group := schema.FromAPIVersionAndKind(r.APIVersion, r.Kind).Group
 	return resourceKey{
-		APIVersion: r.APIVersion,
-		Kind:       r.Kind,
-		Namespace:  r.Namespace,
-		Name:       r.Name,
+		Group:     group,
+		Kind:      r.Kind,
+		Namespace: r.Namespace,
+		Name:      r.Name,
 	}
 }
 
@@ -102,36 +118,48 @@ func diffManagedResources(
 // write-aheads so a lost status write after Apply still leaves teardown
 // something to delete. keyOf excludes UID so post-apply entries dedup against
 // their intent entry.
+//
+// Inline subgraph (NodeKindGraph) nodes are recursed to arbitrary depth: their
+// compiled child program is built into a child runtime exactly the way the
+// executor's applySubgraph does (seed scope from this runtime's scope, carry
+// MaxCollectionSize), and each projected child NodeID is qualified with the
+// subgraph prefix (`n.ID()+"/"`, stacking for nested subgraphs) so the intent
+// entry's NodeID matches what the executor records post-apply. The IDENTITY
+// (Group/Kind/ns/name) is what dedups (keyOf excludes NodeID), so a child
+// resource's intent entry dedups against its post-apply Applied entry.
 func intendedManagedResources(rt *krotruntime.Runtime) []expv1alpha1.ManagedResource {
 	if rt == nil {
 		return nil
 	}
-
-	// Seed Def nodes into scope first so downstream template expressions that
-	// reference them (e.g. `schema.spec...`) can resolve in memory.
-	for _, n := range rt.Nodes() {
-		if n.Kind() != compiler.NodeKindDef {
-			continue
-		}
-		desired, err := n.Resolve()
-		if err != nil || len(desired) == 0 {
-			continue
-		}
-		n.SetObserved(desired, desired)
-		if n.IsCollection() {
-			list := make([]any, 0, len(desired))
-			for _, obj := range desired {
-				list = append(list, obj.Object)
-			}
-			rt.Set(n.ID(), list)
-		} else {
-			rt.Set(n.ID(), desired[0].Object)
-		}
-	}
-
 	var out []expv1alpha1.ManagedResource
 	seen := make(map[resourceKey]struct{})
+	projectManagedResources(rt, "", seen, &out)
+	return out
+}
+
+// projectManagedResources walks one runtime frame, appending template-node
+// identities (deduped by identity via seen) to out and recursing into subgraph
+// frames. prefix is the frame's qualified node-ID prefix ("" at the root,
+// "sub/" one level deep, "subA/subB/" nested), matching the executor's
+// applySubgraph qualification.
+func projectManagedResources(
+	rt *krotruntime.Runtime,
+	prefix string,
+	seen map[resourceKey]struct{},
+	out *[]expv1alpha1.ManagedResource,
+) {
+	seedDefNodes(rt)
+
 	for _, n := range rt.Nodes() {
+		// A subgraph node has no payload of its own; recurse into its child
+		// frame, qualifying that frame's node IDs with this node's prefix
+		// (stacking for nested subgraphs) — exactly as applySubgraph does.
+		if n.Kind() == compiler.NodeKindGraph {
+			if child := childRuntime(rt, n); child != nil {
+				projectManagedResources(child, prefix+n.ID()+"/", seen, out)
+			}
+			continue
+		}
 		// Only template nodes produce owned/torn-down resources (ref = read-only,
 		// patch = tracked as contributions, def = no I/O).
 		if n.Kind() != compiler.NodeKindTemplate {
@@ -161,8 +189,20 @@ func intendedManagedResources(rt *krotruntime.Runtime) []expv1alpha1.ManagedReso
 			if ns == "" && n.Namespaced() {
 				ns = rt.Graph().GetNamespace()
 			}
+			// A dynamic-GVK node has no compile-time REST scope (Namespaced() is
+			// false), so a rendered object with no explicit namespace can't be
+			// namespace-defaulted here the way the executor will at apply time
+			// (which resolves the scope from the live RESTMapper). Emitting a
+			// ns="" intent entry would never dedup against the applied entry
+			// (ns=graph), rewriting status every cycle. Skip it from the
+			// write-ahead: its identity is uncertain until apply, and its
+			// post-apply Applied entry records it correctly. (A dynamic node that
+			// DOES set an explicit namespace keeps its intent entry and dedups.)
+			if ns == "" && n.DynamicGVK() {
+				continue
+			}
 			mr := expv1alpha1.ManagedResource{
-				NodeID:     n.ID(),
+				NodeID:     prefix + n.ID(),
 				APIVersion: gvk.GroupVersion().String(),
 				Kind:       gvk.Kind,
 				Namespace:  ns,
@@ -173,10 +213,156 @@ func intendedManagedResources(rt *krotruntime.Runtime) []expv1alpha1.ManagedReso
 				continue
 			}
 			seen[k] = struct{}{}
-			out = append(out, mr)
+			*out = append(*out, mr)
 		}
 	}
+}
+
+// seedDefNodes seeds every Def node of rt into rt's scope so downstream
+// template/patch expressions that reference them (e.g. `schema.spec...`) can
+// resolve in memory. Idempotent — safe to call more than once on a frame.
+func seedDefNodes(rt *krotruntime.Runtime) {
+	for _, n := range rt.Nodes() {
+		if n.Kind() != compiler.NodeKindDef {
+			continue
+		}
+		desired, err := n.Resolve()
+		if err != nil || len(desired) == 0 {
+			continue
+		}
+		n.SetObserved(desired, desired)
+		if n.IsCollection() {
+			list := make([]any, 0, len(desired))
+			for _, obj := range desired {
+				list = append(list, obj.Object)
+			}
+			rt.Set(n.ID(), list)
+		} else {
+			rt.Set(n.ID(), desired[0].Object)
+		}
+	}
+}
+
+// childRuntime builds the child runtime for a subgraph (NodeKindGraph) node the
+// SAME way the executor's applySubgraph does: seed the child scope from the
+// parent runtime's scope and carry MaxCollectionSize. Returns nil when the node
+// carries no compiled child program (a malformed subgraph the executor would
+// itself reject), so callers simply skip it — its identities are uncertain and
+// its post-apply entries, if any, record it.
+func childRuntime(rt *krotruntime.Runtime, n *krotruntime.Node) *krotruntime.Runtime {
+	sub := n.Spec().SubProgram
+	if sub == nil {
+		return nil
+	}
+	return krotruntime.New(sub, rt.Graph(),
+		krotruntime.WithSeedScope(rt.Scope()),
+		krotruntime.WithMaxCollectionSize(rt.MaxCollectionSize()),
+	)
+}
+
+// intendedContributions projects the patch-contribution identities a runtime is
+// about to apply this cycle, best-effort and without cluster writes — the patch
+// twin of intendedManagedResources. The graph reconciler write-aheads this so a
+// crash between Apply (which mutates a patch target) and persistContributions
+// (which records the release inventory) still leaves teardown/Release a
+// superset to release from, instead of a contributed field stranded on its
+// target with no ledger entry.
+//
+// The projected FieldManager MUST equal what the executor will apply under, or
+// the write-ahead entry would never correlate with the contribution Release
+// later looks for. Both derive it from executor.PatchFieldManager(graphUID,
+// nodeID) — a single shared, pure helper — so they cannot drift. nodeID is the
+// node's fully-qualified path: at the root the bare ID, and for a subgraph child
+// the prefix-qualified path (`sub/patchID`, stacking for nested subgraphs) that
+// the executor produces via qualifiedPath (nodePrefix + local ID). Getting this
+// qualification right is why subgraphs are recursed here at all: a patch node's
+// contribution ledger entry only correlates with Release when the projected
+// field manager matches the executor's byte-for-byte.
+//
+// It is intentionally lossy: a patch node whose target can't be resolved in
+// memory yet (references an not-yet-applied resource), is ignored
+// (includeWhen:false), or is a dynamic-GVK target with no explicit namespace is
+// skipped — its post-apply Contribution records it correctly.
+func intendedContributions(rt *krotruntime.Runtime) []executor.Contribution {
+	if rt == nil {
+		return nil
+	}
+	graphUID := rt.Graph().GetUID()
+	var out []executor.Contribution
+	seen := make(map[contribKey]struct{})
+	projectContributions(rt, "", graphUID, seen, &out)
 	return out
+}
+
+// projectContributions walks one runtime frame, appending patch-node
+// contributions (deduped by identity via seen) to out and recursing into
+// subgraph frames. prefix is the frame's qualified node-ID prefix ("" at the
+// root), matching the executor's applySubgraph qualification; graphUID is the
+// owning Graph's UID, threaded so the FieldManager derivation matches the
+// executor at every depth.
+func projectContributions(
+	rt *krotruntime.Runtime,
+	prefix string,
+	graphUID types.UID,
+	seen map[contribKey]struct{},
+	out *[]executor.Contribution,
+) {
+	// Seed Def nodes into scope so patch targets referencing them (e.g.
+	// `schema.spec...`) resolve in memory. Idempotent with any prior seeding.
+	seedDefNodes(rt)
+
+	for _, n := range rt.Nodes() {
+		// A subgraph node has no payload of its own; recurse into its child
+		// frame, qualifying that frame's node IDs with this node's prefix
+		// (stacking for nested subgraphs) so the projected field manager uses
+		// the SAME qualified path (prefix+localID) the child executor will
+		// (its nodePrefix is extended identically by applySubgraph).
+		if n.Kind() == compiler.NodeKindGraph {
+			if child := childRuntime(rt, n); child != nil {
+				projectContributions(child, prefix+n.ID()+"/", graphUID, seen, out)
+			}
+			continue
+		}
+		if n.Kind() != compiler.NodeKindPatch {
+			continue
+		}
+		if ignored, err := n.IsIgnored(); err == nil && ignored {
+			continue
+		}
+		desired, err := n.Resolve()
+		if err != nil || len(desired) != 1 {
+			continue
+		}
+		obj := desired[0]
+		gvk := obj.GroupVersionKind()
+		if gvk.Kind == "" || obj.GetName() == "" {
+			continue
+		}
+		ns := obj.GetNamespace()
+		if ns == "" && n.Namespaced() {
+			ns = rt.Graph().GetNamespace()
+		}
+		// Same dynamic-GVK-no-namespace ambiguity as intendedManagedResources:
+		// the scope isn't known until apply resolves it from the RESTMapper, so a
+		// ns="" entry would never correlate. Skip it.
+		if ns == "" && n.DynamicGVK() {
+			continue
+		}
+		c := executor.Contribution{
+			APIVersion:   gvk.GroupVersion().String(),
+			Kind:         gvk.Kind,
+			Namespace:    ns,
+			Name:         obj.GetName(),
+			Subresource:  n.Subresource(),
+			FieldManager: executor.PatchFieldManager(graphUID, prefix+n.ID()),
+		}
+		k := contribKeyOf(c)
+		if _, dup := seen[k]; dup {
+			continue
+		}
+		seen[k] = struct{}{}
+		*out = append(*out, c)
+	}
 }
 
 // unionManagedResources merges previous and applied, deduping on identity.
@@ -275,6 +461,49 @@ func MarshalContributions(contribs []executor.Contribution) (string, error) {
 		return "", fmt.Errorf("marshal patch contributions: %w", err)
 	}
 	return string(raw), nil
+}
+
+// toAPIContributions converts the in-memory executor contribution inventory
+// to its persisted API representation for the Graph status subresource.
+// Nil-safe: a nil/empty input returns nil so an empty inventory serializes as
+// an absent field rather than an empty array.
+func toAPIContributions(contribs []executor.Contribution) []expv1alpha1.Contribution {
+	if len(contribs) == 0 {
+		return nil
+	}
+	out := make([]expv1alpha1.Contribution, 0, len(contribs))
+	for _, c := range contribs {
+		out = append(out, expv1alpha1.Contribution{
+			APIVersion:   c.APIVersion,
+			Kind:         c.Kind,
+			Namespace:    c.Namespace,
+			Name:         c.Name,
+			Subresource:  c.Subresource,
+			FieldManager: c.FieldManager,
+		})
+	}
+	return out
+}
+
+// fromAPIContributions converts the persisted API contribution inventory back
+// to the in-memory executor representation the reconciler and executor use.
+// Nil-safe: a nil/empty input returns nil.
+func fromAPIContributions(contribs []expv1alpha1.Contribution) []executor.Contribution {
+	if len(contribs) == 0 {
+		return nil
+	}
+	out := make([]executor.Contribution, 0, len(contribs))
+	for _, c := range contribs {
+		out = append(out, executor.Contribution{
+			APIVersion:   c.APIVersion,
+			Kind:         c.Kind,
+			Namespace:    c.Namespace,
+			Name:         c.Name,
+			Subresource:  c.Subresource,
+			FieldManager: c.FieldManager,
+		})
+	}
+	return out
 }
 
 // DiffContributions returns the entries present in prior but absent from

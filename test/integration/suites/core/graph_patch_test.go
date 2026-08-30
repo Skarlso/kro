@@ -26,7 +26,6 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	expv1alpha1 "github.com/kubernetes-sigs/kro/api/v1alpha1"
-	"github.com/kubernetes-sigs/kro/pkg/metadata"
 	"github.com/kubernetes-sigs/kro/test/integration/environment"
 )
 
@@ -94,8 +93,8 @@ var _ = Describe("Graph Patch", func() {
 		// The contribution inventory is persisted on the Graph.
 		environment.Eventually(t, 10*time.Second, 200*time.Millisecond, func() error {
 			cur := env.GetGraph(t, gKey)
-			if cur.GetAnnotations()[metadata.PatchContributionsAnnotation] == "" {
-				return fmt.Errorf("patch-contributions annotation not persisted")
+			if len(cur.Status.Contributions) == 0 {
+				return fmt.Errorf("patch-contributions not persisted to status")
 			}
 			return nil
 		})
@@ -275,8 +274,8 @@ var _ = Describe("Graph Patch", func() {
 		// The contribution inventory is persisted on the parent Graph.
 		environment.Eventually(t, 10*time.Second, 200*time.Millisecond, func() error {
 			cur := env.GetGraph(t, gKey)
-			if cur.GetAnnotations()[metadata.PatchContributionsAnnotation] == "" {
-				return fmt.Errorf("patch-contributions annotation not persisted")
+			if len(cur.Status.Contributions) == 0 {
+				return fmt.Errorf("patch-contributions not persisted to status")
 			}
 			return nil
 		})

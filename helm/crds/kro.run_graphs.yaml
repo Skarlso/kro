@@ -341,6 +341,63 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              contributions:
+                description: |-
+                  Contributions is the authoritative release inventory for this Graph's
+                  patch nodes: each entry records a field-manager contribution the Graph
+                  applied to a resource it does not own. Because a patch never owns its
+                  target, teardown/prune cannot rediscover these fields from ownership —
+                  the inventory is what lets Release relinquish exactly the fields the
+                  Graph contributed. The controller write-aheads the intended set BEFORE
+                  apply and rewrites it with the observed set AFTER a clean apply, so a
+                  crash in that window still leaves teardown a superset to release from.
+
+                  Persisted on the status subresource (not a metadata annotation) so it is
+                  RBAC-separable: a principal with only spec/metadata edit rights cannot
+                  forge the release inventory.
+                items:
+                  description: |-
+                    Contribution is a lightweight record of a patch node's field-manager
+                    contribution to a resource this Graph does not own. It mirrors the
+                    in-memory executor contribution: the tuple identifies the target
+                    (APIVersion, Kind, Namespace, Name, Subresource) and FieldManager is the
+                    dedicated server-side-apply manager the contributed fields were applied
+                    under. On prune/teardown the manager relinquishes exactly those fields;
+                    the target object is never deleted.
+                  properties:
+                    apiVersion:
+                      description: APIVersion of the patched target ("apps/v1", "v1",
+                        ...).
+                      type: string
+                    fieldManager:
+                      description: |-
+                        FieldManager is the dedicated server-side-apply field manager the
+                        contributed fields were applied under. Release relinquishes the fields
+                        owned by this manager on the target.
+                      type: string
+                    kind:
+                      description: Kind of the patched target ("Deployment", "ConfigMap",
+                        ...).
+                      type: string
+                    name:
+                      description: Name of the patched target.
+                      type: string
+                    namespace:
+                      description: Namespace of the patched target. Empty for cluster-scoped
+                        targets.
+                      type: string
+                    subresource:
+                      description: |-
+                        Subresource the contribution was applied through ("status" for a
+                        status patch, empty for the main resource).
+                      type: string
+                  required:
+                  - apiVersion
+                  - fieldManager
+                  - kind
+                  - name
+                  type: object
+                type: array
               managedResources:
                 description: |-
                   ManagedResources is the authoritative list of cluster resources this
@@ -349,6 +406,15 @@ spec:
                   is persisted after reconciliation: on a fully-successful apply and
                   prune, it reflects the currently-applied set; on errors, it preserves
                   the union of previously-known and newly-applied resources.
+
+                  MaxItems bounds the inventory so a runaway forEach expansion cannot push
+                  the Graph object past etcd's object-size limit (~1.5Mi) — which would fail
+                  the status write and, because teardown reads this list, jeopardize cleanup.
+                  The practical limiter is the per-node forEach cap
+                  (runtime.DefaultMaxCollectionSize, default 1000); this ceiling is set well
+                  above any realistic aggregate (each entry is a few short strings + a UID,
+                  so 5000 entries stays comfortably under the etcd limit even during the
+                  write-ahead phase, which transiently holds previous ∪ next).
                 items:
                   description: |-
                     ManagedResource is a lightweight pointer to a cluster resource the Graph
@@ -396,8 +462,11 @@ spec:
                   - name
                   - nodeID
                   type: object
+                maxItems: 5000
                 type: array
             type: object
+        required:
+        - spec
         type: object
     served: true
     storage: true

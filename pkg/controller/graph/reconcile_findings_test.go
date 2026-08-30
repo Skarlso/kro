@@ -34,7 +34,6 @@ import (
 	"github.com/kubernetes-sigs/kro/pkg/graphengine/registry"
 	krotruntime "github.com/kubernetes-sigs/kro/pkg/graphengine/runtime"
 	"github.com/kubernetes-sigs/kro/pkg/graphengine/watchrouter"
-	"github.com/kubernetes-sigs/kro/pkg/metadata"
 )
 
 // templateProgram builds a minimal compiled Program with a single static
@@ -145,7 +144,300 @@ func TestIntendedManagedResources_ProjectsTemplateIdentities(t *testing.T) {
 	assert.Empty(t, got[0].UID, "pre-apply intent carries no UID")
 }
 
-// lostStatusWriteClient drops the FIRST N status Patch calls (returning nil so
+// TestIntendedManagedResources_SkipsDynamicGVKWithoutNamespace pins the
+// tracking.go:161 fix: a dynamic-GVK node has no compile-time REST scope
+// (Namespaced()==false), so a rendered object with NO explicit namespace can't
+// be namespace-defaulted in the projection the way the executor will at apply
+// time. Emitting a ns="" intent entry would never dedup against the applied
+// entry (ns=graph), churning status every cycle — so it must be skipped. A
+// dynamic node that DOES set an explicit namespace keeps its intent entry.
+func TestIntendedManagedResources_SkipsDynamicGVKWithoutNamespace(t *testing.T) {
+	t.Parallel()
+	g := graph("g") // namespace "default"
+
+	dynNoNS := func(nodeID, name, namespace string) *compiler.Node {
+		obj := &unstructured.Unstructured{Object: map[string]any{
+			"apiVersion": "example.com/v1",
+			"kind":       "Widget",
+			"metadata":   map[string]any{"name": name},
+		}}
+		if namespace != "" {
+			_ = unstructured.SetNestedField(obj.Object, namespace, "metadata", "namespace")
+		}
+		return &compiler.Node{
+			ID:         nodeID,
+			Kind:       compiler.NodeKindTemplate,
+			DynamicGVK: true,
+			Namespaced: false, // dynamic: unknown at compile time
+			Object:     obj,
+		}
+	}
+
+	t.Run("dynamic node without explicit namespace is skipped", func(t *testing.T) {
+		n := dynNoNS("dyn", "w", "")
+		prog := &compiler.Program{
+			Nodes:            map[string]*compiler.Node{"dyn": n},
+			TopologicalOrder: []string{"dyn"},
+		}
+		got := intendedManagedResources(krotruntime.New(prog, g))
+		assert.Empty(t, got, "a dynamic-GVK node with no explicit namespace must not emit a ns=\"\" intent entry")
+	})
+
+	t.Run("dynamic node with explicit namespace is kept", func(t *testing.T) {
+		n := dynNoNS("dyn", "w", "other-ns")
+		prog := &compiler.Program{
+			Nodes:            map[string]*compiler.Node{"dyn": n},
+			TopologicalOrder: []string{"dyn"},
+		}
+		got := intendedManagedResources(krotruntime.New(prog, g))
+		require.Len(t, got, 1, "an explicit namespace is a stable identity and must be tracked")
+		assert.Equal(t, "other-ns", got[0].Namespace)
+		assert.Equal(t, "w", got[0].Name)
+	})
+}
+
+// TestIntendedContributions_MatchesExecutorFieldManager pins the contribution
+// write-ahead (graph/controller.go:314): the projected FieldManager MUST equal
+// what the executor applies under, or the write-ahead ledger entry would never
+// correlate with the contribution Release later looks for. Both derive it from
+// the single shared executor.PatchFieldManager(graphUID, nodeID), so this
+// asserts the projection reproduces that exact identity for a patch node.
+func TestIntendedContributions_MatchesExecutorFieldManager(t *testing.T) {
+	t.Parallel()
+	g := graph("g") // namespace "default"
+	g.SetUID(types.UID("graph-uid-123"))
+
+	patchObj := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": "v1",
+		"kind":       "ConfigMap",
+		"metadata":   map[string]any{"name": "target", "namespace": "default"},
+		"data":       map[string]any{"k": "v"},
+	}}
+	patchNode := &compiler.Node{
+		ID:         "p",
+		Kind:       compiler.NodeKindPatch,
+		Namespaced: true,
+		Object:     patchObj,
+	}
+	prog := &compiler.Program{
+		Nodes:            map[string]*compiler.Node{"p": patchNode},
+		TopologicalOrder: []string{"p"},
+	}
+	rt := krotruntime.New(prog, g)
+
+	got := intendedContributions(rt)
+	require.Len(t, got, 1, "the patch node's contribution must be projected")
+	c := got[0]
+	assert.Equal(t, "v1", c.APIVersion)
+	assert.Equal(t, "ConfigMap", c.Kind)
+	assert.Equal(t, "default", c.Namespace)
+	assert.Equal(t, "target", c.Name)
+	// The crux: the projected field manager is byte-identical to the executor's.
+	assert.Equal(t, executor.PatchFieldManager("graph-uid-123", "p"), c.FieldManager,
+		"write-ahead FieldManager must match the executor's, or Release cannot correlate the ledger entry")
+}
+
+// subgraphProgram wraps one or more child programs as inline subgraph
+// (NodeKindGraph) nodes at the root, mirroring how the compiler emits a
+// `graph:` node (Kind=NodeKindGraph, SubProgram=<child>). Each entry's key is
+// the subgraph node ID; the value is the compiled child Program. Used to build
+// realistic nested-frame runtimes for the write-ahead projection tests.
+func subgraphProgram(children map[string]*compiler.Program) *compiler.Program {
+	nodes := make(map[string]*compiler.Node, len(children))
+	order := make([]string, 0, len(children))
+	for id, child := range children {
+		nodes[id] = &compiler.Node{ID: id, Kind: compiler.NodeKindGraph, SubProgram: child}
+		order = append(order, id)
+	}
+	return &compiler.Program{Nodes: nodes, TopologicalOrder: order}
+}
+
+// patchProgram builds a minimal compiled Program with a single static Patch
+// node whose rendered target identity is (apiVersion, kind, namespace, name).
+func patchProgram(nodeID, apiVersion, kind, namespace, name string) *compiler.Program {
+	obj := &unstructured.Unstructured{Object: map[string]any{
+		"apiVersion": apiVersion,
+		"kind":       kind,
+		"metadata": map[string]any{
+			"name":      name,
+			"namespace": namespace,
+		},
+		"data": map[string]any{"k": "v"},
+	}}
+	node := &compiler.Node{
+		ID:         nodeID,
+		Kind:       compiler.NodeKindPatch,
+		Namespaced: namespace != "",
+		Object:     obj,
+	}
+	return &compiler.Program{
+		Nodes:            map[string]*compiler.Node{nodeID: node},
+		TopologicalOrder: []string{nodeID},
+	}
+}
+
+// TestIntendedManagedResources_RecursesSubgraphs pins the tracking.go:137 fix:
+// a template node declared inside an inline subgraph is applied by the executor
+// (applySubgraph) but, before the fix, had NO write-ahead inventory entry — a
+// crash between Apply and the post-apply status persist would orphan it. The
+// projection must recurse subgraph frames to arbitrary depth, qualifying each
+// child NodeID with the subgraph prefix exactly as the executor records it.
+func TestIntendedManagedResources_RecursesSubgraphs(t *testing.T) {
+	t.Parallel()
+	g := graph("g") // namespace "default"
+
+	t.Run("one level deep qualifies sub/child", func(t *testing.T) {
+		t.Parallel()
+		child := templateProgram("child", "example.com/v1", "Widget", "default", "w")
+		prog := subgraphProgram(map[string]*compiler.Program{"sub": child})
+		rt := krotruntime.New(prog, g)
+
+		got := intendedManagedResources(rt)
+		require.Len(t, got, 1, "the subgraph's template node must be projected")
+		assert.Equal(t, "sub/child", got[0].NodeID, "child NodeID is qualified with the subgraph prefix")
+		assert.Equal(t, "example.com/v1", got[0].APIVersion)
+		assert.Equal(t, "Widget", got[0].Kind)
+		assert.Equal(t, "default", got[0].Namespace)
+		assert.Equal(t, "w", got[0].Name)
+		assert.Empty(t, got[0].UID, "pre-apply intent carries no UID")
+	})
+
+	t.Run("two levels deep qualifies subA/subB/leaf", func(t *testing.T) {
+		t.Parallel()
+		leaf := templateProgram("leaf", "example.com/v1", "Widget", "default", "w")
+		inner := subgraphProgram(map[string]*compiler.Program{"subB": leaf})
+		prog := subgraphProgram(map[string]*compiler.Program{"subA": inner})
+		rt := krotruntime.New(prog, g)
+
+		got := intendedManagedResources(rt)
+		require.Len(t, got, 1, "a template nested two subgraphs deep must be projected")
+		assert.Equal(t, "subA/subB/leaf", got[0].NodeID, "nested NodeIDs stack the subgraph prefix")
+		assert.Equal(t, "Widget", got[0].Kind)
+		assert.Equal(t, "w", got[0].Name)
+	})
+
+	t.Run("top-level and nested template both projected", func(t *testing.T) {
+		t.Parallel()
+		child := templateProgram("child", "example.com/v1", "Gadget", "default", "gg")
+		prog := subgraphProgram(map[string]*compiler.Program{"sub": child})
+		// Add a top-level template alongside the subgraph node.
+		prog.Nodes["top"] = templateProgram("top", "example.com/v1", "Widget", "default", "w").Nodes["top"]
+		prog.TopologicalOrder = []string{"top", "sub"}
+		rt := krotruntime.New(prog, g)
+
+		got := intendedManagedResources(rt)
+		require.Len(t, got, 2)
+		byNode := map[string]expv1alpha1.ManagedResource{}
+		for _, mr := range got {
+			byNode[mr.NodeID] = mr
+		}
+		require.Contains(t, byNode, "top")
+		require.Contains(t, byNode, "sub/child")
+		assert.Equal(t, "Widget", byNode["top"].Kind)
+		assert.Equal(t, "Gadget", byNode["sub/child"].Kind)
+	})
+
+	t.Run("dynamic-no-namespace child is still skipped inside a subgraph", func(t *testing.T) {
+		t.Parallel()
+		dynObj := &unstructured.Unstructured{Object: map[string]any{
+			"apiVersion": "example.com/v1",
+			"kind":       "Widget",
+			"metadata":   map[string]any{"name": "w"},
+		}}
+		dynNode := &compiler.Node{
+			ID:         "dyn",
+			Kind:       compiler.NodeKindTemplate,
+			DynamicGVK: true,
+			Namespaced: false,
+			Object:     dynObj,
+		}
+		child := &compiler.Program{
+			Nodes:            map[string]*compiler.Node{"dyn": dynNode},
+			TopologicalOrder: []string{"dyn"},
+		}
+		prog := subgraphProgram(map[string]*compiler.Program{"sub": child})
+		rt := krotruntime.New(prog, g)
+
+		got := intendedManagedResources(rt)
+		assert.Empty(t, got, "the dynamic-no-namespace skip must hold inside a subgraph frame too")
+	})
+}
+
+// TestIntendedContributions_RecursesSubgraphs is the patch twin of
+// TestIntendedManagedResources_RecursesSubgraphs: a patch node inside an inline
+// subgraph must be projected, and its FieldManager MUST equal the executor's
+// for the QUALIFIED node path (prefix+localID) — the executor derives it from
+// patchFieldManager(uid, s.qualifiedPath(n.ID())) where qualifiedPath =
+// nodePrefix+id, and applySubgraph extends nodePrefix by "<subID>/". If this
+// drifts, the write-ahead ledger entry never correlates with the contribution
+// Release later looks for.
+func TestIntendedContributions_RecursesSubgraphs(t *testing.T) {
+	t.Parallel()
+	g := graph("g") // namespace "default"
+	g.SetUID(types.UID("graph-uid-123"))
+
+	t.Run("one level deep field manager matches executor for sub/patch", func(t *testing.T) {
+		t.Parallel()
+		child := patchProgram("patch", "v1", "ConfigMap", "default", "target")
+		prog := subgraphProgram(map[string]*compiler.Program{"sub": child})
+		rt := krotruntime.New(prog, g)
+
+		got := intendedContributions(rt)
+		require.Len(t, got, 1, "the subgraph's patch node contribution must be projected")
+		c := got[0]
+		assert.Equal(t, "v1", c.APIVersion)
+		assert.Equal(t, "ConfigMap", c.Kind)
+		assert.Equal(t, "default", c.Namespace)
+		assert.Equal(t, "target", c.Name)
+		// The crux: field manager is byte-identical to the executor's for the
+		// QUALIFIED path "sub/patch", not the bare local id.
+		assert.Equal(t, executor.PatchFieldManager("graph-uid-123", "sub/patch"), c.FieldManager,
+			"write-ahead FieldManager must match the executor's qualified-path derivation")
+		// And it must NOT be the (wrong) bare-id derivation.
+		assert.NotEqual(t, executor.PatchFieldManager("graph-uid-123", "patch"), c.FieldManager,
+			"a bare-id field manager would not correlate with the executor's qualified apply")
+	})
+
+	t.Run("two levels deep field manager matches executor for subA/subB/patch", func(t *testing.T) {
+		t.Parallel()
+		leaf := patchProgram("patch", "v1", "ConfigMap", "default", "target")
+		inner := subgraphProgram(map[string]*compiler.Program{"subB": leaf})
+		prog := subgraphProgram(map[string]*compiler.Program{"subA": inner})
+		rt := krotruntime.New(prog, g)
+
+		got := intendedContributions(rt)
+		require.Len(t, got, 1)
+		assert.Equal(t, executor.PatchFieldManager("graph-uid-123", "subA/subB/patch"), got[0].FieldManager,
+			"nested patch field managers stack the subgraph prefix, matching the executor")
+	})
+
+	t.Run("dynamic-no-namespace patch child is still skipped inside a subgraph", func(t *testing.T) {
+		t.Parallel()
+		dynObj := &unstructured.Unstructured{Object: map[string]any{
+			"apiVersion": "example.com/v1",
+			"kind":       "Widget",
+			"metadata":   map[string]any{"name": "target"},
+			"data":       map[string]any{"k": "v"},
+		}}
+		dynNode := &compiler.Node{
+			ID:         "dynp",
+			Kind:       compiler.NodeKindPatch,
+			DynamicGVK: true,
+			Namespaced: false,
+			Object:     dynObj,
+		}
+		child := &compiler.Program{
+			Nodes:            map[string]*compiler.Node{"dynp": dynNode},
+			TopologicalOrder: []string{"dynp"},
+		}
+		prog := subgraphProgram(map[string]*compiler.Program{"sub": child})
+		rt := krotruntime.New(prog, g)
+
+		got := intendedContributions(rt)
+		assert.Empty(t, got, "the dynamic-no-namespace skip must hold for patch nodes inside a subgraph too")
+	})
+}
+
 // the reconciler believes they succeeded) then delegates. It simulates a lost
 // status write — the exact crash window Finding A guards.
 //
@@ -205,14 +497,9 @@ func TestReconcile_NoReleaseOnSoftNotReady(t *testing.T) {
 		Name:         "target",
 		FieldManager: "kro-graphengine.patch.oldidentity",
 	}}
-	raw, err := MarshalContributions(prior)
-	require.NoError(t, err)
 
 	g := graph("g", withFinalizer, func(g *expv1alpha1.Graph) {
-		if g.Annotations == nil {
-			g.Annotations = map[string]string{}
-		}
-		g.Annotations[metadata.PatchContributionsAnnotation] = raw
+		g.Status.Contributions = toAPIContributions(prior)
 	})
 	cl := newClient(t, g)
 
@@ -228,6 +515,55 @@ func TestReconcile_NoReleaseOnSoftNotReady(t *testing.T) {
 	// a data-pending patch node is still wanted, and releasing its fields would
 	// flap them until the node resolves next cycle.
 	assert.Empty(t, exec.releaseCalls, "release must not fire on soft not-ready (would flap a data-pending patch's fields)")
+}
+
+// TestReconcile_SoftNotReadyStillPrunesRetiredNode pins finding 357: a node
+// that is soft not-ready this cycle must NOT veto pruning of an UNRELATED
+// resource whose owning node was removed from the spec. Previously all pruning
+// was gated on a fully clean apply, so one never-ready node leaked every
+// retired resource until it resolved. diffManagedResources keeps unresolved
+// nodes' entries, so a prune candidate on a soft cycle is genuinely retired and
+// safe to delete.
+func TestReconcile_SoftNotReadyStillPrunesRetiredNode(t *testing.T) {
+	t.Parallel()
+	key := types.NamespacedName{Namespace: "default", Name: "g"}
+
+	// Previously-tracked resource owned by node "gone", which is no longer in
+	// the graph. A separate node "widget" is not-ready this cycle.
+	g := graph("g", withFinalizer, func(g *expv1alpha1.Graph) {
+		g.Status.ManagedResources = []expv1alpha1.ManagedResource{{
+			NodeID:     "gone",
+			APIVersion: "v1",
+			Kind:       "ConfigMap",
+			Namespace:  "default",
+			Name:       "retired-cm",
+			UID:        "uid-retired",
+		}}
+	})
+	cl := newClient(t, g)
+
+	// Apply: soft not-ready, node "widget" Unresolved, nothing applied. The
+	// "gone" resource is neither Applied nor Unresolved -> a prune candidate.
+	exec := &fakeExecutor{
+		applyErr:    fmt.Errorf("apply %q: %w", "widget", executor.ErrNotReady),
+		applyResult: executor.ApplyResult{Unresolved: []string{"widget"}},
+	}
+	r := &Reconciler{Client: cl, Compiler: &fakeCompiler{program: emptyNodeProgram("widget")}, Registry: registry.New(), Executor: exec}
+
+	_, _ = r.Reconcile(context.Background(), ctrl.Request{NamespacedName: key})
+
+	// The retired resource must have been pruned despite the soft not-ready.
+	require.Len(t, exec.deleteCalls, 1, "prune must run on a soft not-ready cycle for a retired node")
+	require.Len(t, exec.deleteCalls[0], 1)
+	assert.Equal(t, "retired-cm", exec.deleteCalls[0][0].Name,
+		"the retired node's resource is the prune candidate")
+
+	// Persisted status must no longer track the pruned resource.
+	got := &expv1alpha1.Graph{}
+	require.NoError(t, cl.Get(context.Background(), key, got))
+	for _, mr := range got.Status.ManagedResources {
+		assert.NotEqual(t, "retired-cm", mr.Name, "a successfully pruned resource must drop from status")
+	}
 }
 
 // TestReconcile_ErrorPathKeepsIntentSuperset guards the Finding A hardening:

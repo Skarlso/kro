@@ -4,9 +4,24 @@
 # A single Graph (L0) implements the full RGD controller — CRD creation, instance
 # management, resource reconciliation, and status writeback — through composition.
 #
-# Note: This example uses def: nodes (KREP-011, Variables) for validation logic
-# and propagateWhen (KREP-006) for conditional status updates. These are proposed
-# separately but shown here to demonstrate the complete system.
+# ╔══ STATUS: ASPIRATIONAL / FUTURE WORK — does NOT run as-is today ══╗
+# This example intentionally illustrates the END-STATE of the KREP-024 vision.
+# It depends on primitives that are proposed but NOT YET IMPLEMENTED in the
+# shipped engine, so applying it will not fully reconcile. Kept in-tree as the
+# design's north star; the gaps below are tracked follow-up work, not bugs in
+# this PR:
+#   - simpleSchema.toOpenAPI() and plural() CEL functions are not registered in
+#     the shipped CEL environment (needed at L1 to synthesize the Kind's CRD).
+#   - .ready() on a node is deferred to KREP-006 (readiness lifecycle) — used
+#     here for status gating; there is no working replacement yet.
+#   - propagateWhen (conditional status updates) is deferred to KREP-006.
+#   - Multi-level deferral of generated child-node CEL (the L1/L2 node-list
+#     built as a string) relies on encodings the scanner does not yet accept
+#     for every case shown, and generated external-ref nodes here omit
+#     includeWhen/readyWhen modifiers the real engine supports.
+# When those land (KREP-006 readiness, KREP-011 variables, the CEL-function
+# registrations), this example is intended to compile and run unchanged.
+# ╚═══════════════════════════════════════════════════════════════╗
 #
 # ─── Architecture ─────────────────────────────────────────────────────────────
 #
@@ -281,4 +296,4 @@ spec:
                       observedGeneration: >-
                         ${"${schema.metadata.generation}"}
                       lastTransitionTime: >-
-                          ${"${schema.metadata.creationTimestamp}"}
+                        ${"${schema.metadata.creationTimestamp}"}

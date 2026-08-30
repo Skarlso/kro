@@ -7,8 +7,11 @@
 # Resources are evaluated in dependency order inferred from CEL references:
 #   ServiceAccount → ClusterRole → ClusterRoleBinding → ConfigMap → Deployment → Service
 #
-# NOTE: This will REMOVE your cluster's core-dns upon deletion!!!! For testing
-#       purposes only!
+# STATUS / FUTURE WORK: the ConfigMap below embeds a Corefile with inline
+# `health` and `forward` blocks that the pinned CoreDNS image in this example
+# rejects, so applying it as-is may not produce a healthy deployment. Kept to
+# illustrate the static-bundle (dependency-ordered, single-object) pattern;
+# aligning the Corefile with the pinned image is tracked follow-up work.
 # ---------------------------------------------------------------------------
 apiVersion: kro.run/v1alpha1
 kind: Graph

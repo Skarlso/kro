@@ -21,6 +21,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 
 	expv1alpha1 "github.com/kubernetes-sigs/kro/api/v1alpha1"
+	"github.com/kubernetes-sigs/kro/pkg/dag"
 )
 
 var (
@@ -95,8 +96,8 @@ func validateFrameNodes(nodes []expv1alpha1.Node) error {
 // templates — they read existing state. graph (subgraph) nodes
 // don't render or read; the per-node modifiers have no defined semantics on
 // them yet, so they're rejected explicitly rather than silently ignored.
-// patch nodes contribute to a single existing target, so forEach is rejected
-// and the target must be nameable.
+// patch nodes MAY carry forEach — the contribution fans out across every
+// rendered target (each must be nameable and resolve to a distinct name).
 func validateKindCompatibility(n *expv1alpha1.Node) error {
 	if n.Graph != nil {
 		switch {
@@ -110,12 +111,13 @@ func validateKindCompatibility(n *expv1alpha1.Node) error {
 		return nil
 	}
 	if n.Patch != nil {
-		// A patch contributes to a single existing target, so it does not
-		// expand into a collection. Name-required and endpoint derivation are
-		// enforced later against the unmarshalled payload (derivePatchEndpoint).
-		if len(n.ForEach) > 0 {
-			return fmt.Errorf("forEach is not supported on patch nodes")
-		}
+		// A patch contributes fields to EXISTING targets. forEach is allowed: it
+		// fans the same contribution out across every rendered target (e.g. a
+		// status writeback to each claimant CR). Name-required and endpoint
+		// derivation are enforced later against the unmarshalled payload
+		// (derivePatchEndpoint); iterator→identity coverage (each rendered patch
+		// must resolve to a distinct name) is enforced in analyzeVariables so a
+		// forEach patch can't silently patch one target N times.
 		return nil
 	}
 	if len(n.ForEach) == 0 {
@@ -203,14 +205,26 @@ func validateForEachShape(n *expv1alpha1.Node) error {
 	return nil
 }
 
-// requireInputNode enforces that at least one compiled node has no CEL
-// content. Without such a seed, the graph has no way to introduce data and
-// any topology would either be empty or cyclic in scope.
-func requireInputNode(nodes map[string]*Node) error {
-	for _, n := range nodes {
-		if len(n.Variables) == 0 && len(n.ForEach) == 0 {
+// requireResolvableRoot enforces that the compiled dependency DAG has at
+// least one root node — a node with no dependencies of its own — so the
+// executor has somewhere to start. Cycles are already rejected by the
+// topological sort; this catches the degenerate case of a graph with no
+// resolvable entry point.
+//
+// This replaces an older "a node with no CEL expressions must exist"
+// heuristic, which wrongly rejected a valid, acyclic graph whose every
+// useful node happened to carry CEL. The real invariant is DAG acyclicity
+// plus a resolvable root, not the presence of a literal no-CEL seed.
+func requireResolvableRoot(g *dag.DirectedAcyclicGraph[string]) error {
+	if len(g.Vertices) == 0 {
+		return fmt.Errorf("graph must declare at least one node")
+	}
+	for _, v := range g.Vertices {
+		if len(v.DependsOn) == 0 {
 			return nil
 		}
 	}
-	return fmt.Errorf("graph must declare at least one node with no CEL expressions (an input/seed node)")
+	// An acyclic finite graph always has a root, so reaching here means the
+	// graph is cyclic; the topological sort will report the concrete cycle.
+	return fmt.Errorf("graph has no node without dependencies (no resolvable root); it is cyclic")
 }

@@ -100,6 +100,49 @@ type Simple struct {
 	// the node-path annotation — derives from this via qualifiedPath /
 	// nodeIDToken so all three agree by construction.
 	nodePrefix string
+	// identityClaims records which node has claimed each rendered object
+	// identity (GVK+namespace+name) during a single Apply walk, so a SECOND
+	// node rendering the same identity is refused BEFORE its SSA write instead
+	// of clobbering the first node's object (and, for the standalone-Graph
+	// path, before two same-Graph template managers force-reclaim each other's
+	// fields forever while the Graph reports Ready). It is created per top-level
+	// Apply and shared across subgraph child walks (applySubgraph copies the
+	// executor by value, carrying this pointer) so a collision between template
+	// nodes in different frames targeting one cluster object is caught too.
+	// Nil outside an Apply walk; the post-apply validateAppliedIdentities check
+	// remains as a backstop.
+	identityClaims *identityClaimSet
+	// OnToleratedRejection, when non-nil, is invoked for each collection item
+	// whose UPDATE was rejected on an already-existing object and tolerated
+	// (the live object is kept and the node still converges). It is a purely
+	// OBSERVATIONAL hook — it must not influence readiness or requeue, or the
+	// anti-wedge tolerance would be lost. The instance controller wires it to an
+	// event recorder (Warning event); the Graph controller leaves it nil
+	// (log-only, it has no recorder). Called from parallel apply goroutines, so
+	// the implementation must be safe for concurrent use (an EventRecorder is).
+	OnToleratedRejection func(ToleratedRejection)
+}
+
+// identityClaimSet is the per-Apply set of claimed object identities, guarded by
+// a mutex because collection items apply in parallel.
+type identityClaimSet struct {
+	mu    sync.Mutex
+	owner map[string]string // identity key -> qualified node ID that claimed it
+}
+
+// claim records that qualifiedNodeID intends to write objIdentity. It returns a
+// non-nil error when a DIFFERENT node already claimed the same identity this
+// walk — the caller turns that into a hard error before any write. Re-claiming
+// by the same node (e.g. across retries) is allowed.
+func (c *identityClaimSet) claim(identityKey, qualifiedNodeID string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if owner, ok := c.owner[identityKey]; ok && owner != qualifiedNodeID {
+		return fmt.Errorf("%w: nodes %q and %q both render %s",
+			ErrDuplicateIdentity, owner, qualifiedNodeID, identityKey)
+	}
+	c.owner[identityKey] = qualifiedNodeID
+	return nil
 }
 
 // NewSimple constructs a Simple executor bound to the given client.
@@ -193,6 +236,17 @@ var _ Interface = (*Simple)(nil)
 // via GateReadiness; when it is off every reachable node is applied
 // regardless of upstream readiness.
 func (s *Simple) Apply(ctx context.Context, rt *runtime.Runtime, w watchrouter.Watcher) (ApplyResult, error) {
+	// Establish the per-Apply identity-claim set at the top-level walk. A
+	// subgraph child walk (applySubgraph copies the executor by value) inherits
+	// this non-nil pointer and shares the same set, so a template-node identity
+	// collision is detected across frames. Guard on nil so only the outermost
+	// Apply creates it.
+	if s.identityClaims == nil {
+		child := *s
+		child.identityClaims = &identityClaimSet{owner: map[string]string{}}
+		return child.Apply(ctx, rt, w)
+	}
+
 	var result ApplyResult
 	var firstSoft error
 	recordSoft := func(err error) {
@@ -200,6 +254,13 @@ func (s *Simple) Apply(ctx context.Context, rt *runtime.Runtime, w watchrouter.W
 			firstSoft = err
 		}
 	}
+	// hardErrs collects per-node HARD failures. A hard error on one node must
+	// NOT abort the whole walk: independent nodes and the trailing synthesized
+	// author-status patch node still need to run. The failing node is never
+	// marked ready, so its dependents stay gated (GateReadiness); the aggregate
+	// hard error is returned after the walk and dominates any soft signal.
+	var hardErrs []error
+	recordHard := func(err error) { hardErrs = append(hardErrs, err) }
 
 	// ready tracks which nodes reached a terminal ready state this cycle, so
 	// dependents can be gated until their dependencies converge.
@@ -217,7 +278,8 @@ func (s *Simple) Apply(ctx context.Context, rt *runtime.Runtime, w watchrouter.W
 				recordSoft(fmt.Errorf("apply %q: includeWhen: %w (%w)", n.ID(), err, ErrNotReady))
 				continue
 			}
-			return result, fmt.Errorf("apply %q: %w", n.ID(), err)
+			recordHard(fmt.Errorf("apply %q: %w", n.ID(), err))
+			continue
 		}
 		if ignored {
 			// Intentionally skipped — not Unresolved. The caller
@@ -252,7 +314,8 @@ func (s *Simple) Apply(ctx context.Context, rt *runtime.Runtime, w watchrouter.W
 					recordSoft(fmt.Errorf("apply %q (subgraph): %w", n.ID(), err))
 					continue
 				}
-				return result, fmt.Errorf("apply %q (subgraph): %w", n.ID(), err)
+				recordHard(fmt.Errorf("apply %q (subgraph): %w", n.ID(), err))
+				continue
 			}
 			ready[n.ID()] = true
 			continue
@@ -265,12 +328,14 @@ func (s *Simple) Apply(ctx context.Context, rt *runtime.Runtime, w watchrouter.W
 				recordSoft(fmt.Errorf("apply %q: resolve: %w (%w)", n.ID(), err, ErrNotReady))
 				continue
 			}
-			return result, fmt.Errorf("apply %q: resolve: %w", n.ID(), err)
+			recordHard(fmt.Errorf("apply %q: resolve: %w", n.ID(), err))
+			continue
 		}
 
 		softErr, err := s.applyNodeByKind(ctx, rt, w, n, desired, &result)
 		if err != nil {
-			return result, err
+			recordHard(err)
+			continue
 		}
 		if softErr != nil {
 			recordSoft(softErr)
@@ -279,16 +344,23 @@ func (s *Simple) Apply(ctx context.Context, rt *runtime.Runtime, w watchrouter.W
 
 		// readyWhen is checked after observed state is recorded.
 		// Soft → ErrNotReady (already tracked in Applied); continue
-		// so downstream watches still register. Hard → abort.
+		// so downstream watches still register. Hard → aggregate.
 		if err := n.CheckReadiness(); err != nil {
 			if isSoftRuntimeErr(err) {
 				recordSoft(fmt.Errorf("apply %q: %w (%w)", n.ID(), err, ErrNotReady))
 				continue
 			}
-			return result, fmt.Errorf("apply %q: %w", n.ID(), err)
+			recordHard(fmt.Errorf("apply %q: %w", n.ID(), err))
+			continue
 		}
 		// Node reached a terminal ready state — unblock its dependents.
 		ready[n.ID()] = true
+	}
+	// A hard error dominates any soft signal — errors.Join preserves errors.Is
+	// for each joined error, and none of the hard errors carry ErrNotReady, so
+	// the caller classifies the result as hard (degraded) rather than requeue.
+	if len(hardErrs) > 0 {
+		return result, errors.Join(hardErrs...)
 	}
 	return result, firstSoft
 }
@@ -380,7 +452,11 @@ func (s *Simple) applyNodeByKind(
 		}
 		publishScope(rt, n, n.Observed())
 	case compiler.NodeKindPatch:
-		contribution, err := s.applyPatch(ctx, rt, w, n, desired)
+		contributions, err := s.applyPatch(ctx, rt, w, n, desired)
+		// Record whatever landed before any error so tracking never loses a
+		// contribution that actually reached the cluster (a forEach patch may
+		// fail partway through).
+		result.Contributions = append(result.Contributions, contributions...)
 		if err != nil {
 			// A dynamic-GVK patch whose target CRD isn't installed yet,
 			// an absent target, a terminating target, or a field-manager conflict
@@ -391,7 +467,6 @@ func (s *Simple) applyNodeByKind(
 			}
 			return nil, fmt.Errorf("apply %q (patch): %w", n.ID(), err)
 		}
-		result.Contributions = append(result.Contributions, contribution)
 		// A patch publishes no value into scope; record observed so an
 		// optional readyWhen can still evaluate against the node.
 		n.SetObserved(desired, desired)
@@ -460,6 +535,7 @@ func publishScope(rt *runtime.Runtime, n *runtime.Node, objs []*unstructured.Uns
 // prune vector where a user-forged status entry could delete arbitrary resources.
 // NotFound and "already deleted by something else" are tolerated.
 func (s *Simple) Delete(ctx context.Context, resources []expv1alpha1.ManagedResource) error {
+	var errs []error
 	for _, r := range slices.Backward(resources) {
 
 		// Legitimate managed resources always carry a UID captured from SSA.
@@ -491,10 +567,14 @@ func (s *Simple) Delete(ctx context.Context, resources []expv1alpha1.ManagedReso
 			if apierrors.IsConflict(err) {
 				continue
 			}
-			return fmt.Errorf("delete %s/%s %s: %w", r.APIVersion, r.Kind, refName(r), err)
+			// Accumulate and keep going: one denied/failed delete (e.g. an
+			// impersonated SA lacking delete RBAC on a single target) must not
+			// strand every remaining managed resource in the inventory. The
+			// aggregate error is returned after the whole inventory is visited.
+			errs = append(errs, fmt.Errorf("delete %s/%s %s: %w", r.APIVersion, r.Kind, refName(r), err))
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 func refName(r expv1alpha1.ManagedResource) string {
@@ -572,6 +652,20 @@ func (s *Simple) prepareItem(rt *runtime.Runtime, n *runtime.Node, obj *unstruct
 	s.defaultNamespace(rt, m.namespaced, obj)
 	if m.namespaced && obj.GetNamespace() == "" {
 		return fmt.Errorf("node %q: namespaced resource %s/%s must set metadata.namespace when the instance is cluster-scoped", n.ID(), obj.GetKind(), obj.GetName())
+	}
+	// Pre-write duplicate-identity guard: claim this object's identity BEFORE
+	// the SSA write. If another node already claimed it this walk, refuse now so
+	// the second node cannot clobber the first's object (RGD path) or force-
+	// reclaim its fields forever (standalone-Graph path). The identity key
+	// matches validateAppliedIdentities (apiVersion/kind/namespace/name); the
+	// owner is the frame-qualified node path so a legitimate re-claim by the same
+	// node is allowed while a cross-node collision is a hard error.
+	if s.identityClaims != nil {
+		gvk := obj.GroupVersionKind()
+		identityKey := fmt.Sprintf("%s/%s/%s/%s", gvk.GroupVersion().String(), gvk.Kind, obj.GetNamespace(), obj.GetName())
+		if err := s.identityClaims.claim(identityKey, s.qualifiedPath(n.ID())); err != nil {
+			return err
+		}
 	}
 	s.stampKROMeta(rt, n, obj, i, size)
 	if s.LabelInjector != nil {
@@ -672,6 +766,59 @@ func (st *collectionApplyState) recordApplied(i int, mr expv1alpha1.ManagedResou
 	st.mu.Lock()
 	st.results[i] = &mr
 	st.mu.Unlock()
+}
+
+// classifyRejection turns a tolerated collection-update rejection into a short
+// operator-facing reason and a permanent/transient flag. A permanent rejection
+// (Invalid/BadRequest) cannot succeed by retrying the same payload; an Invalid
+// whose status causes name an immutable field is reported specifically so the
+// operator sees WHY the desired change never landed. Transient causes
+// (Conflict, timeouts, throttling, unavailability) are retried on a later
+// reconcile, so they are flagged non-permanent. This is best-effort: a webhook
+// Forbidden or a CEL-validation Invalid that depends on other mutable cluster
+// state cannot be perfectly classified by error code, which is exactly why the
+// node converges and merely SURFACES the rejection rather than gating on it.
+func classifyRejection(err error) (reason string, permanent bool) {
+	switch {
+	case apierrors.IsInvalid(err):
+		if isImmutableFieldError(err) {
+			return "field immutable", true
+		}
+		return "invalid request", true
+	case apierrors.IsBadRequest(err):
+		return "invalid request", true
+	case apierrors.IsConflict(err):
+		return "field-manager conflict, will retry", false
+	case apierrors.IsTooManyRequests(err):
+		return "throttled, will retry", false
+	case apierrors.IsServerTimeout(err) || apierrors.IsTimeout(err) || apierrors.IsServiceUnavailable(err) || apierrors.IsInternalError(err):
+		return "transient server error, will retry", false
+	default:
+		// Unknown cause: treat as transient (a later reconcile re-attempts the
+		// update anyway) but don't claim permanence we can't prove.
+		return "rejected, will retry", false
+	}
+}
+
+// isImmutableFieldError reports whether an Invalid error's status causes name an
+// immutable-field violation (the apiserver phrasing is "field is immutable" or
+// "may not be changed"). Used only to enrich the operator-facing reason.
+func isImmutableFieldError(err error) bool {
+	status := apierrors.APIStatus(nil)
+	if !errors.As(err, &status) {
+		return false
+	}
+	details := status.Status().Details
+	if details == nil {
+		return false
+	}
+	for _, cause := range details.Causes {
+		msg := strings.ToLower(cause.Message)
+		if strings.Contains(msg, "immutable") || strings.Contains(msg, "may not be changed") || strings.Contains(msg, "cannot be changed") {
+			return true
+		}
+	}
+	return false
 }
 
 // recordUpdateRejected records a tolerated per-item UPDATE failure on an
@@ -776,12 +923,21 @@ func (s *Simple) applyCollectionTemplate(ctx context.Context, w watchrouter.Watc
 	// namespaced watch is cheaper than an all-namespaces one, so this avoids
 	// the broad watch for the common single-namespace case.
 	ns := s.collectionWatchNamespace(rt, desired, mappings)
-	if err := s.watchCollection(ctx, w, rt, n, mappings[0].gvr, desired[0], ns); err != nil {
-		// A failure to register the collection drift watch must not abort the
-		// apply: the collection is still applied, only drift re-enqueue is lost
-		// for it. Log and continue.
-		log.FromContext(ctx).Info("collection drift watch registration failed; applying without drift detection for this node",
-			"node", s.qualifiedPath(n.ID()), "gvr", mappings[0].gvr.String(), "err", err.Error())
+	// Register one selector watch per DISTINCT GVR in the collection. A static
+	// collection has a single GVR (mappings all equal), but a dynamic-GVK
+	// collection can render items across several GVRs — registering only
+	// mappings[0] would leave every other rendered type without drift detection.
+	// The coordinator keys watch state by (NodeID, GVR), so one selector watch
+	// per GVR under the same node is correct and non-colliding; a representative
+	// sample object per GVR carries the labels the selector matches.
+	for _, wm := range distinctWatchMappings(desired, mappings) {
+		if err := s.watchCollection(ctx, w, rt, n, wm.gvr, wm.sample, ns); err != nil {
+			// A failure to register a collection drift watch must not abort the
+			// apply: the collection is still applied, only drift re-enqueue is lost
+			// for that GVR. Log and continue.
+			log.FromContext(ctx).Info("collection drift watch registration failed; applying without drift detection for this GVR",
+				"node", s.qualifiedPath(n.ID()), "gvr", wm.gvr.String(), "err", err.Error())
+		}
 	}
 
 	bound := defaultApplyConcurrency
@@ -880,26 +1036,49 @@ func (s *Simple) applyCollectionItem(ctx context.Context, rt *runtime.Runtime, n
 			// the node forever on an unfixable update. (Integration coverage:
 			// collection_test.go deep-chaining scale up/down relies on this.)
 			//
-			// The item is now stale, though, and nothing in the reconcile result
-			// says so: the node converges and the instance reports ready. Log
-			// and count it so the divergence is at least observable.
-			//
-			// TODO: needs further thinking. A log line and a counter are
-			// ephemeral; an operator only sees them if they happen to be
-			// looking. Surfacing this properly likely means tracking degraded
-			// items separately (on ApplyResult, and from there in status) so a
-			// converged-but-diverged node is distinguishable from a healthy one.
-			metrics.GraphItemUpdateRejectedTotal.WithLabelValues(m.gvr.String()).Inc()
-			log.FromContext(ctx).Error(err,
-				"collection item update rejected; item is present but stale (tolerated, node still converges)",
+			// The rejection is NOT escalated to a hard error or a soft not-ready
+			// (that would wedge the node on an unfixable update), but it must not
+			// be fully SILENT either: a desired change did not land while the node
+			// still converges. Emit a warning to the controller log AND, when the
+			// caller wired OnToleratedRejection, an observational signal (the
+			// instance controller records a Warning event) classifying WHY — so a
+			// stale live object is diagnosable in `kubectl describe`, not just in
+			// logs. The signal is observational ONLY: it never touches readiness
+			// gating or requeue, or the anti-wedge tolerance would be lost.
+			reason, permanent := classifyRejection(err)
+			log.FromContext(ctx).Info("collection item update rejected; keeping live object and converging (desired change did not land)",
 				"node", s.qualifiedPath(n.ID()),
-				"namespace", obj.GetNamespace(), "name", obj.GetName())
+				"object", obj.GetNamespace()+"/"+obj.GetName(),
+				"gvk", obj.GroupVersionKind().String(),
+				"reason", reason,
+				"permanent", permanent,
+				"cause", err.Error())
+			if s.OnToleratedRejection != nil {
+				gvk := obj.GroupVersionKind()
+				s.OnToleratedRejection(ToleratedRejection{
+					NodeID:     s.qualifiedPath(n.ID()),
+					APIVersion: gvk.GroupVersion().String(),
+					Kind:       gvk.Kind,
+					Namespace:  obj.GetNamespace(),
+					Name:       obj.GetName(),
+					Reason:     reason,
+					Permanent:  permanent,
+					Cause:      err.Error(),
+				})
+			}
 			st.recordUpdateRejected(i, managedResourceFrom(n, current), desired, current)
 			return nil
 		}
-		// The object does not exist and CREATE failed: record the error
-		// and continue so siblings still apply; the node is held soft
-		// not-ready by the caller.
+		// The object does not exist and CREATE failed. A genuinely malformed
+		// object (Invalid / BadRequest) can never succeed — surface it as a hard
+		// error so the node fails fast instead of requeuing forever on an
+		// unfixable create. Transient/again-later causes (quota, throttling,
+		// RBAC being provisioned, generic errors) stay soft not-ready so the
+		// reconcile retries. Siblings still apply either way.
+		if apierrors.IsInvalid(err) || apierrors.IsBadRequest(err) {
+			st.recordHardError(i, fmt.Errorf("item %s/%s: %w", obj.GetNamespace(), obj.GetName(), err))
+			return nil
+		}
 		st.recordFailure(i, fmt.Errorf("item %s/%s: %w", obj.GetNamespace(), obj.GetName(), err))
 		return nil
 	}
@@ -980,6 +1159,24 @@ func (s *Simple) stampKROMeta(rt *runtime.Runtime, n *runtime.Node, obj *unstruc
 	if n.IsCollection() {
 		labels[metadata.CollectionIndexLabel] = strconv.Itoa(index)
 		labels[metadata.CollectionSizeLabel] = strconv.Itoa(size)
+		// A COLLECTION node's drift watch is a selector watch keyed on
+		// {node-id, instance-id} (watchCollection). On the RGD/instance path the
+		// LabelInjector stamps instance-id (the instance UID); on the standalone
+		// Graph path there is no injector, so stamp the Graph's own UID here so
+		// the applied items match the selector — otherwise drift/deletion events
+		// never match and go unobserved. Only for collections: a SCALAR template
+		// uses a name-based watch (watchObject) that needs no instance-id, and
+		// stamping it there would make two Graphs legitimately sharing a scalar
+		// object (writing disjoint fields) conflict on the instance-id label.
+		// Only set the fallback when no injector will supply it, and never clobber
+		// an injector-provided value.
+		if s.LabelInjector == nil {
+			if _, ok := labels[metadata.InstanceIDLabel]; !ok {
+				if uid := string(rt.Graph().GetUID()); uid != "" {
+					labels[metadata.InstanceIDLabel] = uid
+				}
+			}
+		}
 	}
 	obj.SetLabels(labels)
 
@@ -1316,6 +1513,32 @@ func (s *Simple) collectionWatchNamespace(rt *runtime.Runtime, desired []*unstru
 	return seen
 }
 
+// watchMapping pairs a distinct collection GVR with a representative rendered
+// object of that GVR, used to register one selector drift watch per GVR.
+type watchMapping struct {
+	gvr    schema.GroupVersionResource
+	sample *unstructured.Unstructured
+}
+
+// distinctWatchMappings returns one (gvr, sample) pair per DISTINCT GVR across a
+// collection's items, preserving first-seen order. A static collection collapses
+// to a single entry; a dynamic-GVK collection that renders several GVRs yields
+// one entry each so every rendered type gets a drift watch. desired and mappings
+// are index-aligned (buildMappings guarantees len(mappings)==len(desired)).
+func distinctWatchMappings(desired []*unstructured.Unstructured, mappings []applyMapping) []watchMapping {
+	out := make([]watchMapping, 0, 1)
+	seen := make(map[schema.GroupVersionResource]struct{}, 1)
+	for i := range desired {
+		gvr := mappings[i].gvr
+		if _, dup := seen[gvr]; dup {
+			continue
+		}
+		seen[gvr] = struct{}{}
+		out = append(out, watchMapping{gvr: gvr, sample: desired[i]})
+	}
+	return out
+}
+
 // watchCollection registers a single selector-based watch for a collection
 // node. The coordinator keys watch state by NodeID, so N per-item scalar
 // watches would collapse to only the last item and drift on the others would
@@ -1399,14 +1622,33 @@ func (s *Simple) ssaApply(ctx context.Context, obj *unstructured.Unstructured, f
 // manager without ForceOwnership, so it claims only the fields it sets; a
 // status-subresource patch is routed through the status endpoint. Returns the
 // recorded Contribution so the reconciler can release it on prune.
-func (s *Simple) applyPatch(ctx context.Context, rt *runtime.Runtime, w watchrouter.Watcher, n *runtime.Node, desired []*unstructured.Unstructured) (Contribution, error) {
-	// forEach is rejected on patch nodes at compile time, so Resolve produced
-	// exactly one object.
-	if len(desired) != 1 {
-		return Contribution{}, fmt.Errorf("patch node resolved to %d objects, want 1", len(desired))
+func (s *Simple) applyPatch(ctx context.Context, rt *runtime.Runtime, w watchrouter.Watcher, n *runtime.Node, desired []*unstructured.Unstructured) ([]Contribution, error) {
+	// A patch node may be a singleton (one target) or a forEach collection (the
+	// same contribution fanned out across every rendered target, e.g. a status
+	// writeback to each claimant CR). An empty desired set (forEach over an empty
+	// list) is a no-op, not an error. Each target is patched independently; the
+	// first hard error aborts and returns whatever contributions already landed
+	// so the reconciler can still release them.
+	collection := n.IsCollection()
+	contributions := make([]Contribution, 0, len(desired))
+	for _, obj := range desired {
+		contribution, err := s.applyPatchOne(ctx, rt, w, n, obj, collection)
+		if err != nil {
+			return contributions, err
+		}
+		contributions = append(contributions, contribution)
 	}
-	obj := desired[0]
+	return contributions, nil
+}
 
+// applyPatchOne contributes a single rendered patch object to its target. When
+// collection is true (the node is a forEach patch) the per-object drift watch
+// is skipped: the forEach source is either a watched ref node (drift on a
+// target re-enqueues the Graph there) or a static def (which can't drift
+// without a spec change), and registering N per-object watches under one nodeID
+// would collide in the coordinator's per-node watch state. A singleton patch
+// keeps its drift watch exactly as before.
+func (s *Simple) applyPatchOne(ctx context.Context, rt *runtime.Runtime, w watchrouter.Watcher, n *runtime.Node, obj *unstructured.Unstructured, collection bool) (Contribution, error) {
 	gvr, namespaced, err := s.mappingFor(n, obj)
 	if err != nil {
 		return Contribution{}, err
@@ -1414,13 +1656,22 @@ func (s *Simple) applyPatch(ctx context.Context, rt *runtime.Runtime, w watchrou
 	s.defaultNamespace(rt, namespaced, obj)
 
 	// Register the watch before the read so a change to the target (including
-	// its creation) re-enqueues the Graph.
-	if err := s.watchObject(ctx, w, s.qualifiedPath(n.ID()), gvr, obj); err != nil {
-		// A failure to register the drift watch must not abort the apply: the
-		// patch contribution below still lands, only drift re-enqueue is lost.
-		// Log and continue.
-		log.FromContext(ctx).Info("drift watch registration failed; applying patch without drift detection",
-			"node", s.qualifiedPath(n.ID()), "gvr", gvr.String(), "err", err.Error())
+	// its creation) re-enqueues the Graph. Skipped for a self-watch-exempt node
+	// (the synthesized author-status writeback): its target is the reconciled
+	// instance's own status subresource, so watching it would re-enqueue the
+	// instance on its own status write — a self-perpetuating loop, since the
+	// drift-watch enqueue path is not generation-guarded and a status write
+	// doesn't bump generation. The instance's parent informer already drives its
+	// reconciliation, so the watch is redundant as well as harmful. Also skipped
+	// for a collection (forEach) patch — see applyPatchOne's doc.
+	if !n.SelfWatchExempt() && !collection {
+		if err := s.watchObject(ctx, w, s.qualifiedPath(n.ID()), gvr, obj); err != nil {
+			// A failure to register the drift watch must not abort the apply: the
+			// patch contribution below still lands, only drift re-enqueue is lost.
+			// Log and continue.
+			log.FromContext(ctx).Info("drift watch registration failed; applying patch without drift detection",
+				"node", s.qualifiedPath(n.ID()), "gvr", gvr.String(), "err", err.Error())
+		}
 	}
 
 	current, err := s.getLive(ctx, obj)
@@ -1493,6 +1744,27 @@ func (s *Simple) Release(ctx context.Context, contributions []Contribution) erro
 		obj.SetNamespace(c.Namespace)
 		obj.SetName(c.Name)
 
+		// Release relinquishes this manager's field-ownership claim on an
+		// EXISTING target. GET first so we never recreate a target that was
+		// legitimately deleted: a server-side Apply of an identity-only object
+		// with no live object present would CREATE it (a bare, unwanted
+		// resource). Only patch when the object is confirmed present.
+		live := &unstructured.Unstructured{}
+		live.SetGroupVersionKind(obj.GroupVersionKind())
+		getErr := s.Client.Get(ctx, client.ObjectKey{Namespace: c.Namespace, Name: c.Name}, live)
+		if getErr != nil {
+			// Target object gone (NotFound) or its type gone (the CRD was
+			// removed → NoMatch): nothing to release, treat as already-released.
+			if apierrors.IsNotFound(getErr) || meta.IsNoMatchError(getErr) {
+				continue
+			}
+			// A transient discovery/transport failure (apiserver unavailable,
+			// throttling) must NOT be mistaken for a missing target — return it
+			// so the caller retries rather than silently dropping the release.
+			return fmt.Errorf("release %s/%s %s: get target: %w",
+				c.APIVersion, c.Kind, refName(expv1alpha1.ManagedResource{Namespace: c.Namespace, Name: c.Name}), getErr)
+		}
+
 		var err error
 		if c.Subresource == "status" {
 			err = s.Client.Status().Patch(ctx, obj, client.Apply, client.FieldOwner(c.FieldManager))
@@ -1500,7 +1772,10 @@ func (s *Simple) Release(ctx context.Context, contributions []Contribution) erro
 			err = s.Client.Patch(ctx, obj, client.Apply, client.FieldOwner(c.FieldManager))
 		}
 		if err != nil {
-			if apierrors.IsNotFound(err) {
+			// The target was deleted between our GET and the patch: still
+			// already-released, tolerate. (A NoMatch here would likewise mean
+			// the type went away in the same window.)
+			if apierrors.IsNotFound(err) || meta.IsNoMatchError(err) {
 				continue
 			}
 			return fmt.Errorf("release %s/%s %s (manager %q): %w",
@@ -1519,13 +1794,42 @@ const patchFieldManagerPrefix = "kro-graphengine.patch."
 // subgraphs that reuse a local id distinct; embedding graphSeg lets the
 // conflict classifier recognize two managers of the same Graph as our own
 // (vs a peer). nodeID is the node's fully-qualified path (e.g. "subA/res").
+//
+// Exported as PatchFieldManager so the graph controller's contribution
+// write-ahead projects the SAME field-manager identity the executor will apply
+// under — the two must not drift, or a write-ahead ledger entry would fail to
+// correlate with the contribution Release later looks for.
 func patchFieldManager(parentUID types.UID, nodeID string) string {
+	return PatchFieldManager(parentUID, nodeID)
+}
+
+// PatchFieldManager is the exported, drift-proof derivation of a patch node's
+// field-manager identity. See patchFieldManager. parentUID is the Graph UID;
+// nodeID is the node's fully-qualified path.
+func PatchFieldManager(parentUID types.UID, nodeID string) string {
 	h := sha256.New()
 	h.Write([]byte(parentUID))
 	h.Write([]byte("/"))
 	h.Write([]byte(nodeID))
 	sum := h.Sum(nil)
 	return patchFieldManagerPrefix + graphManagerSegment(parentUID) + "." + hex.EncodeToString(sum[:6])
+}
+
+// IsPatchFieldManager reports whether manager is one of kro's dedicated patch
+// server-side-apply field managers (prefix "kro-graphengine.patch."). The
+// finalizer's Release path uses this to refuse relinquishing a NON-kro manager:
+// on the instance path the patch-contribution inventory is a client-editable
+// annotation (the instance is a dynamic RGD-generated CR whose status cannot
+// carry an internal kro field), so a principal with patch rights on the
+// instance could forge a contribution naming an arbitrary field manager (e.g.
+// "kubectl" or another controller's) on some target and weaponize kro's
+// privileged finalizer to strip that manager's fields off the object. Only a
+// kro patch manager is ever legitimately recorded, so releasing anything else
+// is refused. (Release is already non-destructive — it relinquishes field
+// ownership, never deletes — and GET-first; this closes the cross-manager
+// escalation the annotation would otherwise allow.)
+func IsPatchFieldManager(manager string) bool {
+	return strings.HasPrefix(manager, patchFieldManagerPrefix)
 }
 
 // patchManagerGraphSegment returns the per-Graph segment of a patch manager

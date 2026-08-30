@@ -15,9 +15,7 @@
 // Package rgdadapter – instance status projection.
 //
 // After executor.Apply has reconciled the Graph nodes, the runtime scope
-// holds each node's observed value.  ProjectInstanceStatus evaluates the
-// RGD's spec.schema.status CEL expressions against that scope to produce
-// the instance's status map.  ProjectInstanceConditions evaluates the
+// holds each node's observed value.  ProjectInstanceConditions evaluates the
 // status.conditions block that uses runtime.newCondition(…).
 package rgdadapter
 
@@ -34,107 +32,15 @@ import (
 	"github.com/google/cel-go/common/types/ref"
 	"github.com/google/cel-go/common/types/traits"
 	"k8s.io/apiserver/pkg/cel/openapi"
+	"k8s.io/kube-openapi/pkg/validation/spec"
 
 	"github.com/kubernetes-sigs/kro/api/v1alpha1"
 	krocel "github.com/kubernetes-sigs/kro/pkg/cel"
 	"github.com/kubernetes-sigs/kro/pkg/cel/library"
 	celunstructured "github.com/kubernetes-sigs/kro/pkg/cel/unstructured"
 	"github.com/kubernetes-sigs/kro/pkg/graph"
-	"github.com/kubernetes-sigs/kro/pkg/graph/resolver"
 	"github.com/kubernetes-sigs/kro/pkg/graphengine/runtime"
 )
-
-// ProjectInstanceStatus evaluates the RGD's spec.schema.status CEL
-// expressions against the reconciled runtime scope and returns a flat
-// map[string]any that callers can patch onto the instance's .status.
-//
-// The routine:
-//  1. Unmarshals RGD.Spec.Schema.Status.Raw.
-//  2. Calls graph.ParseStatusExpressions to separate condition fields from
-//     regular fields (and strip the ${…} wrappers).
-//  3. Builds a transient CEL environment containing every Graph-node ID
-//     in the runtime scope as an untyped (dyn) variable.
-//  4. Compiles and evaluates each field expression against rt.Scope().
-//  5. Sets the result at the field's path in the output map.
-//
-// The function is intentionally schemaless (dyn) at projection time: we
-// have already proved the expressions are valid at Graph-compile time; we
-// only need their runtime values here.
-//
-// status.conditions entries are excluded — call ProjectInstanceConditions
-// for those.
-func ProjectInstanceStatus(
-	rt *runtime.Runtime,
-	rgd *v1alpha1.ResourceGraphDefinition,
-) (map[string]any, error) {
-	if rt == nil {
-		return nil, fmt.Errorf("status projection: runtime is required")
-	}
-	if rgd == nil {
-		return nil, fmt.Errorf("status projection: rgd is required")
-	}
-
-	statusMap, err := unmarshalStatusRaw(rgd)
-	if err != nil {
-		return nil, err
-	}
-	if statusMap == nil {
-		// No status block defined.
-		return map[string]any{}, nil
-	}
-
-	// Parse: separates conditions from plain fields; mutates statusMap to
-	// remove the conditions key.
-	fields, _, noExprFields, err := graph.ParseStatusExpressions(statusMap)
-	if err != nil {
-		return nil, fmt.Errorf("status projection: parse: %w", err)
-	}
-	if len(fields) == 0 && len(noExprFields) == 0 {
-		return map[string]any{}, nil
-	}
-
-	// Declare every node ID (not just published scope keys) so a field that
-	// references a not-yet-applied node (includeWhen=false, or data pending)
-	// surfaces as a runtime data-pending error we can skip per-field, instead
-	// of a compile-time undeclared-reference error that fails the whole
-	// projection and drops sibling fields that DID resolve.
-	env, err := buildStatusEnvForNodes(rt, false)
-	if err != nil {
-		return nil, fmt.Errorf("status projection: build env: %w", err)
-	}
-
-	// Use schema-aware scope so CEL sees correctly typed values
-	// (e.g. Secret.data as bytes for string(bytes) conversions).
-	saScope := schemaAwareScope(rt.Scope(), rt)
-
-	result := make(map[string]any, len(fields))
-	for _, f := range fields {
-		val, err := evalStatusExpr(env, saScope, f.Expression)
-		if err != nil {
-			if runtime.IsCELDataPending(err) {
-				// Dependency not observable this cycle: drop the field so a
-				// field whose dependency is unavailable disappears rather
-				// than failing the whole projection.
-				continue
-			}
-			return nil, fmt.Errorf("status projection: field %q: %w", f.Path, err)
-		}
-		if err := setAtPath(result, f.Path, val); err != nil {
-			return nil, fmt.Errorf("status projection: set %q: %w", f.Path, err)
-		}
-	}
-	// Literal (expression-free) status fields copy through unchanged.
-	for _, path := range noExprFields {
-		val, ok := getAtPath(statusMap, path)
-		if !ok {
-			continue
-		}
-		if err := setAtPath(result, path, val); err != nil {
-			return nil, fmt.Errorf("status projection: set literal %q: %w", path, err)
-		}
-	}
-	return result, nil
-}
 
 // ErrConditionProjectionDegraded indicates that one or more author condition
 // expressions failed evaluation fatally or produced duplicate types. The
@@ -162,6 +68,7 @@ func ProjectInstanceConditions(
 	rt *runtime.Runtime,
 	rgd *v1alpha1.ResourceGraphDefinition,
 	kroBuiltins []v1alpha1.Condition,
+	costLimit uint64,
 ) (conditions []library.Condition, incomplete bool, err error) {
 	if rt == nil {
 		return nil, false, fmt.Errorf("condition projection: runtime is required")
@@ -202,14 +109,23 @@ func ProjectInstanceConditions(
 	saScope := schemaAwareScope(rt.Scope(), rt)
 	scope := make(map[string]any, len(saScope)+2)
 	maps.Copy(scope, saScope)
-	scope[SchemaNodeID] = schemaWithBuiltinConditions(rt.Scope()[SchemaNodeID], kroBuiltins)
+	// The `schema` node schema (declared instance shape) is needed to re-wrap
+	// the conditions-overlaid object so schema-derived CEL typing (byte,
+	// date-time, number, …) survives for author conditions that read schema.*.
+	var schemaVarSchema *spec.Schema
+	if rgd.Spec.Schema != nil {
+		if sc, scErr := graph.InstanceSchemaForCEL(rgd); scErr == nil {
+			schemaVarSchema = sc
+		}
+	}
+	scope[SchemaNodeID] = schemaWithBuiltinConditions(rt.Scope()[SchemaNodeID], kroBuiltins, schemaVarSchema)
 	scope[library.RuntimeVarName] = library.RuntimeSingleton
 
 	var out []library.Condition
 	var failures []string
 	for _, rawExpr := range conditionExprs {
 		inner := unwrapExpr(rawExpr)
-		raw, evalErr := evalConditionRaw(env, scope, inner)
+		raw, evalErr := evalConditionRaw(env, scope, inner, costLimit)
 		if evalErr != nil {
 			if runtime.IsCELDataPending(evalErr) {
 				incomplete = true
@@ -242,7 +158,15 @@ func ProjectInstanceConditions(
 // variable for author-condition evaluation: the instance's spec/metadata
 // with status replaced by a synthesized status.conditions[] holding kro's
 // built-in conditions.
-func schemaWithBuiltinConditions(schemaVal any, kroBuiltins []v1alpha1.Condition) any {
+//
+// schemaVal is the runtime scope's `schema` value, which is normally a
+// schema-aware ref.Val (celunstructured.UnstructuredToVal) rather than a bare
+// map. We extract its underlying object, overlay the conditions on a copy,
+// and RE-WRAP with schemaVarSchema so schema-derived CEL typing (byte,
+// date-time, number, …) survives for author conditions that read schema.*.
+// When schemaVarSchema is nil (schemaless RGD) the raw overlaid map is
+// returned unwrapped, matching the pre-existing schemaless contract.
+func schemaWithBuiltinConditions(schemaVal any, kroBuiltins []v1alpha1.Condition, schemaVarSchema *spec.Schema) any {
 	builtinList := make([]any, 0, len(kroBuiltins))
 	for _, c := range kroBuiltins {
 		entry := map[string]any{
@@ -261,14 +185,42 @@ func schemaWithBuiltinConditions(schemaVal any, kroBuiltins []v1alpha1.Condition
 	}
 	status := map[string]any{"conditions": builtinList}
 
-	obj, ok := schemaVal.(map[string]any)
-	if !ok {
+	// Extract the underlying object. The scope value is a schema-aware
+	// ref.Val (*unstructuredMap) whose Value() returns the raw map; a bare
+	// map is also accepted (schemaless / test paths).
+	obj := underlyingObject(schemaVal)
+	if obj == nil {
+		// No usable object: fall back to a status-only map so
+		// runtime.condition(schema, _) at least finds the built-ins.
 		return map[string]any{"status": status}
 	}
 	out := make(map[string]any, len(obj))
 	maps.Copy(out, obj)
 	out["status"] = status
+
+	// Re-wrap so schema-derived typing survives the overlay. Without this,
+	// a raw map loses format-driven CEL types (bytes/date-time/number) that
+	// author conditions referencing schema.* rely on.
+	if schemaVarSchema != nil {
+		return celunstructured.UnstructuredToVal(out, &openapi.Schema{Schema: schemaVarSchema})
+	}
 	return out
+}
+
+// underlyingObject returns the raw map[string]any backing a scope value that
+// may be a schema-aware ref.Val (celunstructured.UnstructuredToVal wraps the
+// instance object as an *unstructuredMap whose Value() is the map) or a bare
+// map. Returns nil when neither shape applies.
+func underlyingObject(v any) map[string]any {
+	switch val := v.(type) {
+	case map[string]any:
+		return val
+	case ref.Val:
+		if m, ok := val.Value().(map[string]any); ok {
+			return m
+		}
+	}
+	return nil
 }
 
 // schemaAwareScope returns a copy of rawScope where each value that has a
@@ -369,22 +321,15 @@ func buildStatusEnvForNodes(rt *runtime.Runtime, includeRuntime bool) (*cel.Env,
 	return krocel.DefaultEnvironment(opts...)
 }
 
-// getAtPath reads the value at the dotted path in m, navigating
-// map[string]any levels only. Only simple dot-separated paths (no array
-// indices) are supported — same limitation as setAtPath. A non-map
-// intermediate is treated as not-found.
-func getAtPath(m map[string]any, path string) (any, bool) {
-	r := resolver.NewResolver(m, nil)
-	v, err := r.GetValueAtPath(path)
-	if err != nil {
-		return nil, false
-	}
-	return v, true
-}
+// getAtPath removed with ProjectInstanceStatus (author status is now written
+// by the synthesized status-patch node); see git history.
 
 // compileCEL parses, type-checks, and programs a plain CEL expression (no
 // ${…} wrapper) against env, wrapping each stage's error with expr context.
-func compileCEL(env *cel.Env, expr string) (cel.Program, error) {
+// costLimit (0 = disabled) bounds evaluation cost so author status/condition
+// expressions share the same execution bound as graph expressions rather than
+// running unbounded.
+func compileCEL(env *cel.Env, expr string, costLimit uint64) (cel.Program, error) {
 	parsed, issues := env.Parse(expr)
 	if issues != nil && issues.Err() != nil {
 		return nil, fmt.Errorf("parse %q: %w", expr, issues.Err())
@@ -393,30 +338,19 @@ func compileCEL(env *cel.Env, expr string) (cel.Program, error) {
 	if issues != nil && issues.Err() != nil {
 		return nil, fmt.Errorf("check %q: %w", expr, issues.Err())
 	}
-	prog, err := env.Program(checked, krocel.DefaultProgramOptions()...)
+	prog, err := env.Program(checked, krocel.ProgramOptions(costLimit)...)
 	if err != nil {
 		return nil, fmt.Errorf("program %q: %w", expr, err)
 	}
 	return prog, nil
 }
 
-// evalStatusExpr compiles and evaluates a plain CEL expression (no ${…}
-// wrapper) against scope.  Returns the Go-native result.
-func evalStatusExpr(env *cel.Env, scope map[string]any, expr string) (any, error) {
-	prog, err := compileCEL(env, expr)
-	if err != nil {
-		return nil, err
-	}
-	e := &krocel.Expression{Original: expr, Program: prog}
-	return e.Eval(scope)
-}
-
 // evalConditionRaw compiles and evaluates a runtime.newCondition(…) expression
 // and returns the raw CEL ref.Val for the caller to flatten. We call
 // cel.Program.Eval directly (not krocel.Expression.Eval) because Go-native
 // conversion does not know the custom *library.Condition ref.Val type.
-func evalConditionRaw(env *cel.Env, scope map[string]any, expr string) (ref.Val, error) {
-	prog, err := compileCEL(env, expr)
+func evalConditionRaw(env *cel.Env, scope map[string]any, expr string, costLimit uint64) (ref.Val, error) {
+	prog, err := compileCEL(env, expr, costLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -493,12 +427,4 @@ func unwrapExpr(s string) string {
 		s = strings.TrimSuffix(s, "}")
 	}
 	return s
-}
-
-// setAtPath writes val at the path in m (supporting dot-separated paths
-// and array indices like endpoints[0]), creating intermediate maps and slices
-// as needed.
-func setAtPath(m map[string]any, path string, val any) error {
-	r := resolver.NewResolver(m, nil)
-	return r.UpsertValueAtPath(path, val)
 }

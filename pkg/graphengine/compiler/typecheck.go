@@ -24,7 +24,6 @@ import (
 	"k8s.io/kube-openapi/pkg/validation/spec"
 
 	krocel "github.com/kubernetes-sigs/kro/pkg/cel"
-	"github.com/kubernetes-sigs/kro/pkg/cel/conversion"
 	"github.com/kubernetes-sigs/kro/pkg/graph/fieldpath"
 	"github.com/kubernetes-sigs/kro/pkg/graph/schema"
 	"github.com/kubernetes-sigs/kro/pkg/graph/variable"
@@ -299,9 +298,22 @@ func validateAndCompileNode(bc *buildContext, n *Node, payloadSchema *spec.Schem
 	// that typed var. Non-collection readyWhen keeps compiling against bc.env.
 	readyEnv := bc.env
 	if n.IsCollection() {
-		readyEnv, err = bc.extendWithTypedVar(bc.env, EachVarName, elementSchema)
-		if err != nil {
-			return fmt.Errorf("extend env with %q for readyWhen: %w", EachVarName, err)
+		if elementSchema == nil {
+			// A dynamic-GVK collection (e.g. a Ref-with-selector whose GVK is
+			// a CEL expression) has no compile-time element schema. The
+			// runtime still binds `each` per element, so declare it as dyn —
+			// mirroring the forEach dyn-iterator path — rather than leaving it
+			// undeclared, which would make a readyWhen referencing `each` fail
+			// to compile.
+			readyEnv, err = bc.extendWithIterators(bc.env, map[string]*cel.Type{EachVarName: cel.DynType})
+			if err != nil {
+				return fmt.Errorf("extend env with dyn %q for readyWhen: %w", EachVarName, err)
+			}
+		} else {
+			readyEnv, err = bc.extendWithTypedVar(bc.env, EachVarName, elementSchema)
+			if err != nil {
+				return fmt.Errorf("extend env with %q for readyWhen: %w", EachVarName, err)
+			}
 		}
 	}
 	if err := validateAndCompileConditions(bc, readyEnv, n.ReadyWhen, n.ID, "readyWhen"); err != nil {
@@ -322,16 +334,33 @@ func validateAndCompileConditions(bc *buildContext, env *cel.Env, exprs []*kroce
 			return fmt.Errorf("node %q: %s[%d] (%q): %w", nodeID, kind, i, expr.UserExpression(), err)
 		}
 		out := checked.OutputType()
-		// Accept bool, optional<bool>, or dyn. dyn covers def-sourced
-		// expressions (the static type can't be narrowed); optional<bool>
-		// covers CEL optional macros / ?-accessor returns. Anything else
-		// (string, int, list, struct) is almost always a user mistake.
-		if !conversion.IsBoolOrOptionalBool(out) && out != cel.DynType {
-			return fmt.Errorf("node %q: %s[%d] (%q) must return bool or optional<bool>, got %s",
+		// Accept bool or dyn. dyn covers def-sourced expressions (the static
+		// type can't be narrowed). An optional<bool> is rejected: an empty
+		// optional (optional.none()) has no boolean value, which becomes a
+		// runtime error where a condition must decide include/ready. Reject it
+		// at compile time and tell the author to collapse it to a concrete
+		// bool. Anything else (string, int, list, struct) is a user mistake.
+		if isOptionalBool(out) {
+			return fmt.Errorf("node %q: %s[%d] (%q) returns optional<bool>, which becomes a runtime error when empty; "+
+				"make it a concrete bool (e.g. append .orValue(false))",
+				nodeID, kind, i, expr.UserExpression())
+		}
+		if !cel.BoolType.IsAssignableType(out) && out != cel.DynType {
+			return fmt.Errorf("node %q: %s[%d] (%q) must return bool, got %s",
 				nodeID, kind, i, expr.UserExpression(), out.String())
 		}
 	}
 	return nil
+}
+
+// isOptionalBool reports whether t is optional<bool> (as opposed to a plain
+// bool or dyn). Used to reject optional-typed condition expressions, whose
+// empty case has no boolean value.
+func isOptionalBool(t *cel.Type) bool {
+	if cel.BoolType.IsAssignableType(t) {
+		return false // a plain bool, not an optional
+	}
+	return cel.OptionalType(cel.BoolType).IsAssignableType(t)
 }
 
 // validateAndCompileForEach compiles each forEach axis, requires it to

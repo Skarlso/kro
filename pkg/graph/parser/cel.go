@@ -18,6 +18,7 @@ package parser
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 )
 
@@ -30,6 +31,11 @@ const (
 // ErrNestedExpression is returned for a nested expression that is not escaped
 // with quotes: ${outer("${inner}")} is allowed, but ${outer(${inner})} is not.
 var ErrNestedExpression = errors.New("nested expressions are not allowed unless inside string literals")
+
+// ErrUnterminatedExpression is returned when a "${" has no matching closing
+// "}" before the end of the input. Such input was previously swallowed and
+// treated as literal string data, silently discarding the author's intent.
+var ErrUnterminatedExpression = errors.New("unterminated expression")
 
 // exprMatch holds a parsed CEL expression and its position in the original string.
 type exprMatch struct {
@@ -58,10 +64,8 @@ func extractExpressions(str string) ([]exprMatch, error) {
 		// nested expressions, dictionary building expressions, and string literals
 		bracketCount := 1
 		endIdx := startIdx + len(exprStart)
-		// Delimiter that opened the literal we are inside, 0 when outside one.
-		// CEL accepts both '...' and "..."; tracking only double quotes made
-		// `${s.contains('${')}` look like a nested expression.
-		var quoteChar byte
+		inStringLiteral := false
+		var quoteChar byte // the opening quote of the current literal ('\'' or '"')
 		escapeNext := false
 
 		for endIdx < len(str) {
@@ -81,16 +85,19 @@ func extractExpressions(str string) ([]exprMatch, error) {
 				continue
 			}
 
-			// Only the opening delimiter closes the literal, so a '"' inside
-			// '...' is ordinary text.
-			if c == '"' || c == '\'' {
-				switch quoteChar {
-				case 0:
-					quoteChar = c
-				case c:
+			// Handle string literal boundaries. CEL allows both single- and
+			// double-quoted string literals; a quote of the other kind inside
+			// a literal is ordinary text, so we only close on the same quote
+			// character that opened the literal.
+			if inStringLiteral {
+				if c == quoteChar {
+					inStringLiteral = false
 					quoteChar = 0
 				}
-			} else if quoteChar == 0 {
+			} else if c == '"' || c == '\'' {
+				inStringLiteral = true
+				quoteChar = c
+			} else {
 				// Only count braces when not inside a string literal
 				if c == '{' {
 					bracketCount++
@@ -100,18 +107,20 @@ func extractExpressions(str string) ([]exprMatch, error) {
 						break
 					}
 				} else if endIdx+1 < len(str) && str[endIdx:endIdx+2] == "${" {
-					// Outside any literal, so genuinely nested. The quoted form
-					// ${outer("${inner}")} never reaches here.
-					return nil, ErrNestedExpression
+					// Allow nested expressions, but only if they are escaped
+					// with quotes (single or double).
+					if prev := str[endIdx-1]; prev != '"' && prev != '\'' {
+						return nil, ErrNestedExpression
+					}
 				}
 			}
 			endIdx++
 		}
 
 		if bracketCount != 0 {
-			// Incomplete expression, move to next character and continue
-			start++
-			continue
+			// A "${" that never closes before EOF is an authoring error, not
+			// literal data: report it rather than silently swallowing it.
+			return nil, fmt.Errorf("%w starting at offset %d", ErrUnterminatedExpression, startIdx)
 		}
 
 		// The expression is the substring between the start and end indices

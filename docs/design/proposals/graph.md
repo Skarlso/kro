@@ -1,6 +1,6 @@
 # KREP-024: Graph
 
-> **Implementation status (as of v1alpha1):** This proposal document has been partially reconciled with the shipped implementation in `pkg/graphengine/` and `pkg/controller/graph/`. Key architectural differences from earlier drafts — including unified `ref:` for collections (superseding `watch:`), explicit `graph:` subgraph nodes, `PatchSpec` structure and constraints (`subresource`/`body`, no `forEach`), collection expansion caps (`MaxCollectionSize`), and the `Accepted`/`ResourcesConverged`/`Ready` condition model — are reflected below. Features marked as "Planned" or "Not yet implemented" (such as KREP-006 `propagateWhen` and lifecycle signals) remain future work. Remaining design claims may still drift.
+> **Implementation status (as of v1alpha1):** This proposal document has been partially reconciled with the shipped implementation in `pkg/graphengine/` and `pkg/controller/graph/`. Key architectural differences from earlier drafts — including unified `ref:` for collections (superseding `watch:`), explicit `graph:` subgraph nodes, the raw-manifest `patch:` API (a `Patch *runtime.RawExtension` field authored exactly like `template:` — no `PatchSpec` wrapper, no `subresource`/`body` fields, no `forEach`; the target endpoint is derived from field presence, see `api/v1alpha1/graph_types.go:208`), collection expansion caps (`MaxCollectionSize`), and the `Accepted`/`ResourcesConverged`/`Ready` condition model — are reflected below. Note also that RGD is no longer a sibling engine: the RGD controller now unconditionally routes through the graph engine (it issues `GraphRevision` objects and serves compiled graphs through the shared runtime; see `pkg/controller/resourcegraphdefinition/controller_reconcile.go`). Features marked as "Planned" or "Not yet implemented" (such as KREP-006 `propagateWhen` and lifecycle signals) remain future work. Remaining design claims may still drift.
 
 ## Summary
 
@@ -35,6 +35,23 @@ Beyond the RGD proof, Graph enables patterns that are simpler than what RGD can 
 - [Singleton](../../../examples/graph/singleton.yaml) — fan-in with priority-based resolution when
   multiple actors claim the same resource.
 
+> **These examples are illustrative.** They are shipped to demonstrate patterns, not as guaranteed
+> ready-to-run manifests, and not all of them necessarily compile or run as-is pending follow-up.
+> For instance, the RGD example generates a child Graph whose spec can be invalid even while the
+> outer Graph is valid (nested Graphs reconcile independently — see Nested Graphs), and the CoreDNS
+> example embeds inline Corefile `health { ... }` / `forward { ... }` blocks that a given pinned
+> CoreDNS image may reject. Treat them as starting points to adapt, not as tested deployments.
+>
+> **Prerequisite — an applier ServiceAccount and its RBAC.** A standalone Graph applies its
+> resources under an **impersonated ServiceAccount** in the Graph's own namespace, not the kro
+> controller identity (`pkg/controller/graph/impersonation.go` — `serviceAccountUsername`). By
+> default that is the namespace's `default` ServiceAccount; override it with
+> `spec.serviceAccountName`. That ServiceAccount must hold the RBAC (Roles/ClusterRoles +
+> bindings) for every resource type the Graph creates, patches, reads, or prunes — the linked
+> examples do **not** ship that ServiceAccount or its RBAC, so you must provision it (and grant the
+> kro controller the `impersonate` verb) before a Graph will apply. See
+> [Security Posture](#security-posture) for the full model.
+
 ### What this KREP covers
 
 **Proposed:** The Graph Kind — node types (`template`, `patch`, `ref`, `graph`, `def`), dependency
@@ -48,10 +65,14 @@ These mechanisms carry forward with the same semantics and are not redefined by 
 **Defers to KREP-006 (Planned / Not yet implemented):** `propagateWhen` gating semantics, `.ready()` and `.updated()` lifecycle
 signals, collection-level rollout strategies, and budget syntax. These features are deferred to KREP-006 and are not yet implemented in the engine.
 
-**Relationship to RGD:** Graph is proposed as a sibling primitive. RGD continues to work unchanged.
-We have the option to implement RGD's internals on top of Graph in the future, but for the immediate
-term both implementations live as siblings sharing significant code in the underlying graph engine.
-Graph is additive — it does not replace or deprecate RGD.
+**Relationship to RGD:** Graph and RGD are no longer sibling engines. As shipped, the RGD controller
+has been migrated onto the graph engine unconditionally: every RGD compiles to `GraphRevision`
+objects and its instances are reconciled through the shared graph runtime
+(`pkg/controller/resourcegraphdefinition/controller_reconcile.go` — the reconcile loop issues a
+`GraphRevision` via `createGraphRevision` and serves the compiled graph). RGD remains a
+user-facing Kind with unchanged external behavior, but internally it _is_ a graph. Graph is still
+additive at the API surface — it does not replace or deprecate the RGD Kind — but the two share one
+engine rather than two.
 
 ## Proposed API
 
@@ -291,7 +312,10 @@ Reconciliation proceeds in topological order derived from hard dependency edges:
 2. **Evaluation & Scope:** A node evaluates as soon as its hard dependencies are in scope — meaning they have been applied and their observed state is available from the cluster. Nodes do not wait for upstream dependencies to pass `readyWhen`.
 3. **Application & Field Management:**
    - `template:` nodes apply their desired manifest via Server-Side Apply (SSA). On the RGD/instance path the shared field manager `kro.run/applyset` is used with force ownership. On the standalone Graph path a per-Graph field manager `kro-graphengine.tmpl.<graph>.<node>` is used **without** force so the API server reports a field-level conflict: a field owned by a _peer Graph's_ template manager is never stolen (the node is held soft not-ready), external drift (a human or another controller) is reclaimed with force, and a conflict with the _same_ Graph's own manager (a sibling node) is exempted rather than reported as foreign.
-   - `patch:` nodes apply contributed fields under a dedicated per-node field manager (`kro-graphengine.patch.<graph>.<node>`) without force. A conflict with this Graph's own stale patch identity (a re-keyed node, or a legacy pre-segment manager) is force-reclaimed; a foreign or peer-Graph field is left as a soft conflict. On delete or prune, releasing the contribution applies an empty object under that manager to relinquish field ownership without deleting the target object.
+   - `patch:` nodes apply contributed fields under a dedicated per-node field manager (`kro-graphengine.patch.<graph>.<node>`). Force behavior **differs by target endpoint** (`pkg/graphengine/executor/simple.go:1495` `contributeApply`):
+     - A **status-subresource** patch (a top-level `status:` field) always applies **with** force ownership (`client.ForceOwnership`, `simple.go:1497`). Status writeback must reclaim status fields from a legacy `Update`-manager takeover (the pre-SSA controller wrote status via `Update`, which leaves fields owned by the `before-first-apply`/manager-update identity); without force the first status apply would 409 forever. SSA scopes the force to only the fields this manager sets.
+     - A **main-resource** patch (`spec:`, `data:`, `metadata.labels`/`annotations`, etc.) applies **without** force (`simple.go:1499`), so the API server reports a field-level 409 rather than silently stealing a field owned by a human, another controller, or a peer Graph — the caller surfaces that as soft not-ready. The one exception is a conflict with this Graph's own stale patch identity (a re-keyed node, or a legacy pre-segment manager), which is force-reclaimed since unforced it would deadlock forever.
+   - The ownership implication: a status patch will _take over_ status fields another manager currently owns, while a main-resource patch is cooperative and will not. On delete or prune, releasing a contribution applies an empty object under that manager to relinquish field ownership without deleting the target object.
 4. **Reconciliation Parallelism:** Within a single Graph, nodes evaluate serially in topological order; collection instances evaluate in bounded parallel (default ApplyConcurrency=20). Across Graphs, reconciliation is fully parallel via controller-runtime's work queue.
 
 _(Note: `propagateWhen` gating and `.ready()` lifecycle signals are deferred to KREP-006 and not yet implemented in the engine.)_
@@ -301,15 +325,35 @@ _(Note: `propagateWhen` gating and `.ready()` lifecycle signals are deferred to 
 Graph supports two forms of nesting:
 
 1. **Inline Subgraphs (`graph:` node):** An explicit `graph:` node embeds a child `GraphSpec` inline. The compiler compiles this into a child `SubProgram` frame with lexical scoping. Ancestor node references are captured as dependencies of the subgraph node, while expressions inside the subgraph cannot mix frames.
-2. **Stamping Graph Custom Resources (`template:` node with `kind: Graph`):** A parent Graph can stamp child `Graph` custom resources into the cluster (for example, combined with `forEach`). The child Graph is applied as an independent Kubernetes object and reconciled asynchronously by the Graph controller.
+2. **Stamping Graph Custom Resources (`template:` node with `kind: Graph`):** A parent Graph can stamp child `Graph` custom resources into the cluster (for example, combined with `forEach`). The child Graph is applied as an independent Kubernetes object and reconciled **asynchronously** by the Graph controller — the parent's apply of the child object completes as soon as the object exists, and the child then compiles and converges on its own reconcile.
+
+> **Revision history is not implemented for standalone/nested Graphs.** Only the RGD controller
+> issues `GraphRevision` objects (via `createGraphRevision` in
+> `pkg/controller/resourcegraphdefinition/`). The standalone Graph controller
+> (`pkg/controller/graph/`) keeps **only an in-memory compiled-program cache** — a
+> `registry.Registry` keyed by `(namespace, name)` and a spec hash
+> (`pkg/controller/graph/controller.go:74`, `:268`) — and creates no `GraphRevision` objects. So
+> the KREP-013 claim that "each nested Graph gets independent revisions" is a not-yet-built
+> aspiration: nested and standalone Graphs have no persisted revision history, only the in-memory
+> program cache.
+
+> **Asynchronous nesting has no automatic parent-waits-for-child gating.** Because a stamped child
+> reconciles on its own loop, a parent's `ResourcesConverged`/`Ready` reflects only the parent's own
+> nodes — the parent can report `Ready` while a stamped child is still invalid, compiling, or
+> unready. There is no cross-Graph readiness edge in `pkg/controller/graph/`. If a parent's readiness
+> must depend on a child's, that has to be wired explicitly: the parent must `ref:` the stamped
+> child Graph object and put its `Ready` condition into a `readyWhen` expression. Nothing gates the
+> parent on the child automatically.
 
 #### Deferral Boundaries for Stamped Graphs
 
-When stamping child Graph resources via a `template:` node, child CEL expressions live as literal strings inside the parent's template:
+When stamping child Graph resources via a `template:` node, child CEL expressions live as literal strings inside the parent's template. The shipped scanner (`pkg/graph/parser/cel.go` — `extractExpressions`) tracks single- and double-quoted string literals and only permits a nested `${` when it is **immediately preceded by a quote character** (`'` or `"`); a bare nested `${...}` is rejected (`ErrNestedExpression`), and a `${` that never closes before end-of-input is rejected (`ErrUnterminatedExpression`). The supported deferral forms follow directly from that scanner:
 
-- `${...}` — evaluated by the current (parent) Graph
-- `${'${...}'}` — a CEL string literal; the parent evaluates it to produce the text `${...}`, which
-  the child Graph then evaluates at its own scope
+- `${...}` — evaluated by the current (parent) Graph.
+- `${"${...}"}` (or `${'${...}'}`) — the inner `${` sits inside a quoted string literal, so the parent parses the whole thing as **one** expression: it evaluates the CEL string literal `"${...}"` to produce the literal text `${...}`, which the child Graph then evaluates at its own scope. This is the two-level form.
+- Three levels nest the same way, one quoted layer per level: `${"${'${...}'}"}`. Each layer's `${` is guarded by the quote that opens the literal it lives in; the parent peels the outermost quoted layer, the child peels the next, and so on.
+
+Because the guard is purely "a nested `${` must be preceded by a quote," every additional level of deferral is exactly one more layer of string quoting. A bare `${outer(${inner})}` (no quotes around the inner `${`) does not parse.
 
 ```yaml
 # Parent Graph (L0) evaluates this — bakes the RGD name into the child spec:
@@ -448,7 +492,7 @@ scoping — e.g. short-lived/bound tokens and caller-credential propagation — 
 | KREP-006 (Propagation Control)  | Planned / Not yet implemented: `propagateWhen` gating and lifecycle signals (`.ready()`, `.updated()`) are deferred to KREP-006 and not yet implemented in the engine. |
 | KREP-008 (includeWhen)          | Graph implements `includeWhen` as a first-class modifier across `template`, `ref`, `def`, and `patch` nodes. Dependency inference works naturally.                      |
 | KREP-011 (Variables)            | `def:` is Graph's implementation. Same semantics.                                                                                                                        |
-| KREP-013 (Graph Revisions)      | Applies unchanged. Each nested Graph gets independent revisions.                                                                                                         |
+| KREP-013 (Graph Revisions)      | Applies to RGD only. The RGD controller issues `GraphRevision` objects; **standalone/nested Graphs have no persisted revision history** — only an in-memory compiled-program cache (see Nested Graphs). Independent per-nested-Graph revisions are a not-yet-built aspiration. |
 | KREP-014 (Resource Lifecycles)  | Graph's node types implicitly define lifecycle: `template:` = delete-on-prune, `patch:` = release-fields-on-prune. Per-node lifecycle policies are a natural follow-on.  |
 | KREP-018 (Partial Dependencies) | All CEL references (including `?.`) infer hard dependencies by default. Soft dependencies are declared explicitly via `WithSoftDependencies` (e.g. for status writeback). |
 | KREP-019 (Deferred Fields)      | Conditional field omission via `omit()` is available when gated by `CELOmitFunction`; references in expressions still establish hard dependency edges.                  |

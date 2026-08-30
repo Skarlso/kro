@@ -198,6 +198,7 @@ func (r *ResourceGraphDefinitionReconciler) setupMicroController(
 			HasAuthorConditions:    len(processedRGD.Instance.Conditions) > 0,
 			MaxCollectionSize:      r.cfg.RGDConfig.MaxCollectionSize,
 			ApplyConcurrency:       r.cfg.ApplyConcurrency,
+			CELCostLimit:           r.cfg.CELCostLimit,
 		},
 		gvr,
 		r.revisionsRegistry.ResolverFor(rgd.Name),

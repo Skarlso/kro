@@ -1119,10 +1119,16 @@ func TestReconcileViaGraphEngine_HardErrorsAndInventory(t *testing.T) {
 
 		watcher := &fakeInstanceWatcher{}
 		err := c.reconcileViaGraphEngine(context.Background(), inst, watcher)
-		require.NoError(t, err)
+		// FINDING 663: a prune UID conflict leaves the orphan in place and the
+		// inventory unshrunk, so the reconcile must soft-requeue to retry rather
+		// than return clean success (which would strand the conflict until an
+		// unrelated event). It is a requeue error, not a hard error.
+		require.Error(t, err)
+		assert.True(t, requeue.IsRequeueError(err), "a prune UID conflict must soft-requeue, got %v", err)
 
 		stored := getStoredParentObject(t, raw)
-		// Superset inventory preserved
+		// Superset inventory preserved (the orphan's GroupKind is retained so a
+		// later cycle can retry the prune).
 		assert.Contains(t, stored.GetAnnotations()[applyset.ApplySetGKsAnnotation], "Deployment.apps")
 	})
 
@@ -1778,7 +1784,7 @@ func TestReconcileViaGraphEngine_PatchContributions(t *testing.T) {
 		inst.SetAnnotations(anns)
 
 		fakeRuntimeCl := &errorClient{
-			Client:   newFakeRuntimeClient(t),
+			Client:   newFakeRuntimeClient(t, newConfigMapObject("target-cm", "default")),
 			patchErr: errors.New("release error"),
 		}
 		raw := newControllerTestDynamicClient(t, inst.DeepCopy())
@@ -1796,7 +1802,7 @@ func TestReconcileViaGraphEngine_PatchContributions(t *testing.T) {
 		assert.Len(t, storedContribs, 1, "unreleased patch contribution must be retained in ledger")
 	})
 
-	t.Run("Duplicate applied identities yield hardErr, ResourcesNotReady, and degraded Error state", func(t *testing.T) {
+	t.Run("Duplicate rendered identities are rejected pre-write with hardErr, ResourcesNotReady, degraded Error state", func(t *testing.T) {
 		inst := newInstanceObject("demo", "default")
 		raw := newControllerTestDynamicClient(t, inst.DeepCopy())
 
@@ -1829,13 +1835,18 @@ func TestReconcileViaGraphEngine_PatchContributions(t *testing.T) {
 		watcher := &fakeInstanceWatcher{}
 		err := c.reconcileViaGraphEngine(context.Background(), inst, watcher)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "found resources with conflicts")
+		// The collision is now caught PRE-WRITE by the executor's identity-claim
+		// guard (before cm2's SSA write clobbers cm1), so the error is
+		// ErrDuplicateIdentity rather than the post-apply validateAppliedIdentities
+		// message. (Like any hard apply error it is still delayed-requeued so the
+		// instance retries; the state below reflects the degraded outcome.)
+		assert.Contains(t, err.Error(), "duplicate resource identity across nodes")
 
 		stored := getStoredParentObject(t, raw)
 		cond := conditionByType(t, stored, ResourcesReady)
 		assert.Equal(t, metav1.ConditionFalse, cond.Status)
 		require.NotNil(t, cond.Message)
-		assert.Contains(t, *cond.Message, "duplicate resource in graph")
+		assert.Contains(t, *cond.Message, "resource reconciliation failed")
 
 		status, _, _ := unstructured.NestedMap(stored.Object, "status")
 		require.NotNil(t, status)

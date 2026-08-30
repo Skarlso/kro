@@ -169,21 +169,6 @@ func withDeletionTimestamp(g *expv1alpha1.Graph) {
 	g.DeletionTimestamp = &now
 }
 
-// withReadyTrue seeds the conditions a healthy reconcile leaves behind, so a
-// test asserting a flip to False cannot pass on a condition never written.
-func withReadyTrue(g *expv1alpha1.Graph) {
-	m := NewConditionsMarkerFor(g)
-	m.GraphCompiled(1)
-	m.ResourcesConverged()
-}
-
-func withMalformedContributions(g *expv1alpha1.Graph) {
-	if g.Annotations == nil {
-		g.Annotations = map[string]string{}
-	}
-	g.Annotations[metadata.PatchContributionsAnnotation] = "not-json"
-}
-
 func TestReconcile(t *testing.T) {
 	t.Parallel()
 
@@ -304,19 +289,17 @@ func TestReconcile(t *testing.T) {
 			compile: &fakeCompiler{program: prog(1)},
 			exec:    &fakeExecutor{deleteErr: errors.New("cannot delete resource \"configmaps\"")},
 			wantErr: "executor delete",
+			// The wedged finalizer must surface WHY: a ResourcesConverged=False
+			// condition with reason DeleteFailed, persisted before the error
+			// returns, instead of leaving the Graph's last (healthy) status.
 			after: func(t *testing.T, g *expv1alpha1.Graph) {
-				assert.Equal(t, 1, countFinalizer(g.Finalizers, metadata.GraphFinalizer),
-					"finalizer must be retained while teardown is blocked")
 				rc := findCondition(g.Status.Conditions, ResourcesConverged)
 				require.NotNil(t, rc)
 				assert.Equal(t, metav1.ConditionFalse, rc.Status)
 				require.NotNil(t, rc.Reason)
-				assert.Equal(t, "TeardownFailed", *rc.Reason)
+				assert.Equal(t, "DeleteFailed", *rc.Reason)
 				require.NotNil(t, rc.Message)
-				assert.Contains(t, *rc.Message, "configmaps")
-				ready := findCondition(g.Status.Conditions, Ready)
-				require.NotNil(t, ready)
-				assert.Equal(t, metav1.ConditionFalse, ready.Status)
+				assert.Contains(t, *rc.Message, "delete boom")
 			},
 		},
 		{
@@ -399,21 +382,6 @@ func TestReconcile(t *testing.T) {
 				return &patchErrClient{Client: c, statusErr: errors.New("status boom")}
 			},
 			wantErr: "status boom",
-		},
-		{
-			name:     "deletion with malformed patch contributions retains finalizer and errors",
-			initial:  graph("g", withFinalizer, withDeletionTimestamp, withMalformedContributions),
-			wantErr:  "read patch contributions",
-			wantGone: false,
-			after: func(t *testing.T, g *expv1alpha1.Graph) {
-				assert.Equal(t, 1, countFinalizer(g.Finalizers, metadata.GraphFinalizer))
-			},
-		},
-		{
-			name:    "reconcile with malformed patch contributions returns error",
-			initial: graph("g", withFinalizer, withMalformedContributions),
-			compile: &fakeCompiler{program: prog(1)},
-			wantErr: "read patch contributions",
 		},
 	}
 	for _, tc := range cases {

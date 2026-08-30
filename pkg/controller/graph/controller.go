@@ -140,12 +140,55 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 	if !g.DeletionTimestamp.IsZero() {
 		logger.V(1).Info("graph is deleting")
-		if err := r.reconcileDeletion(ctx, req, &g); err != nil {
-			// Without this, the graph stays at Ready=True forever.
-			NewConditionsMarkerFor(&g).ResourcesTeardownFailed(err.Error())
-			if statusErr := r.updateStatus(ctx, &g); statusErr != nil {
-				logger.Error(statusErr, "failed to surface teardown failure in status")
+		// Resolve the executor from the identity the Graph ACTUALLY applied
+		// under (persisted in status), not the current spec.serviceAccountName:
+		// editing that field between apply and delete would otherwise run
+		// teardown as an identity that can no longer see the resources, orphaning
+		// children and wedging the finalizer. Fall back to the current spec when
+		// no applied identity was recorded (never applied, or a pre-field kro).
+		ex, err := r.teardownExecutorFor(&g)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("resolve impersonated executor: %w", err)
+		}
+		// Delete operates entirely from the persisted tracking record.
+		// No compile, no resolve — a Graph whose spec was edited
+		// (rename, forEach shrunk, node dropped) still gets every
+		// resource it ever applied removed.
+		if len(g.Status.ManagedResources) > 0 {
+			if err := ex.Delete(ctx, g.Status.ManagedResources); err != nil {
+				// Surface WHY the finalizer is blocked instead of returning with
+				// the last (possibly healthy) status intact: record a
+				// deletion-failure condition, persist it best-effort, then requeue.
+				marker := NewConditionsMarkerFor(&g)
+				marker.ResourcesDeleteFailed(err.Error())
+				if serr := r.updateStatus(ctx, &g); serr != nil {
+					logger.Error(serr, "failed to persist teardown delete-failure condition")
+				}
+				return ctrl.Result{}, fmt.Errorf("executor delete: %w", err)
 			}
+		}
+		// Release every recorded patch contribution so the field managers
+		// relinquish their fields. Targets survive — patches never own them.
+		contribs := fromAPIContributions(g.Status.Contributions)
+		if len(contribs) > 0 {
+			if err := ex.Release(ctx, contribs); err != nil {
+				marker := NewConditionsMarkerFor(&g)
+				marker.ResourcesDeleteFailed(err.Error())
+				if serr := r.updateStatus(ctx, &g); serr != nil {
+					logger.Error(serr, "failed to persist teardown release-failure condition")
+				}
+				return ctrl.Result{}, fmt.Errorf("executor release: %w", err)
+			}
+		}
+		r.Registry.Delete(req.NamespacedName)
+		r.backoff.reset(req.NamespacedName)
+		if r.Router != nil {
+			r.Router.RemoveGraph(req.NamespacedName)
+		}
+		if r.SchemaWatcher != nil {
+			r.SchemaWatcher.RemoveGraph(req.NamespacedName)
+		}
+		if err := r.setUnmanaged(ctx, &g); err != nil {
 			return ctrl.Result{}, err
 		}
 		return ctrl.Result{}, nil
@@ -194,6 +237,47 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 // the new watch set (clearing any nodes that were removed in this
 // revision); on error abort, keeping the previously committed set
 // authoritative so drift detection survives transient failures.
+// writeAheadIntent persists the pre-apply intent (managed resources + patch
+// contributions) BEFORE any cluster write, and returns the managed-resource
+// intent for reuse by the caller's failure branches.
+//
+// Teardown runs entirely from g.Status.ManagedResources, so a status write lost
+// between Apply (which creates children / mutates patch targets) and the
+// post-apply persist would orphan those children or leave a contributed field
+// with no release-ledger entry. Persisting the union of previous + intended
+// identities first guarantees teardown a superset even across a crash in that
+// window (mirrors the instance ApplySet union-never-shrinks path). Intent is
+// best-effort and UID-free; keyOf dedups post-apply entries. The contribution
+// intent's FieldManager is derived from the same executor.PatchFieldManager the
+// executor applies under, so a write-ahead entry correlates exactly with the
+// contribution Release later looks for (a stale/ghost entry is a tolerated
+// no-op: Release GETs the target first and treats absent as already-released).
+// Each side only writes when its union grows, so a steady state does not rewrite
+// status every cycle.
+func (r *Reconciler) writeAheadIntent(
+	ctx context.Context,
+	g *expv1alpha1.Graph,
+	rt *krotruntime.Runtime,
+	previous []expv1alpha1.ManagedResource,
+	priorContribs []executor.Contribution,
+) ([]expv1alpha1.ManagedResource, error) {
+	intent := unionManagedResources(previous, intendedManagedResources(rt))
+	if len(intent) > len(previous) {
+		g.Status.ManagedResources = intent
+		if err := r.persistManagedResources(ctx, g); err != nil {
+			return nil, fmt.Errorf("write-ahead managed-resource intent: %w", err)
+		}
+	}
+
+	intentContribs := UnionContributions(priorContribs, intendedContributions(rt))
+	if len(intentContribs) > len(priorContribs) {
+		if err := r.persistContributions(ctx, g, intentContribs); err != nil {
+			return nil, fmt.Errorf("write-ahead patch-contribution intent: %w", err)
+		}
+	}
+	return intent, nil
+}
+
 func (r *Reconciler) reconcileGraph(ctx context.Context, g *expv1alpha1.Graph) error {
 	marker := NewConditionsMarkerFor(g)
 	key := client.ObjectKeyFromObject(g)
@@ -249,10 +333,7 @@ func (r *Reconciler) reconcileGraph(ctx context.Context, g *expv1alpha1.Graph) e
 	rt := krotruntime.New(prog, g, rtOpts...)
 	watcher := r.watcherFor(key)
 	previous := g.Status.ManagedResources
-	priorContribs, err := ReadContributions(g)
-	if err != nil {
-		return fmt.Errorf("read patch contributions: %w", err)
-	}
+	priorContribs := fromAPIContributions(g.Status.Contributions)
 
 	// Resolve the executor bound to this Graph's impersonated identity. All
 	// resource writes (apply, prune, release) for this Graph go through it so
@@ -263,19 +344,14 @@ func (r *Reconciler) reconcileGraph(ctx context.Context, g *expv1alpha1.Graph) e
 		return fmt.Errorf("resolve impersonated executor: %w", err)
 	}
 
-	// Write-ahead the pre-apply intent BEFORE any cluster write. Teardown runs
-	// entirely from g.Status.ManagedResources, so a status write lost between
-	// Apply (which creates children) and the post-apply persist would orphan
-	// those children permanently. Persist the union of previous + intended
-	// identities so a crash after Apply still leaves teardown a superset to
-	// delete from (mirrors the instance ApplySet union-never-shrinks path).
-	// Intent is best-effort and UID-free; keyOf dedups post-apply entries.
-	intent := unionManagedResources(previous, intendedManagedResources(rt))
-	if len(intent) > len(previous) {
-		g.Status.ManagedResources = intent
-		if err := r.persistManagedResources(ctx, g); err != nil {
-			return fmt.Errorf("write-ahead managed-resource intent: %w", err)
-		}
+	// Write-ahead the pre-apply intent (managed resources + patch contributions)
+	// BEFORE any cluster write, so a crash between Apply and the post-apply
+	// persist still leaves teardown a superset to work from. Returns the
+	// managed-resource intent, reused below when a hard/prune failure must keep
+	// the inventory from shrinking below the pre-apply superset.
+	intent, err := r.writeAheadIntent(ctx, g, rt, previous, priorContribs)
+	if err != nil {
+		return err
 	}
 
 	result, applyErr := ex.Apply(ctx, rt, watcher)
@@ -321,37 +397,49 @@ func (r *Reconciler) reconcileGraph(ctx context.Context, g *expv1alpha1.Graph) e
 	// shrunk, includeWhen flipped, or rename.
 	newSet, pruneCandidates := diffManagedResources(previous, result)
 
-	if applyErr == nil {
-		// Only prune on a fully clean Apply. If we have any soft errors
-		// (Unresolved is non-empty) or hard errors, keep the union of
-		// previous and applied to protect resources we couldn't observe
-		// this cycle.
+	// Prune retired resources whenever the executor walk was not interrupted by
+	// a HARD error. diffManagedResources already keeps any entry whose owning
+	// node is Unresolved this cycle (in newSet), so pruneCandidates are exactly
+	// the resources whose owning node is genuinely gone or resolved — safe to
+	// delete even while OTHER nodes are still soft not-ready. Previously all
+	// pruning was gated on a fully clean apply, so a single never-ready node
+	// vetoed pruning of every unrelated retired node (this is the Graph-path twin
+	// of the instance ownedUnresolved/pruneGate narrowing).
+	hardErr := applyErr != nil && !errors.Is(applyErr, executor.ErrNotReady)
+	if !hardErr {
 		if len(pruneCandidates) > 0 {
 			if err := ex.Delete(ctx, pruneCandidates); err != nil {
-				// Prune failure isn't catastrophic — next reconcile
-				// retries with the same diff. But we shouldn't shrink
-				// status to newSet if some prune candidates are still
-				// in the cluster, so keep the union.
-				//
-				// Apply itself was clean, so ResourcesConverged was set
-				// True above — but a resource the spec no longer wants is
-				// still in the cluster (e.g. the impersonated SA lacks
-				// delete RBAC), so the Graph has NOT converged. Flip the
-				// condition to surface the failure in status instead of
-				// reporting Ready=True with the error only in the log.
+				// A retired resource could not be deleted (e.g. the impersonated
+				// SA lacks delete RBAC). The Graph has NOT converged; surface it
+				// and keep the union so teardown still sees the un-deleted entry.
+				// (On a soft not-ready cycle this overrides the not-ready marker
+				// set above — an un-prunable orphan is the more actionable signal.)
 				log.FromContext(ctx).Error(err, "prune failed; keeping union in status")
 				marker.ResourcesPruneFailed(err.Error())
-				g.Status.ManagedResources = unionManagedResources(previous, result.Applied)
+				g.Status.ManagedResources = unionManagedResources(
+					unionManagedResources(previous, result.Applied), intent)
 				return fmt.Errorf("prune: %w", err)
 			}
 		}
-		g.Status.ManagedResources = newSet
+		if applyErr == nil {
+			// Fully clean: status is exactly the applied set.
+			g.Status.ManagedResources = newSet
+		} else {
+			// Soft not-ready: the safe prune candidates were just deleted, so
+			// they are correctly absent now. Keep applied + still-unresolved-kept
+			// entries (newSet) and fold in THIS cycle's write-ahead intent — NOT
+			// the previous-based union, which would re-introduce the just-pruned
+			// entries — so a crash after Apply still leaves teardown a superset.
+			// A removed-from-spec or includeWhen-false node is absent from rt's
+			// intent, so it is not re-introduced.
+			g.Status.ManagedResources = unionManagedResources(newSet, intendedManagedResources(rt))
+		}
 	} else {
-		// Soft or hard failure — keep the union so a future reconcile can still
-		// prune or restore. Fold intent back in so the terminal updateStatus
-		// cannot shrink the server inventory below the pre-apply superset and
-		// re-open the orphan window; UID-free intent dedups against Applied via
-		// keyOf.
+		// Hard failure — the walk's node outcomes are uncertain, so keep the full
+		// union so a future reconcile can still prune or restore. Fold intent back
+		// in so the terminal updateStatus cannot shrink the server inventory below
+		// the pre-apply superset and re-open the orphan window; UID-free intent
+		// dedups against Applied via keyOf.
 		g.Status.ManagedResources = unionManagedResources(
 			unionManagedResources(previous, result.Applied), intent)
 	}
@@ -386,6 +474,13 @@ func (r *Reconciler) reconcileGraph(ctx context.Context, g *expv1alpha1.Graph) e
 	// next reconcile.
 	if released := DiffContributions(priorContribs, result.Contributions); len(released) > 0 {
 		if err := ex.Release(ctx, released); err != nil {
+			// Apply was clean, so ResourcesConverged was set True above — but a
+			// retired patch node's contribution is still on its target with no
+			// release inventory, so the Graph has NOT converged. Flip the
+			// condition to surface the failure in status instead of reporting
+			// Ready=True with the error only in the log (symmetric with the
+			// prune-failure branch).
+			marker.ResourcesReleaseFailed(err.Error())
 			if perr := r.persistContributions(ctx, g, UnionContributions(priorContribs, result.Contributions)); perr != nil {
 				return errors.Join(fmt.Errorf("release contributions: %w", err), perr)
 			}
@@ -398,51 +493,38 @@ func (r *Reconciler) reconcileGraph(ctx context.Context, g *expv1alpha1.Graph) e
 	return nil
 }
 
-// persistContributions writes the patch-contribution inventory onto the
-// Graph as an annotation, patching only when the value changed. An empty
-// inventory drops the annotation.
+// persistContributions writes the patch-contribution release inventory onto
+// the Graph's STATUS subresource, patching only when it changed. Mirrors
+// persistManagedResources: it flushes ONLY g.Status.Contributions (retry on
+// conflict), never gates on Generation, and keeps the in-memory Graph in sync
+// with what was persisted. Persisting on status (not a metadata annotation)
+// makes the inventory RBAC-separable — a principal with only spec/metadata
+// edit rights cannot forge it.
 func (r *Reconciler) persistContributions(
 	ctx context.Context,
 	g *expv1alpha1.Graph,
 	contribs []executor.Contribution,
 ) error {
-	value, err := MarshalContributions(contribs)
-	if err != nil {
-		return fmt.Errorf("marshal contributions: %w", err)
-	}
-	if g.GetAnnotations()[metadata.PatchContributionsAnnotation] == value {
+	desired := toAPIContributions(contribs)
+	if equality.Semantic.DeepEqual(g.Status.Contributions, desired) {
 		return nil
 	}
 	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		current := &expv1alpha1.Graph{}
 		if err := r.Client.Get(ctx, client.ObjectKeyFromObject(g), current); err != nil {
-			return err
+			return fmt.Errorf("refetch graph: %w", err)
 		}
-		if current.GetAnnotations()[metadata.PatchContributionsAnnotation] == value {
+		if equality.Semantic.DeepEqual(current.Status.Contributions, desired) {
+			// Keep the in-memory Graph consistent with the server.
+			g.Status.Contributions = desired
 			return nil
 		}
 		dc := current.DeepCopy()
-		anns := dc.GetAnnotations()
-		if anns == nil {
-			anns = make(map[string]string, 1)
-		}
-		if value == "" {
-			delete(anns, metadata.PatchContributionsAnnotation)
-		} else {
-			anns[metadata.PatchContributionsAnnotation] = value
-		}
-		dc.SetAnnotations(anns)
-		if err := r.Client.Patch(ctx, dc, client.MergeFrom(current)); err != nil {
+		dc.Status.Contributions = desired
+		if err := r.Client.Status().Patch(ctx, dc, client.MergeFrom(current)); err != nil {
 			return err
 		}
-		if g.Annotations == nil {
-			g.Annotations = make(map[string]string, 1)
-		}
-		if value == "" {
-			delete(g.Annotations, metadata.PatchContributionsAnnotation)
-		} else {
-			g.Annotations[metadata.PatchContributionsAnnotation] = value
-		}
+		g.Status.Contributions = desired
 		return nil
 	})
 }
@@ -826,9 +908,23 @@ func (m *ConditionsMarker) ResourcesPruneFailed(msg string) {
 	m.cs.SetFalse(ResourcesConverged, "PruneFailed", msg)
 }
 
-// ResourcesTeardownFailed marks ResourcesConverged=False/"TeardownFailed" when
-// a deleting Graph could not remove a tracked resource, typically because the
-// pinned ServiceAccount lacks delete RBAC.
-func (m *ConditionsMarker) ResourcesTeardownFailed(msg string) {
-	m.cs.SetFalse(ResourcesConverged, "TeardownFailed", msg)
+// ResourcesReleaseFailed marks ResourcesConverged=False with reason
+// "ReleaseFailed" when the apply was clean but a retired patch node's
+// contribution could not be released from its target (e.g. the impersonated
+// ServiceAccount lacks patch RBAC, or the target's CRD was removed). The
+// contributed field lingers on the target with no release inventory, so the
+// Graph has not converged — surfacing this keeps Ready from reporting True
+// while a stale contributed field remains.
+func (m *ConditionsMarker) ResourcesReleaseFailed(msg string) {
+	m.cs.SetFalse(ResourcesConverged, "ReleaseFailed", msg)
+}
+
+// ResourcesDeleteFailed marks ResourcesConverged=False with reason
+// "DeleteFailed" when teardown (finalizer path) could not delete a managed
+// resource or release a patch contribution — e.g. the persisted applying
+// identity lacks delete/patch RBAC. Without this, a wedged finalizer would
+// keep reporting the Graph's last (possibly healthy) status with no signal as
+// to why deletion is blocked; recording it lets an operator see the cause.
+func (m *ConditionsMarker) ResourcesDeleteFailed(msg string) {
+	m.cs.SetFalse(ResourcesConverged, "DeleteFailed", msg)
 }

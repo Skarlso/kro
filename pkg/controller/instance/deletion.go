@@ -28,6 +28,7 @@ import (
 	"github.com/kubernetes-sigs/kro/api/v1alpha1"
 	controllergraph "github.com/kubernetes-sigs/kro/pkg/controller/graph"
 	"github.com/kubernetes-sigs/kro/pkg/controller/instance/applyset"
+	"github.com/kubernetes-sigs/kro/pkg/graphengine/executor"
 	"github.com/kubernetes-sigs/kro/pkg/metadata"
 )
 
@@ -135,8 +136,29 @@ func (c *Controller) removeFinalizer(dcx *DeletionContext) error {
 		dcx.Mark.ResourcesUnderDeletion("deletion blocked: %v", err)
 		return fmt.Errorf("read patch contributions on delete: %w", err)
 	}
-	if len(contribs) > 0 && c.graphEngineExecutor != nil {
-		if err := c.graphEngineExecutor.Release(dcx.Ctx, contribs); err != nil {
+	// The contribution inventory lives in a client-editable annotation on the
+	// instance (a dynamic RGD-generated CR whose status subresource cannot carry
+	// an internal kro field, unlike the standalone Graph which persists this on
+	// status). A principal with patch rights on the instance could therefore
+	// forge an entry naming an arbitrary field manager (e.g. "kubectl" or another
+	// controller's) on some target, weaponizing kro's privileged finalizer to
+	// strip that manager's fields off the object. Refuse to release any manager
+	// that is not one of kro's own patch field managers: only those are ever
+	// legitimately recorded, so a non-kro manager is a forged entry. (Release is
+	// already non-destructive and GET-first; this closes the cross-manager
+	// escalation the editable annotation would otherwise allow.)
+	releasable := make([]executor.Contribution, 0, len(contribs))
+	for _, ct := range contribs {
+		if executor.IsPatchFieldManager(ct.FieldManager) {
+			releasable = append(releasable, ct)
+			continue
+		}
+		dcx.Log.Info("refusing to release a patch contribution with a non-kro field manager (possible forged inventory entry)",
+			"fieldManager", ct.FieldManager,
+			"target", fmt.Sprintf("%s/%s %s/%s", ct.APIVersion, ct.Kind, ct.Namespace, ct.Name))
+	}
+	if len(releasable) > 0 && c.graphEngineExecutor != nil {
+		if err := c.graphEngineExecutor.Release(dcx.Ctx, releasable); err != nil {
 			dcx.Mark.ResourcesUnderDeletion("deletion blocked: %v", err)
 			return fmt.Errorf("executor release: %w", err)
 		}

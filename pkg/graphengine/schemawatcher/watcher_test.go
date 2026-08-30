@@ -379,10 +379,13 @@ func TestCRDDeleteEvictsHashAndEnqueuesSubscribers(t *testing.T) {
 	assert.ElementsMatch(t, []schema.GroupKind{gk}, si.snapshot())
 }
 
-// TestEventBufferOverflowDropsRatherThanBlocks ensures the watcher
-// doesn't deadlock the informer goroutine when the work queue runs
-// dry. Excess events drop with a log; the channel is the bound.
-func TestEventBufferOverflowDropsRatherThanBlocks(t *testing.T) {
+// TestBurstIsCoalescedNotDropped is the finding #2 regression guard: a
+// burst of N>EventBuffer schema events for a single Graph must NOT be
+// silently dropped. The old non-blocking send discarded any event that
+// didn't fit the bounded channel, leaving a Graph's compiled Program
+// stale forever. The lossless dirty-set + drainer coalesces the burst
+// into (at least) one forwarded event for the affected key.
+func TestBurstIsCoalescedNotDropped(t *testing.T) {
 	sw := New(logr.Discard(), Config{
 		Graphs:      &fakeGraphInvalidator{},
 		Schemas:     &fakeSchemaInvalidator{},
@@ -393,14 +396,57 @@ func TestEventBufferOverflowDropsRatherThanBlocks(t *testing.T) {
 	s.TrackDynamic()
 	s.Done(true)
 
-	// Fire several CRD events without draining; only the first 2 fit.
-	for i := range 10 {
+	// Fire many CRD content changes (>EventBuffer) for the same GK. Each
+	// has a distinct schema hash so none is dedup'd at the hash layer.
+	const n = 50
+	for i := range n {
 		sw.onUpdate(
-			makeCRD("example.com", "Widget", "v0"),
-			makeCRD("example.com", "Widget", "v"+string(rune('a'+i))),
+			makeCRD("example.com", "Widget", "v"+string(rune('a'+(i%26)))),
+			makeCRD("example.com", "Widget", "v"+string(rune('a'+((i+1)%26)))),
 		)
 	}
-	assert.Equal(t, 2, len(sw.events), "buffer should clamp at capacity")
+
+	got := drainEvents(sw, 500*time.Millisecond)
+	require.NotEmpty(t, got, "a burst of N>buffer events must not be silently dropped")
+	for _, k := range got {
+		assert.Equal(t, graphA, k, "only the affected Graph is enqueued")
+	}
+}
+
+// TestManyDistinctKeysAllDrain proves the drainer forwards EVERY distinct
+// affected Graph key even when the count exceeds the channel buffer:
+// keys accumulate in the dirty set and are drained with backpressure
+// rather than dropped.
+func TestManyDistinctKeysAllDrain(t *testing.T) {
+	sw := New(logr.Discard(), Config{
+		Graphs:      &fakeGraphInvalidator{},
+		Schemas:     &fakeSchemaInvalidator{},
+		EventBuffer: 2,
+	})
+	gk := schema.GroupKind{Group: "example.com", Kind: "Widget"}
+	const n = 20
+	want := make(map[client.ObjectKey]struct{}, n)
+	for i := range n {
+		key := client.ObjectKey{Namespace: "ns", Name: "g" + string(rune('a'+i))}
+		want[key] = struct{}{}
+		s := sw.ForGraph(key)
+		s.Track(gk)
+		s.Done(true)
+	}
+
+	// One schema-content change fans out to all n subscribers. With
+	// EventBuffer=2 the old code would have dropped all but 2.
+	sw.onUpdate(
+		makeCRD("example.com", "Widget", "v0"),
+		makeCRD("example.com", "Widget", "v1"),
+	)
+
+	got := drainEvents(sw, 1*time.Second)
+	gotSet := make(map[client.ObjectKey]struct{}, len(got))
+	for _, k := range got {
+		gotSet[k] = struct{}{}
+	}
+	assert.Equal(t, want, gotSet, "every affected Graph must drain, none dropped")
 }
 
 // TestEnqueueAfterCloseIsNoop confirms the shutdown guard: once Start

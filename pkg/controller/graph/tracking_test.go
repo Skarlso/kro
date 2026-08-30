@@ -148,6 +148,22 @@ func TestDiffManagedResources(t *testing.T) {
 				r("n-renamed", "ConfigMap", "old"),
 			},
 		},
+		{
+			name: "version-only change: same Group/Kind/ns/name across served versions dedups, no prune",
+			// A CRD's v1 and v2 are the SAME stored object. A template bumped
+			// from apps/v1 to apps/v2 must NOT prune the old-version entry (which
+			// would delete the just-applied object by its stable UID).
+			previous: []expv1alpha1.ManagedResource{
+				{NodeID: "n", APIVersion: "apps/v1", Kind: "Deployment", Namespace: "ns", Name: "d"},
+			},
+			applied: []expv1alpha1.ManagedResource{
+				{NodeID: "n", APIVersion: "apps/v2", Kind: "Deployment", Namespace: "ns", Name: "d"},
+			},
+			wantNew: []expv1alpha1.ManagedResource{
+				{NodeID: "n", APIVersion: "apps/v2", Kind: "Deployment", Namespace: "ns", Name: "d"},
+			},
+			wantPruneCandSet: nil,
+		},
 	}
 
 	for _, tc := range tests {
@@ -160,6 +176,25 @@ func TestDiffManagedResources(t *testing.T) {
 			assert.ElementsMatch(t, tc.wantPruneCandSet, pruneCandidates, "pruneCandidates")
 		})
 	}
+}
+
+// TestKeyOf_GroupKindIdentity pins that resource identity keys on Group+Kind,
+// not the full apiVersion: two served versions of one CRD (same stored object)
+// must share a key so a version-only change dedups instead of apply-then-prune.
+// The core group (apiVersion without a slash) yields an empty group and must
+// still be stable.
+func TestKeyOf_GroupKindIdentity(t *testing.T) {
+	v1 := expv1alpha1.ManagedResource{APIVersion: "apps/v1", Kind: "Deployment", Namespace: "ns", Name: "d"}
+	v2 := expv1alpha1.ManagedResource{APIVersion: "apps/v2", Kind: "Deployment", Namespace: "ns", Name: "d"}
+	assert.Equal(t, keyOf(v1), keyOf(v2), "two served versions of one object must share an identity key")
+
+	// Different group is a genuinely different identity.
+	other := expv1alpha1.ManagedResource{APIVersion: "extensions/v1", Kind: "Deployment", Namespace: "ns", Name: "d"}
+	assert.NotEqual(t, keyOf(v1), keyOf(other), "different groups are distinct identities")
+
+	// Core-group (no slash) is stable and distinct from a grouped kind.
+	core := expv1alpha1.ManagedResource{APIVersion: "v1", Kind: "ConfigMap", Namespace: "ns", Name: "c"}
+	assert.Equal(t, keyOf(core), keyOf(core))
 }
 
 // TestUnionManagedResources covers the soft/hard-error path: instead of
@@ -364,5 +399,42 @@ func TestUnionContributions(t *testing.T) {
 	t.Run("combines disjoint contributions", func(t *testing.T) {
 		union := UnionContributions([]executor.Contribution{c1}, []executor.Contribution{c2})
 		assert.Equal(t, []executor.Contribution{c1, c2}, union)
+	})
+}
+
+func TestContributionsAPIRoundTrip(t *testing.T) {
+	t.Run("nil and empty are nil-safe", func(t *testing.T) {
+		assert.Nil(t, toAPIContributions(nil))
+		assert.Nil(t, toAPIContributions([]executor.Contribution{}))
+		assert.Nil(t, fromAPIContributions(nil))
+		assert.Nil(t, fromAPIContributions([]expv1alpha1.Contribution{}))
+	})
+
+	t.Run("round-trips every field including subresource", func(t *testing.T) {
+		in := []executor.Contribution{
+			{
+				APIVersion:   "apps/v1",
+				Kind:         "Deployment",
+				Namespace:    "ns",
+				Name:         "dep",
+				Subresource:  "status",
+				FieldManager: "fm1",
+			},
+			{
+				// cluster-scoped, main-resource contribution (no ns/subresource)
+				APIVersion:   "v1",
+				Kind:         "Namespace",
+				Name:         "team",
+				FieldManager: "fm2",
+			},
+		}
+		api := toAPIContributions(in)
+		require.Len(t, api, 2)
+		assert.Equal(t, "status", api[0].Subresource)
+		assert.Equal(t, "apps/v1", api[0].APIVersion)
+		assert.Equal(t, "fm2", api[1].FieldManager)
+		assert.Empty(t, api[1].Namespace)
+
+		assert.Equal(t, in, fromAPIContributions(api), "round-trip must be lossless")
 	})
 }

@@ -20,7 +20,9 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -109,4 +111,79 @@ func TestSimple_CollectionWatch_GraphPathStampsInstanceID(t *testing.T) {
 	itemNoInstance := labels.Set{metadata.NodeIDLabel: "res"}
 	assert.False(t, selA.Matches(itemNoInstance),
 		"the Graph-path watch must require an instance-id, not match node-id alone")
+}
+
+// TestSimple_CollectionWatch_GraphPathStampsInstanceIDOnChildren is the other
+// half of the finding: the standalone-Graph collection watch selects on
+// {node-id, instance-id}, but the applied CHILDREN only carried node-id (the
+// LabelInjector that stamps instance-id runs only on the RGD path). So the
+// watch matched nothing and drift/deletion on those children went unobserved.
+// After the fix stampKROMeta stamps the Graph UID as instance-id when no
+// injector supplied one, so the applied objects match the selector.
+func TestSimple_CollectionWatch_GraphPathStampsInstanceIDOnChildren(t *testing.T) {
+	t.Parallel()
+
+	g := collectionGraphWithUID("graph-a", types.UID("uid-a"))
+	cl := fake.NewClientBuilder().WithScheme(newScheme(t)).Build()
+	w := &recordingWatcher{}
+	_, err := NewSimple(cl).Apply(context.Background(), compileAndBuild(t, g), w)
+	require.NoError(t, err)
+
+	// Find the collection selector watch and each applied child.
+	var sel labels.Selector
+	for i := range w.reqs {
+		if w.reqs[i].Selector != nil {
+			sel = w.reqs[i].Selector
+		}
+	}
+	require.NotNil(t, sel, "a collection selector watch must be registered")
+
+	list := &unstructured.UnstructuredList{}
+	list.SetGroupVersionKind(schema.GroupVersionKind{Version: "v1", Kind: "ConfigMapList"})
+	require.NoError(t, cl.List(context.Background(), list))
+	require.Len(t, list.Items, 2, "both collection items must have been applied")
+	for i := range list.Items {
+		obj := &list.Items[i]
+		assert.Equal(t, "uid-a", obj.GetLabels()[metadata.InstanceIDLabel],
+			"applied child must carry the Graph UID as instance-id so the watch matches it")
+		assert.True(t, sel.Matches(labels.Set(obj.GetLabels())),
+			"the collection watch selector must match the applied child's labels")
+	}
+}
+
+// TestDistinctWatchMappings covers the multi-GVR collection watch fix: a
+// collection rendering items across several GVRs must yield one (gvr, sample)
+// pair per DISTINCT GVR (first-seen order), so the caller registers a drift
+// watch for every rendered type — not just mappings[0]. A static single-GVR
+// collection collapses to one entry.
+func TestDistinctWatchMappings(t *testing.T) {
+	t.Parallel()
+	gvrCM := schema.GroupVersionResource{Version: "v1", Resource: "configmaps"}
+	gvrSecret := schema.GroupVersionResource{Version: "v1", Resource: "secrets"}
+
+	mk := func(kind, name string) *unstructured.Unstructured {
+		u := &unstructured.Unstructured{}
+		u.SetGroupVersionKind(schema.GroupVersionKind{Version: "v1", Kind: kind})
+		u.SetName(name)
+		return u
+	}
+
+	t.Run("single GVR collapses to one", func(t *testing.T) {
+		desired := []*unstructured.Unstructured{mk("ConfigMap", "a"), mk("ConfigMap", "b")}
+		mappings := []applyMapping{{gvr: gvrCM}, {gvr: gvrCM}}
+		got := distinctWatchMappings(desired, mappings)
+		require.Len(t, got, 1)
+		assert.Equal(t, gvrCM, got[0].gvr)
+		assert.Equal(t, "a", got[0].sample.GetName(), "first-seen sample is representative")
+	})
+
+	t.Run("multiple GVRs yield one entry each, first-seen order", func(t *testing.T) {
+		desired := []*unstructured.Unstructured{mk("ConfigMap", "a"), mk("Secret", "s"), mk("ConfigMap", "b")}
+		mappings := []applyMapping{{gvr: gvrCM}, {gvr: gvrSecret}, {gvr: gvrCM}}
+		got := distinctWatchMappings(desired, mappings)
+		require.Len(t, got, 2, "one watch mapping per distinct GVR")
+		assert.Equal(t, gvrCM, got[0].gvr)
+		assert.Equal(t, gvrSecret, got[1].gvr)
+		assert.Equal(t, "s", got[1].sample.GetName(), "the Secret sample represents the Secret GVR")
+	})
 }

@@ -319,7 +319,7 @@ func TestCompile(t *testing.T) {
 			wantErr: "at least one node",
 		},
 		{
-			name: "every node has CEL — no input seed",
+			name: "mutual reference is a cycle",
 			graph: generator.NewGraph("g",
 				generator.WithTemplate("a", map[string]any{
 					"apiVersion": "v1", "kind": "Pod",
@@ -332,7 +332,7 @@ func TestCompile(t *testing.T) {
 					"spec":     map[string]any{"containers": []any{map[string]any{"name": "c", "image": "nginx"}}},
 				}),
 			),
-			wantErr: "no CEL expressions",
+			wantErr: "cycle",
 		},
 		{
 			name: "unknown GVK",
@@ -402,6 +402,53 @@ func TestCompile(t *testing.T) {
 			after: func(t *testing.T, prog *Program, _ *expv1alpha1.Graph) {
 				assert.Equal(t, []string{"flag"}, prog.Nodes["guarded"].HardDepIDs())
 				require.Len(t, prog.Nodes["guarded"].IncludeWhen, 1)
+			},
+		},
+		{
+			// Finding 1: a node whose includeWhen references its own id is
+			// unsatisfiable — the node must publish before its own includeWhen
+			// evaluates — and must be rejected at compile time, not silently
+			// dropped from the DAG.
+			name: "includeWhen referencing its own id is rejected",
+			graph: generator.NewGraph("g",
+				generator.WithDef("seed", map[string]any{"k": "v"}),
+				generator.WithTemplate("mine", configMap("mine")),
+				generator.WithIncludeWhen("${mine.metadata.name == 'mine'}"),
+			),
+			wantErr: "references its own id",
+		},
+		{
+			// Finding 4: an optional<bool> condition becomes a runtime error
+			// when empty (optional.none()); reject it at compile time with a
+			// hint to collapse it to a concrete bool.
+			name: "readyWhen returning optional<bool> is rejected",
+			graph: generator.NewGraph("g",
+				generator.WithTemplate("cm", configMap("source")),
+				// optional.of(true) is optional_type(bool) with no collapse.
+				generator.WithReadyWhen("${optional.of(true)}"),
+			),
+			wantErr: "optional<bool>",
+		},
+		{
+			// Finding 4: same rejection for includeWhen.
+			name: "includeWhen returning optional<bool> is rejected",
+			graph: generator.NewGraph("g",
+				generator.WithTemplate("cm", configMap("source")),
+				generator.WithDef("guarded", map[string]any{"k": "v"}),
+				generator.WithIncludeWhen("${optional.of(true)}"),
+			),
+			wantErr: "orValue(false)",
+		},
+		{
+			// Finding 4: the .orValue(false) escape hatch collapses to a
+			// concrete bool and still compiles.
+			name: "readyWhen optional collapsed with orValue is accepted",
+			graph: generator.NewGraph("g",
+				generator.WithTemplate("cm", configMap("source")),
+				generator.WithReadyWhen("${optional.of(true).orValue(false)}"),
+			),
+			after: func(t *testing.T, prog *Program, _ *expv1alpha1.Graph) {
+				require.Len(t, prog.Nodes["cm"].ReadyWhen, 1)
 			},
 		},
 		{
@@ -1104,6 +1151,32 @@ func TestCompile_DynamicRef(t *testing.T) {
 		_, hasSchema := prog.NodeSchemas["instances"]
 		assert.False(t, hasSchema)
 	})
+
+	t.Run("dynamic collection readyWhen may reference each (bound dyn)", func(t *testing.T) {
+		t.Parallel()
+		// Finding 3: a dynamic-GVK collection (selector ref, Collection=true
+		// with a nil element schema) still binds `each` per element at
+		// runtime. A readyWhen referencing `each` must compile — declare it
+		// as dyn rather than leaving it undeclared.
+		g := generator.NewGraph("g",
+			generator.WithNamespace("default"),
+			generator.WithDef("crd", map[string]any{"kind": "Widget"}),
+			generator.WithRef("instances", &expv1alpha1.ExternalRef{
+				APIVersion: "example.com/v1",
+				Kind:       "${crd.kind}",
+				Metadata: expv1alpha1.ExternalRefMetadata{
+					Selector: &metav1.LabelSelector{},
+				},
+			}),
+			generator.WithReadyWhen("${each.status.ready}"),
+		)
+		prog, err := newTestCompiler(t).Compile(g)
+		require.NoError(t, err)
+		n := prog.Nodes["instances"]
+		require.NotNil(t, n)
+		assert.True(t, n.IsCollection())
+		require.Len(t, n.ReadyWhen, 1)
+	})
 }
 
 func TestCompile_WithSoftDependencies(t *testing.T) {
@@ -1122,6 +1195,28 @@ func TestCompile_WithSoftDependencies(t *testing.T) {
 	assert.Empty(t, cm.HardDepIDs(), "node with WithSoftDependencies must have no hard deps")
 	assert.Equal(t, []string{"later"}, cm.SoftDepIDs(), "dependencies reclassified as soft")
 	assert.Empty(t, prog.DAG.Vertices["cm"].DependsOn, "soft dependencies do not add DAG edges")
+}
+
+// TestCompile_WithSelfWatchExempt verifies the flag that suppresses drift-watch
+// registration for a node's target is threaded onto the compiled node. Used for
+// the RGD adapter's author-status writeback patch node, which targets the
+// reconciled instance's own status subresource (self-watch would loop).
+func TestCompile_WithSelfWatchExempt(t *testing.T) {
+	t.Parallel()
+	g := generator.NewGraph("g",
+		generator.WithTemplate("cm", map[string]any{
+			"apiVersion": "v1", "kind": "ConfigMap",
+			"metadata": map[string]any{"name": "cfg"},
+		}),
+		generator.WithPatch("p", "v1", "ConfigMap", "cfg", map[string]any{
+			"data": map[string]any{"touched": "yes"},
+		}),
+	)
+	prog, err := newTestCompiler(t).CompileWithOptions(g, WithSelfWatchExempt("p"))
+	require.NoError(t, err)
+	require.NotNil(t, prog.Nodes["p"])
+	assert.True(t, prog.Nodes["p"].SelfWatchExempt, "WithSelfWatchExempt must set SelfWatchExempt on the node")
+	assert.False(t, prog.Nodes["cm"].SelfWatchExempt, "other nodes must not be exempted")
 }
 
 func TestCompile_WithCostLimit(t *testing.T) {

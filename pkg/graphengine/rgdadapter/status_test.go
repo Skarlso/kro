@@ -68,7 +68,7 @@ func buildRGDWithStatus(statusFields map[string]any) *v1alpha1.ResourceGraphDefi
 
 // compileAndSeedRuntime translates the RGD to a Graph, compiles it, seeds the
 // schema def node, and publishes the supplied resource values into scope.
-// Returns a runtime ready for ProjectInstanceStatus.
+// Returns a runtime ready for status/condition projection.
 func compileAndSeedRuntime(
 	t *testing.T,
 	rgd *v1alpha1.ResourceGraphDefinition,
@@ -105,129 +105,6 @@ func compileAndSeedRuntime(
 	return rt
 }
 
-// TestProjectInstanceStatus_ResourceField verifies that a status field
-// referencing a resource node (${cm1.metadata.name}) resolves to the
-// node's value that was published into scope.
-func TestProjectInstanceStatus_ResourceField(t *testing.T) {
-	rgd := buildRGDWithStatus(map[string]any{
-		"readyName": "${cm1.metadata.name}",
-	})
-
-	instance := &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": "example.com/v1alpha1",
-		"kind":       "StatusTest",
-		"metadata":   map[string]any{"name": "demo", "namespace": "default"},
-		"spec":       map[string]any{"name": "myapp"},
-	}}
-
-	// Simulate the executor having applied cm1 and published its observed value.
-	cm1Observed := map[string]any{
-		"apiVersion": "v1",
-		"kind":       "ConfigMap",
-		"metadata":   map[string]any{"name": "cm1", "namespace": "default"},
-		"data":       map[string]any{"key": "val"},
-	}
-
-	rt := compileAndSeedRuntime(t, rgd, instance, map[string]map[string]any{
-		"cm1": cm1Observed,
-	})
-
-	status, err := ProjectInstanceStatus(rt, rgd)
-	require.NoError(t, err)
-
-	readyName, ok := status["readyName"]
-	require.True(t, ok, "status map must contain readyName key")
-	assert.Equal(t, "cm1", readyName, "readyName must equal the observed ConfigMap name")
-}
-
-// TestProjectInstanceStatus_SchemaField verifies that a status field
-// referencing the instance spec (${schema.spec.name}) resolves to the
-// corresponding instance spec value.
-func TestProjectInstanceStatus_SchemaField(t *testing.T) {
-	rgd := buildRGDWithStatus(map[string]any{
-		"instanceName": "${schema.spec.name}",
-	})
-
-	instance := &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": "example.com/v1alpha1",
-		"kind":       "StatusTest",
-		"metadata":   map[string]any{"name": "demo", "namespace": "default"},
-		"spec":       map[string]any{"name": "myapp"},
-	}}
-
-	rt := compileAndSeedRuntime(t, rgd, instance, nil)
-
-	status, err := ProjectInstanceStatus(rt, rgd)
-	require.NoError(t, err)
-
-	instanceName, ok := status["instanceName"]
-	require.True(t, ok, "status map must contain instanceName key")
-	assert.Equal(t, "myapp", instanceName, "instanceName must equal instance spec.name")
-}
-
-// TestProjectInstanceStatus_MultiField verifies that multiple status fields
-// are all projected correctly in a single call.
-func TestProjectInstanceStatus_MultiField(t *testing.T) {
-	rgd := buildRGDWithStatus(map[string]any{
-		"readyName":    "${cm1.metadata.name}",
-		"instanceName": "${schema.spec.name}",
-	})
-
-	instance := &unstructured.Unstructured{Object: map[string]any{
-		"apiVersion": "example.com/v1alpha1",
-		"kind":       "StatusTest",
-		"metadata":   map[string]any{"name": "demo", "namespace": "default"},
-		"spec":       map[string]any{"name": "myapp"},
-	}}
-
-	cm1Observed := map[string]any{
-		"apiVersion": "v1",
-		"kind":       "ConfigMap",
-		"metadata":   map[string]any{"name": "cm1", "namespace": "default"},
-	}
-
-	rt := compileAndSeedRuntime(t, rgd, instance, map[string]map[string]any{
-		"cm1": cm1Observed,
-	})
-
-	status, err := ProjectInstanceStatus(rt, rgd)
-	require.NoError(t, err)
-
-	assert.Equal(t, "cm1", status["readyName"])
-	assert.Equal(t, "myapp", status["instanceName"])
-}
-
-// TestProjectInstanceStatus_NoStatus verifies that an RGD without a status
-// block returns an empty map (not an error).
-func TestProjectInstanceStatus_NoStatus(t *testing.T) {
-	rgd := &v1alpha1.ResourceGraphDefinition{
-		ObjectMeta: metav1.ObjectMeta{Name: "nostatustest"},
-		Spec: v1alpha1.ResourceGraphDefinitionSpec{
-			Resources: []*v1alpha1.Resource{
-				{
-					ID: "cm1",
-					Template: rawResource(map[string]any{
-						"apiVersion": "v1",
-						"kind":       "ConfigMap",
-						"metadata":   map[string]any{"name": "cm1", "namespace": "default"},
-					}),
-				},
-			},
-		},
-	}
-
-	instance := &unstructured.Unstructured{Object: map[string]any{
-		"metadata": map[string]any{"name": "x", "namespace": "default"},
-		"spec":     map[string]any{},
-	}}
-
-	rt := compileAndSeedRuntime(t, rgd, instance, nil)
-
-	status, err := ProjectInstanceStatus(rt, rgd)
-	require.NoError(t, err)
-	assert.Empty(t, status, "no status block → empty map")
-}
-
 // TestProjectInstanceConditions_Basic verifies that a status.conditions block
 // with a single runtime.newCondition(…) expression is evaluated and returned
 // as a []library.Condition in declaration order.
@@ -248,7 +125,7 @@ func TestProjectInstanceConditions_Basic(t *testing.T) {
 
 	rt := compileAndSeedRuntime(t, rgd, instance, nil)
 
-	conditions, incomplete, err := ProjectInstanceConditions(rt, rgd, nil)
+	conditions, incomplete, err := ProjectInstanceConditions(rt, rgd, nil, 0)
 	require.NoError(t, err)
 	assert.False(t, incomplete)
 	require.Len(t, conditions, 1)
@@ -280,7 +157,7 @@ func TestProjectInstanceConditions_BuiltinReference(t *testing.T) {
 	rt := compileAndSeedRuntime(t, rgd, instance, nil)
 
 	builtins := []v1alpha1.Condition{{Type: "ResourcesReady", Status: "True"}}
-	conditions, incomplete, err := ProjectInstanceConditions(rt, rgd, builtins)
+	conditions, incomplete, err := ProjectInstanceConditions(rt, rgd, builtins, 0)
 	require.NoError(t, err)
 	assert.False(t, incomplete)
 	require.Len(t, conditions, 1)

@@ -24,6 +24,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apiserver/pkg/cel/openapi/resolver"
 	"k8s.io/kube-openapi/pkg/validation/spec"
+
+	"github.com/kubernetes-sigs/kro/pkg/metrics"
 )
 
 // CachedSchemaResolver wraps an underlying schema resolver with a
@@ -64,7 +66,13 @@ func NewCachedSchemaResolverWithTTL(delegate resolver.SchemaResolver, maxSize in
 	if maxSize <= 0 {
 		return nil, fmt.Errorf("must provide a positive size")
 	}
-	cache := expirable.NewLRU[schema.GroupVersionKind, *spec.Schema](maxSize, nil, ttl)
+	// onEvict fires for both capacity-pressure evictions and TTL expirations,
+	// so LRU/TTL-driven drops are counted alongside the explicit removals in
+	// InvalidateGroupKind/Clear.
+	onEvict := func(_ schema.GroupVersionKind, _ *spec.Schema) {
+		metrics.SchemaResolverCacheEvictionsTotal.Inc()
+	}
+	cache := expirable.NewLRU[schema.GroupVersionKind, *spec.Schema](maxSize, onEvict, ttl)
 	return &CachedSchemaResolver{
 		delegate: delegate,
 		cache:    cache,
@@ -86,15 +94,38 @@ func (c *CachedSchemaResolver) Clear() {
 // the supplied value. The schema watcher calls this on CRD content
 // changes so subsequent ResolveSchema calls re-fetch the new shape.
 // Idempotent: calling for an unknown GK is a no-op.
+//
+// NOTE on epoch-map growth (finding #6): the epoch is bumped
+// unconditionally, which is REQUIRED for correctness — an in-flight
+// ResolveSchema leader for a not-yet-cached GK is scoped to the pre-bump
+// epoch, and only bumping fences it from repopulating a stale schema after
+// this invalidation (see TestCachedSchemaResolver_InFlightSingleflightRace).
+// Because singleflight does not expose whether such a leader exists, we
+// cannot safely skip the bump for an "uncached" GK, nor delete an entry
+// afterward (resetting the counter toward 0 lets a stale leader holding the
+// old epoch re-match under the write-lock re-check — the exact TOCTOU the
+// epoch guard prevents). A per-GK uint64 counter is O(1) memory; growth is
+// bounded by the number of DISTINCT GroupKinds the watcher ever invalidates,
+// which is itself bounded by the CRDs installed in the cluster. Deleting
+// entries safely would require tracking in-flight singleflight leaders per
+// GK, which is a larger design change deferred as a separate decision.
 func (c *CachedSchemaResolver) InvalidateGroupKind(gk schema.GroupKind) {
 	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	c.epochs[gk]++
+	removed := 0
 	for _, k := range c.cache.Keys() {
-		if k.GroupKind() == gk {
-			c.cache.Remove(k)
+		if k.GroupKind() != gk {
+			continue
+		}
+		if c.cache.Remove(k) {
+			removed++
 		}
 	}
-	c.mu.Unlock()
+	if removed > 0 {
+		metrics.SchemaResolverCacheSize.Set(float64(c.cache.Len()))
+	}
 }
 
 // ResolveSchema returns the schema for gvk, hitting the cache when
@@ -102,8 +133,10 @@ func (c *CachedSchemaResolver) InvalidateGroupKind(gk schema.GroupKind) {
 // delegate call via singleflight.
 func (c *CachedSchemaResolver) ResolveSchema(gvk schema.GroupVersionKind) (*spec.Schema, error) {
 	if sch, ok := c.cache.Get(gvk); ok {
+		metrics.SchemaResolverCacheHitsTotal.Inc()
 		return sch, nil
 	}
+	metrics.SchemaResolverCacheMissesTotal.Inc()
 	gk := gvk.GroupKind()
 	c.mu.RLock()
 	epoch := c.epochs[gk]
@@ -113,22 +146,36 @@ func (c *CachedSchemaResolver) ResolveSchema(gvk schema.GroupVersionKind) (*spec
 	// InvalidateGroupKind do not join an already-in-flight leader computing a
 	// stale, pre-invalidation schema.
 	key := fmt.Sprintf("%s@%d", gvk.String(), epoch)
-	result, err, _ := c.sf.Do(key, func() (any, error) {
+	result, err, shared := c.sf.Do(key, func() (any, error) {
 		if sch, ok := c.cache.Get(gvk); ok {
 			return sch, nil
 		}
+		start := time.Now()
 		sch, err := c.delegate.ResolveSchema(gvk)
+		metrics.SchemaResolverAPICallDuration.Observe(time.Since(start).Seconds())
 		if err != nil {
+			metrics.SchemaResolutionErrorsTotal.Inc()
 			return nil, err
 		}
-		c.mu.RLock()
-		curEpoch := c.epochs[gk]
-		c.mu.RUnlock()
-		if curEpoch == epoch {
+		// Re-check the epoch and insert atomically under the write lock.
+		// InvalidateGroupKind/Clear both bump the epoch AND Remove/Purge under
+		// c.mu.Lock(); holding the same lock across the compare and the Add means
+		// an invalidation cannot slip between them and let this (now stale) fetch
+		// repopulate the cache. A separate RLock+read then unlock-before-Add would
+		// leave exactly that window open.
+		c.mu.Lock()
+		if c.epochs[gk] == epoch {
 			c.cache.Add(gvk, sch)
 		}
+		metrics.SchemaResolverCacheSize.Set(float64(c.cache.Len()))
+		c.mu.Unlock()
 		return sch, nil
 	})
+	if shared {
+		// This caller's request was served by another goroutine's in-flight
+		// delegate call rather than issuing its own.
+		metrics.SchemaResolverSingleflightDeduplicatedTotal.Inc()
+	}
 	if err != nil {
 		return nil, err
 	}

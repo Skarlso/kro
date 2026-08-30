@@ -82,21 +82,46 @@ func TestCompilePatch_DynamicGVK(t *testing.T) {
 	assert.Contains(t, n.HardDepIDs(), "cfg")
 }
 
-// TestCompilePatch_RejectsForEach verifies forEach is not allowed on a patch
-// node — a patch contributes to a single existing target.
-func TestCompilePatch_RejectsForEach(t *testing.T) {
+// TestCompilePatch_ForEachRequiresIteratorInName verifies a forEach patch whose
+// target name does NOT vary by the iterator is rejected: it would patch a single
+// target N times. This is the same iterator→identity coverage rule templates use.
+func TestCompilePatch_ForEachRequiresIteratorInName(t *testing.T) {
 	t.Parallel()
 
 	g := generator.NewGraph("g",
 		generator.WithDef("src", map[string]any{"names": []any{"a", "b"}}),
 		generator.WithPatch("p", "v1", "ConfigMap", "existing", map[string]any{"data": map[string]any{"k": "v"}}),
 	)
-	// Attach a forEach axis to the patch node directly.
+	// Attach a forEach axis to the patch node whose iterator is not used in the name.
 	g.Spec.Nodes[len(g.Spec.Nodes)-1].ForEach = []expv1alpha1.ForEachDimension{{"n": "${src.names}"}}
 
 	_, err := newTestCompiler(t).Compile(g)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "forEach is not supported on patch nodes")
+	assert.Contains(t, err.Error(), "every forEach iterator must appear in metadata.name")
+}
+
+// TestCompilePatch_ForEachFansOut verifies a patch node CAN carry forEach when
+// its target name varies by the iterator: the same contribution is fanned out
+// across every rendered target (e.g. a status writeback to each claimant).
+func TestCompilePatch_ForEachFansOut(t *testing.T) {
+	t.Parallel()
+
+	g := generator.NewGraph("g",
+		generator.WithDef("src", map[string]any{"names": []any{"a", "b"}}),
+		generator.WithPatchManifest("p", map[string]any{
+			"apiVersion": "v1",
+			"kind":       "ConfigMap",
+			"metadata":   map[string]any{"name": "${n}"},
+			"data":       map[string]any{"k": "v"},
+		}),
+	)
+	g.Spec.Nodes[len(g.Spec.Nodes)-1].ForEach = []expv1alpha1.ForEachDimension{{"n": "${src.names}"}}
+
+	prog, err := newTestCompiler(t).Compile(g)
+	require.NoError(t, err)
+	require.NotNil(t, prog.Nodes["p"])
+	assert.True(t, prog.Nodes["p"].IsCollection(), "a forEach patch node must be a collection")
+	assert.Equal(t, NodeKindPatch, prog.Nodes["p"].Kind)
 }
 
 // TestCompilePatch_RequiresName verifies a patch target must be nameable.

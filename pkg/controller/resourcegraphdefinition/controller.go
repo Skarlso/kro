@@ -57,7 +57,12 @@ type Config struct {
 	MaxConcurrentReconciles int
 	MaxGraphRevisions       int
 	ApplyConcurrency        int
-	RGDConfig               graph.Config
+	// CELCostLimit bounds CEL evaluation cost for compiled expressions (0 =
+	// disabled). Threaded into the instance controller's status/condition
+	// projection so author conditions get the same execution bound as graph
+	// expressions rather than silently bypassing it.
+	CELCostLimit uint64
+	RGDConfig    graph.Config
 }
 
 // ResourceGraphDefinitionReconciler reconciles a ResourceGraphDefinition object
